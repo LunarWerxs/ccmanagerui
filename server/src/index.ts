@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import net from 'node:net'
 import { join, relative } from 'node:path'
-import { Hono } from 'hono'
+import { type Context, Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
 import { cors } from 'hono/cors'
 import { streamSSE } from 'hono/streaming'
@@ -31,6 +31,7 @@ import {
 } from './connections'
 import { resolveAccount } from './core/accounts'
 import { detectDesktopInstall } from './core/desktop-install'
+import { setInstanceMeta } from './core/instance-meta'
 import {
   focusInstance,
   listInstances,
@@ -38,7 +39,8 @@ import {
   quitInstance,
   revealInstanceFolder,
 } from './core/instances'
-import { createInstance, removeInstance, renameInstance } from './core/lifecycle'
+import { createInstance, removeInstance } from './core/lifecycle'
+import { INSTANCE_COLOR_KEYS, INSTANCE_ICON_KEYS } from './core/shared'
 import { createInstanceShortcut } from './core/shortcut'
 import { db, getSetting, setSetting } from './db'
 import {
@@ -113,6 +115,16 @@ function coerceItem(row: any): QueueItem {
   return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
 }
 
+/** Parse a request JSON body as an object. Anything non-object — malformed JSON OR a valid but
+ *  non-object literal (`null`, `42`, `"x"`) — degrades to `{}`, so the downstream `body.x` /
+ *  `'x' in body` reads never throw a 500 on a hostile or empty body. This is the leniency every
+ *  mutating handler here relies on; use it instead of `(await c.req.json().catch(() => ({})))`,
+ *  whose `.catch` only covers malformed JSON and still lets a literal `null` crash the reads. */
+async function jsonBody(c: Context): Promise<Record<string, unknown>> {
+  const parsed = await c.req.json().catch(() => null)
+  return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+}
+
 function maskSecret(secret: string): string {
   if (secret.length <= 8) return '••••'
   return `${secret.slice(0, 4)}…${secret.slice(-4)}`
@@ -154,7 +166,7 @@ app.get('/api/update/settings', (c) =>
   c.json({ enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() }),
 )
 app.post('/api/update/settings', async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const body = await jsonBody(c)
   if (typeof body.enabled === 'boolean') setAutoUpdateEnabled(body.enabled)
   if (typeof body.intervalSecs === 'number') setAutoUpdateIntervalSecs(body.intervalSecs)
   return c.json({ enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() })
@@ -165,7 +177,7 @@ app.get('/api/settings', (c) =>
   c.json({ portableMode: portableModeEnabled(), hideTrayIcon: hideTrayIconEnabled() }),
 )
 app.post('/api/settings', async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const body = await jsonBody(c)
   if (typeof body.portableMode === 'boolean') setPortableMode(body.portableMode)
   if (typeof body.hideTrayIcon === 'boolean') setHideTrayIcon(body.hideTrayIcon)
   return c.json({ portableMode: portableModeEnabled(), hideTrayIcon: hideTrayIconEnabled() })
@@ -218,7 +230,7 @@ async function guardSync<T extends object>(
 }
 app.get('/api/settings/sync', (c) => c.json(syncStatus()))
 app.put('/api/settings/sync', async (c) => {
-  const b = (await c.req.json().catch(() => ({}))) as {
+  const b = (await jsonBody(c)) as {
     enabled?: boolean
     forget?: boolean
     appearance?: Record<string, unknown>
@@ -404,7 +416,7 @@ app.patch('/api/queue/:id', async (c) => {
   const id = c.req.param('id')
   const existing = db.query('select * from queue_items where id = ?').get(id)
   if (!existing) return c.json({ error: 'queue item not found' }, 404)
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const body = await jsonBody(c)
   // reject (don't silently coerce) the two fields where a bad value corrupts the item:
   // a cleared schedule dispatches early, a "null" session id reaches the CLI as --resume null
   if (
@@ -532,7 +544,7 @@ app.get('/api/queue/:id/stream', (c) => {
 // --- scheduler --------------------------------------------------------------
 app.get('/api/scheduler', (c) => c.json(schedulerState()))
 app.post('/api/scheduler', async (c) => {
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const body = await jsonBody(c)
   if (typeof body.spacing_seconds === 'number')
     setSetting('spacing_seconds', String(body.spacing_seconds))
   if (typeof body.poll_seconds === 'number') setSetting('poll_seconds', String(body.poll_seconds))
@@ -593,19 +605,36 @@ app.post('/api/instances/:dir/shortcut', async (c) => {
 })
 app.delete('/api/instances/:dir', async (c) => {
   const dir = decodeURIComponent(c.req.param('dir'))
-  const body = await c.req.json().catch(() => ({}) as Record<string, unknown>)
+  const body = await jsonBody(c)
   const confirmName = typeof body.confirmName === 'string' ? body.confirmName : undefined
   return c.json(await removeInstance(dir, { confirmName }))
 })
-// Rename an instance (its folder leaf name IS the instance name). Guarded server-side: must be
-// under the instances root, not the default profile, and not currently running (see lifecycle.ts).
-app.post('/api/instances/:dir/rename', async (c) => {
+// Update an instance's UI metadata: display label (renaming is now a pure relabel — it never
+// touches the on-disk folder, so it works while the instance is running), plus icon + color.
+// A field present in the body is applied (null clears it to the default); an absent field is
+// left unchanged. Values are sanitized/validated in core/instance-meta.ts.
+app.post('/api/instances/:dir/meta', async (c) => {
   const dir = decodeURIComponent(c.req.param('dir'))
-  const body = await c.req.json().catch(() => null)
-  if (!body || typeof body.newName !== 'string' || !body.newName.trim()) {
-    return c.json({ error: 'newName is required' }, 400)
+  const body = await jsonBody(c)
+
+  const patch: Parameters<typeof setInstanceMeta>[1] = {}
+  if ('label' in body) patch.label = typeof body.label === 'string' ? body.label : null
+  if ('icon' in body) {
+    patch.icon =
+      typeof body.icon === 'string' && (INSTANCE_ICON_KEYS as readonly string[]).includes(body.icon)
+        ? (body.icon as (typeof INSTANCE_ICON_KEYS)[number])
+        : null
   }
-  return c.json(await renameInstance(dir, body.newName))
+  if ('color' in body) {
+    patch.color =
+      typeof body.color === 'string' &&
+      (INSTANCE_COLOR_KEYS as readonly string[]).includes(body.color)
+        ? (body.color as (typeof INSTANCE_COLOR_KEYS)[number])
+        : null
+  }
+
+  const meta = setInstanceMeta(dir, patch)
+  return c.json({ ok: true, action: 'meta', dir, message: 'updated', data: meta })
 })
 app.post('/api/instances', async (c) => {
   const body = await c.req.json().catch(() => null)

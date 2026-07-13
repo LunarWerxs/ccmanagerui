@@ -42,17 +42,25 @@ import { useShellWidth } from '@/composables/useShellWidth'
 import type { SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
 import * as api from '@/lib/api'
 import { baseName, shortId, timeAgo } from '@/lib/format'
+import { displayName } from '@/lib/instance-appearance'
 import IconTooltip from '@/shell/IconTooltip.vue'
 
 const { sessions, sessionsLoading, refreshSessions, queue, sessionInstanceFilter } = useData()
 const { t } = useI18n()
 
-// Named instances for the filter dropdown; "default"/"other" are fixed options.
-// A failed fetch just leaves the named entries out.
-const instanceNames = ref<string[]>([])
+// Named instances for the filter dropdown; "default"/"other" are fixed options. The folder
+// name stays the stable filter key (sessions are tagged by it); the user's display label, if
+// any, is what we SHOW — in the dropdown and in each row's instance chip. A failed fetch just
+// leaves the named entries out.
+const namedInstances = ref<{ name: string; label: string }[]>([])
+const instanceLabelFor = (folder: string) =>
+  namedInstances.value.find((i) => i.name === folder)?.label ?? folder
 onMounted(async () => {
   try {
-    instanceNames.value = (await api.listInstances()).map((i) => i.name)
+    namedInstances.value = (await api.listInstances()).map((i) => ({
+      name: i.name,
+      label: displayName(i),
+    }))
   } catch {
     /* dropdown falls back to All / Default / Other */
   }
@@ -355,7 +363,7 @@ function copy(text: string) {
         :class="collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'"
         :style="{ width: `min(${sidebarWidth}px, calc(100vw - 56px))` }"
       >
-        <div class="flex shrink-0 items-center gap-2 border-b border-border p-3 pr-11">
+        <div class="flex shrink-0 items-center gap-2 p-3 pr-11">
           <div class="relative flex-1">
             <Search class="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -427,7 +435,7 @@ function copy(text: string) {
               <DropdownMenuRadioGroup v-model="sessionInstanceFilter">
                 <DropdownMenuRadioItem value="">{{ $t('sessions.instanceAll') }}</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="default">{{ $t('sessions.instanceDefault') }}</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem v-for="n in instanceNames" :key="n" :value="n">{{ n }}</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem v-for="i in namedInstances" :key="i.name" :value="i.name">{{ i.label }}</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem value="other">{{ $t('sessions.instanceOther') }}</DropdownMenuRadioItem>
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
@@ -550,7 +558,7 @@ function copy(text: string) {
                 <span class="inline-flex items-center gap-1"><MessagesSquare class="size-3" />{{ s.message_count }}</span>
                 <span class="inline-flex items-center gap-1"><Clock class="size-3" />{{ timeAgo(s.last_activity_at) }}</span>
                 <span v-if="s.instance" class="inline-flex items-center gap-1">
-                  <Boxes class="size-3" />{{ s.instance === 'default' ? $t('sessions.instanceDefault') : s.instance }}
+                  <Boxes class="size-3" />{{ s.instance === 'default' ? $t('sessions.instanceDefault') : instanceLabelFor(s.instance) }}
                 </span>
               </div>
             </button>

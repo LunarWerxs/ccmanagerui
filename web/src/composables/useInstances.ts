@@ -169,12 +169,20 @@ async function remove(dir: string, confirmName: string): Promise<api.CMActionRes
   }
 }
 
-/** Rename an instance (folder leaf = name). On success the dir changes, so a refresh re-keys
- *  the row; returns the action result so the caller can surface the server's failure message. */
-async function rename(dir: string, newName: string): Promise<api.CMActionResult | undefined> {
+/** Update an instance's UI metadata: display label (a pure relabel that never touches the
+ *  on-disk folder, so it works while the instance is running), icon glyph, and icon color.
+ *  The dir is unchanged, so the row re-keys in place on refresh. */
+async function setAppearance(
+  dir: string,
+  patch: {
+    label?: string | null
+    icon?: api.InstanceIconKey | null
+    color?: api.InstanceColorKey | null
+  },
+): Promise<api.CMActionResult | undefined> {
   setBusy(dir, true)
   try {
-    const result = await guard(api.renameInstance(dir, newName))
+    const result = await guard(api.setInstanceMeta(dir, patch))
     if (result?.ok) await refreshInstances()
     return result
   } finally {
@@ -213,7 +221,7 @@ export function useInstances() {
     createShortcut,
     create,
     remove,
-    rename,
+    setAppearance,
     resolveAccount,
   }
 }

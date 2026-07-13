@@ -14,3 +14,6 @@ PLAN.md
 # tray launcher: the .lnk stores absolute paths - regenerate it per machine with
 # misc/New-TrayShortcut.ps1 (the tray host refreshes it on launch)
 /CCManagerUI.lnk
+
+# Local root rebuild convenience wrapper (delegates to misc/Rebuild.bat)
+/Rebuild.bat

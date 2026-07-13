@@ -6,6 +6,8 @@ import type {
   CMDesktopInstall,
   CMInstance,
   EffortLevel,
+  InstanceColorKey,
+  InstanceIconKey,
   PermissionMode,
   PortableModeSettings,
   PortableWindowResult,
@@ -29,6 +31,8 @@ export type {
   CMDesktopInstall,
   CMInstance,
   EffortLevel,
+  InstanceColorKey,
+  InstanceIconKey,
   PermissionMode,
   PortableModeSettings,
   PortableWindowResult,
@@ -43,6 +47,13 @@ export type {
   TailResult,
   UpdateApplyResult,
   UpdateStatus,
+} from '@ccmanagerui/server/types'
+// Value re-export: the curated icon/color key sets that drive the instance appearance pickers
+// (single source of truth, also validated server-side). See lib/instance-appearance.ts.
+export {
+  INSTANCE_COLOR_KEYS,
+  INSTANCE_ICON_KEYS,
+  INSTANCE_LABEL_MAX,
 } from '@ccmanagerui/server/types'
 
 // Prod bundles are served by the daemon itself, so same-origin relative URLs follow the
@@ -170,12 +181,21 @@ export const deleteInstance = (dir: string, confirmName: string) =>
     method: 'DELETE',
     body: JSON.stringify({ confirmName }),
   })
-/** Rename an instance (folder leaf = name). The result's `dir` holds the NEW normalized dir,
- *  which callers re-key the row on. Guarded server-side (must be stopped + under the root). */
-export const renameInstance = (dir: string, newName: string) =>
-  j<CMActionResult>(`/api/instances/${encodeURIComponent(dir)}/rename`, {
+/** Update an instance's UI metadata: display label (a pure relabel — never touches the folder,
+ *  so it works while the instance runs), icon glyph, and icon color. A field present in the
+ *  patch is applied (null clears it to the default); an omitted field is left unchanged. The
+ *  result's `data` echoes the sanitized `{ label, icon, color }`. */
+export const setInstanceMeta = (
+  dir: string,
+  patch: {
+    label?: string | null
+    icon?: InstanceIconKey | null
+    color?: InstanceColorKey | null
+  },
+) =>
+  j<CMActionResult>(`/api/instances/${encodeURIComponent(dir)}/meta`, {
     method: 'POST',
-    body: JSON.stringify({ newName }),
+    body: JSON.stringify(patch),
   })
 export const createInstance = (name: string) =>
   j<CMActionResult>('/api/instances', { method: 'POST', body: JSON.stringify({ name }) })

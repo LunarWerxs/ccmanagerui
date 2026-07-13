@@ -18,6 +18,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
 import { buildDetachedSpawn } from '../detached-spawn.mjs'
 import { detectDesktopInstall } from './desktop-install'
+import { readInstanceMetaMap } from './instance-meta'
 import { instancesRoot, launchArgs, normalizePath, resolveLaunchBinary } from './paths'
 import { type CMProcessInfo, listClaudeProcesses } from './process'
 import type { CMActionResult, CMInstance } from './shared'
@@ -152,6 +153,9 @@ export async function listInstances(options: ListInstancesOptions = {}): Promise
     }
   }
 
+  // One read of the presentation-metadata file (label/icon/color), keyed by normalized dir.
+  const metaMap = readInstanceMetaMap()
+
   const results: CMInstance[] = []
   for (const meta of known.values()) {
     const running = runningByDir.get(meta.dir)
@@ -166,6 +170,7 @@ export async function listInstances(options: ListInstancesOptions = {}): Promise
 
     const sizeBytes = options.includeSize ? (dirSizeBytes(meta.dir) ?? null) : null
     const memoryBytes = running ? (memoryByDir.get(meta.dir) ?? null) : null
+    const ui = metaMap[meta.dir]
 
     const instance: CMInstance = {
       name: meta.name,
@@ -177,6 +182,9 @@ export async function listInstances(options: ListInstancesOptions = {}): Promise
       memoryBytes,
       account,
       isExternal: meta.isExternal,
+      label: ui?.label ?? null,
+      icon: ui?.icon ?? null,
+      color: ui?.color ?? null,
     }
     results.push(instance)
   }

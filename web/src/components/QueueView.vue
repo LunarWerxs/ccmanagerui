@@ -97,7 +97,7 @@ async function remove(item: QueueItem) {
   <!-- rendered inside the queue drawer: the Sidebar header carries the title, this
        toolbar carries the count, scheduler state, and the new-run shortcut -->
   <div class="flex h-full min-h-0 flex-col">
-    <div class="flex shrink-0 items-center justify-between gap-2 border-b border-border p-3">
+    <div class="flex shrink-0 items-center justify-between gap-2 p-3">
       <div class="flex items-center gap-1.5 text-sm text-muted-foreground">
         {{ $t('queue.itemsCount', { n: queue.length }) }}
         <InfoHint :text="$t('queue.whatIsQueue')" />

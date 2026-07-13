@@ -20,7 +20,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import CreateInstanceDialog from '@/components/CreateInstanceDialog.vue'
 import DeleteInstanceDialog from '@/components/DeleteInstanceDialog.vue'
-import RenameInstanceDialog from '@/components/RenameInstanceDialog.vue'
+import EditInstanceDialog from '@/components/EditInstanceDialog.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -49,6 +49,13 @@ import {
   getDesktopInstall,
 } from '@/lib/api'
 import { formatBytes, formatUptime } from '@/lib/format'
+import {
+  colorValue,
+  displayName,
+  iconComponent,
+  resolveColorKey,
+  resolveIconKey,
+} from '@/lib/instance-appearance'
 import { useTooltipConfig } from '@/lib/tooltip-config'
 import IconTooltip from '@/shell/IconTooltip.vue'
 
@@ -66,7 +73,7 @@ const {
   createShortcut,
   create,
   remove,
-  rename,
+  setAppearance,
   resolveAccount,
 } = useInstances()
 
@@ -77,7 +84,8 @@ const { sortedRows, toggleSort, indicatorFor } = useSortable(
   () => instances.value,
   [
     { key: 'running', accessor: (i: CMInstance) => i.isRunning },
-    { key: 'name', accessor: (i: CMInstance) => i.name },
+    // sort by what the cell actually shows (the display label, falling back to folder name)
+    { key: 'name', accessor: (i: CMInstance) => displayName(i) },
     { key: 'account', accessor: (i: CMInstance) => i.account?.email ?? i.account?.label ?? null },
     { key: 'pid', accessor: (i: CMInstance) => i.pid ?? undefined },
     { key: 'uptime', accessor: (i: CMInstance) => (i.isRunning ? i.startTime : null) },
@@ -94,10 +102,10 @@ const deleteTarget = ref<CMInstance | null>(null)
 const deleting = ref(false)
 const deleteError = ref<string | null>(null)
 
-const renameOpen = ref(false)
-const renameTarget = ref<CMInstance | null>(null)
-const renaming = ref(false)
-const renameError = ref<string | null>(null)
+const editOpen = ref(false)
+const editTarget = ref<CMInstance | null>(null)
+const editing = ref(false)
+const editError = ref<string | null>(null)
 
 function accountLabel(inst: CMInstance): string | null {
   const acc = inst.account
@@ -183,27 +191,31 @@ async function onCreateSubmit(name: string) {
   }
 }
 
-function openRenameDialog(inst: CMInstance) {
-  renameTarget.value = inst
-  renameError.value = null
-  renameOpen.value = true
+function openEditDialog(inst: CMInstance) {
+  editTarget.value = inst
+  editError.value = null
+  editOpen.value = true
 }
-async function onRenameSubmit(newName: string) {
-  const inst = renameTarget.value
+async function onEditSubmit(payload: {
+  label: string | null
+  icon: CMInstance['icon']
+  color: CMInstance['color']
+}) {
+  const inst = editTarget.value
   if (!inst) return
-  renaming.value = true
-  renameError.value = null
+  editing.value = true
+  editError.value = null
   try {
-    const result = await rename(inst.dir, newName)
+    const result = await setAppearance(inst.dir, payload)
     if (result?.ok) {
-      toast.success(t('instances.toastRenamed'))
-      renameOpen.value = false
-      renameTarget.value = null
+      toast.success(t('instances.toastSaved'))
+      editOpen.value = false
+      editTarget.value = null
     } else {
-      renameError.value = result?.message ?? t('instances.toastRenameFailed')
+      editError.value = result?.message ?? t('instances.toastSaveFailed')
     }
   } finally {
-    renaming.value = false
+    editing.value = false
   }
 }
 
@@ -402,11 +414,23 @@ onUnmounted(stopPolling)
         >
           <TableRow v-for="inst in sortedRows" :key="inst.dir">
             <TableCell>
+              <!-- per-instance icon (replaces the old status dot); the chosen glyph + color are
+                   its identity, and a small pulsing badge on the top-right marks the active state -->
               <span
-                class="inline-block size-2 rounded-full"
-                :class="inst.isRunning ? 'bg-success animate-pulse' : 'bg-muted-foreground/40'"
+                class="relative inline-flex size-5 items-center justify-center"
                 :title="inst.isRunning ? $t('instances.running') : $t('instances.stopped')"
-              />
+              >
+                <component
+                  :is="iconComponent(resolveIconKey(inst))"
+                  class="size-[18px]"
+                  :style="{ color: colorValue(resolveColorKey(inst)) }"
+                  :class="inst.isRunning ? '' : 'opacity-40'"
+                />
+                <span
+                  v-if="inst.isRunning"
+                  class="absolute -right-1 -top-1 size-2 rounded-full bg-success ring-2 ring-background animate-pulse"
+                />
+              </span>
             </TableCell>
             <TableCell class="font-medium">
               <div class="flex items-center gap-1.5">
@@ -417,10 +441,10 @@ onUnmounted(stopPolling)
                     :disabled="isBusy(inst)"
                     @click="onFocus(inst)"
                   >
-                    {{ inst.name }}
+                    {{ displayName(inst) }}
                   </button>
                 </IconTooltip>
-                <span v-else class="cursor-default">{{ inst.name }}</span>
+                <span v-else class="cursor-default">{{ displayName(inst) }}</span>
                 <Badge v-if="inst.isExternal" variant="outline">{{ $t('instances.external') }}</Badge>
               </div>
               <div class="mono max-w-[22rem] truncate text-[0.625rem] text-muted-foreground">
@@ -460,8 +484,10 @@ onUnmounted(stopPolling)
                 >
                   <Play /> {{ $t('instances.open') }}
                 </Button>
-                <Button v-else variant="outline" size="sm" :disabled="isBusy(inst)" @click="onQuit(inst)">
-                  <Square /> {{ $t('instances.quit') }}
+                <!-- running: the primary action is Focus (bring the window forward); Quit moves
+                     under the kebab so the common action is one click and the destructive one is deliberate -->
+                <Button v-else variant="outline" size="sm" :disabled="isBusy(inst)" @click="onFocus(inst)">
+                  <AppWindow /> {{ $t('instances.focusShort') }}
                 </Button>
 
                 <DropdownMenu>
@@ -478,12 +504,16 @@ onUnmounted(stopPolling)
                       <EllipsisVertical />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
+                  <!-- w-56: without it the menu inherits the tiny kebab trigger's width and
+                       "Create desktop shortcut" wraps/clips; a fixed width fits it on one line -->
+                  <DropdownMenuContent align="end" class="w-56">
+                    <!-- Quit lives here now (the row's primary button is Focus when running);
+                         disabled unless running, mirroring the old Focus item's guard -->
                     <DropdownMenuItem
                       :disabled="!inst.isRunning || isBusy(inst)"
-                      @click="onFocus(inst)"
+                      @click="onQuit(inst)"
                     >
-                      <AppWindow /> {{ $t('instances.focus') }}
+                      <Square /> {{ $t('instances.quit') }}
                     </DropdownMenuItem>
                     <DropdownMenuItem :disabled="isBusy(inst)" @click="onResolve(inst)">
                       <RefreshCw /> {{ $t('instances.resolve') }}
@@ -495,11 +525,13 @@ onUnmounted(stopPolling)
                       <MonitorDown /> {{ $t('instances.createShortcut') }}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
+                    <!-- Edit (name + icon + color) is pure UI metadata, so it stays enabled even
+                         while the instance runs (unlike Delete, which touches the folder) -->
                     <DropdownMenuItem
-                      :disabled="inst.isRunning || isBusy(inst) || inst.isExternal"
-                      @click="openRenameDialog(inst)"
+                      :disabled="isBusy(inst)"
+                      @click="openEditDialog(inst)"
                     >
-                      <Pencil /> {{ $t('instances.rename') }}
+                      <Pencil /> {{ $t('instances.edit') }}
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       variant="destructive"
@@ -530,12 +562,17 @@ onUnmounted(stopPolling)
       :error-message="deleteError"
       @confirm="onDeleteConfirm"
     />
-    <RenameInstanceDialog
-      v-model:open="renameOpen"
-      :current-name="renameTarget?.name ?? null"
-      :submitting="renaming"
-      :error-message="renameError"
-      @submit="onRenameSubmit"
+    <EditInstanceDialog
+      v-model:open="editOpen"
+      :instance-name="editTarget?.name ?? null"
+      :dir="editTarget?.dir ?? null"
+      :current-label="editTarget?.label ?? null"
+      :current-icon="editTarget?.icon ?? null"
+      :current-color="editTarget?.color ?? null"
+      :running="editTarget?.isRunning ?? false"
+      :submitting="editing"
+      :error-message="editError"
+      @submit="onEditSubmit"
     />
   </div>
 </template>

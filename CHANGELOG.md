@@ -6,6 +6,42 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-13
+
+### Added
+
+- **Per-instance icon and color.** Every row in the Instances table now shows a customizable glyph
+  in place of the old green status dot. An "Edit" action (in the row's ⋮ menu) lets you pick an icon
+  from a curated set and a color from a fixed palette, with a live preview; a running instance keeps
+  a small pulsing badge on the icon's top-right corner, and a stopped one dims. Instances you have
+  not customized get a stable, distinct default derived from their folder, so the table reads at a
+  glance.
+
+### Changed
+
+- **Renaming an instance is now instant and works while it is running.** A rename used to move the
+  instance's on-disk profile folder, which Windows will not allow while Claude Desktop holds it open.
+  The name is now a display label kept as UI metadata (`~/.ccmanagerui/instance-meta.json`, never a
+  secret) that overlays the folder name wherever it is shown; the folder keeps its original name as
+  the stable id that sessions are tagged by. The old `POST /api/instances/:dir/rename` folder-rename
+  route was replaced by `POST /api/instances/:dir/meta` (display label, icon, and color in one call).
+- **A running instance's row leads with Focus.** For a running instance the primary button is now
+  "Focus" (bring its window to the front); "Quit" moved into the ⋮ menu, so the common action is one
+  click and the destructive one is deliberate. The ⋮ menu was widened so "Create desktop shortcut"
+  no longer wraps.
+- **Header and panel cleanup.** Removed the redundant "New run" button from the app header (it
+  already lives in the queue drawer), and dropped two divider lines (below the queue drawer's toolbar
+  and below the sessions search box). The sessions list and its instance filter now show each
+  instance's display label.
+
+### Fixed
+
+- **Mutating API routes no longer 500 on an odd request body.** A body that is valid JSON but not an
+  object (a bare `null`, a number, or a string) used to crash the handler with a 500; every mutating
+  route now runs the body through a shared object guard and degrades gracefully. Creating a new
+  instance also starts it with a clean appearance, so reusing a name never resurrects a deleted
+  instance's old label, icon, or color.
+
 ## [0.1.0] - 2026-07-13
 
 ### Added

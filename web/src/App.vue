@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Boxes, ListChecks, MessagesSquare, Plus, Settings2 } from '@lucide/vue'
+import { Boxes, ListChecks, MessagesSquare, Settings2 } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -11,7 +11,6 @@ import SettingsView from '@/components/SettingsView.vue'
 import { Button } from '@/components/ui/button'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { useBuilder } from '@/composables/useBuilder'
 import { useData } from '@/composables/useData'
 import { usePanels } from '@/composables/usePanels'
 import { SHELL_BASE_MAX, SHELL_WIDE_MAX, useShellWidth } from '@/composables/useShellWidth'
@@ -22,7 +21,6 @@ import { usePushPanel } from '@/shell/usePushPanel'
 const { t } = useI18n()
 
 const { queue, startPolling } = useData()
-const { openBuilder } = useBuilder()
 
 type View = 'sessions' | 'instances'
 const view = ref<View>('sessions')
@@ -124,19 +122,8 @@ onMounted(handleConnectRedirect)
       </nav>
 
       <div class="ml-auto flex items-center gap-2">
-        <!-- expanding icon button (DevWebUI TopBar pattern): a bare plus that widens on
-             hover/keyboard-focus to reveal its label -->
-        <Button
-          size="sm"
-          class="group/newrun gap-0 overflow-hidden transition-all"
-          :aria-label="$t('app.newRun')"
-          @click="openBuilder()"
-        >
-          <Plus class="shrink-0" />
-          <span
-            class="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover/newrun:ml-1.5 group-hover/newrun:max-w-[7rem] group-hover/newrun:opacity-100 group-focus-visible/newrun:ml-1.5 group-focus-visible/newrun:max-w-[7rem] group-focus-visible/newrun:opacity-100"
-          >{{ $t('app.newRun') }}</span>
-        </Button>
+        <!-- New run lives inside the queue drawer's toolbar (QueueView) now, so the header
+             carries just the queue toggle + settings. -->
         <!-- queue drawer toggle: stays available on every view. Brand-purple (primary)
              at rest; this is now the ONE queue button, so it carries the accent the
              old in-chat one had; secondary while the drawer is open (pressed state). -->

@@ -61,6 +61,48 @@ export function prettyTier(tier: string | null | undefined): string | null {
 // DTO shapes (from the internal tool's shared/dto.ts) — instance + instance-account only.
 // ----------------------------------------------------------------------------
 
+/** Curated glyph set for the per-instance icon (which replaces the plain status dot in the
+ *  UI). These string keys are the single source of truth; the web app maps each one to a
+ *  Lucide component in web/src/lib/instance-appearance.ts. */
+export const INSTANCE_ICON_KEYS = [
+  'box',
+  'boxes',
+  'terminal',
+  'rocket',
+  'star',
+  'heart',
+  'flame',
+  'zap',
+  'ghost',
+  'cat',
+  'bot',
+  'cpu',
+  'folder',
+  'globe',
+  'flask',
+  'sparkles',
+] as const
+export type InstanceIconKey = (typeof INSTANCE_ICON_KEYS)[number]
+
+/** Curated color palette for the per-instance icon. Keys map to fixed oklch values (chosen to
+ *  read on both light and dark backgrounds) in web/src/lib/instance-appearance.ts. */
+export const INSTANCE_COLOR_KEYS = [
+  'slate',
+  'red',
+  'orange',
+  'amber',
+  'green',
+  'teal',
+  'blue',
+  'indigo',
+  'violet',
+  'pink',
+] as const
+export type InstanceColorKey = (typeof INSTANCE_COLOR_KEYS)[number]
+
+/** Max length of an instance display label (see instance-meta.ts). */
+export const INSTANCE_LABEL_MAX = 60
+
 /** Status of an instance-account resolution attempt. */
 export type CMAccountStatus = 'live' | 'cache' | 'offline' | 'loggedout' | 'unknown'
 
@@ -99,6 +141,14 @@ export interface CMInstance {
   /** True when discovered from a running process whose --user-data-dir isn't under
    *  the instances root. */
   isExternal: boolean
+  /** User display label overriding the folder `name` (null = show `name`). Pure UI metadata
+   *  (instance-meta.json under appDataDir()), so it can be changed while the instance runs —
+   *  unlike the folder, which Claude Desktop holds open. */
+  label: string | null
+  /** Chosen glyph key (see INSTANCE_ICON_KEYS); null = a deterministic default from the dir. */
+  icon: InstanceIconKey | null
+  /** Chosen icon color key (see INSTANCE_COLOR_KEYS); null = a deterministic default. */
+  color: InstanceColorKey | null
 }
 
 /** Result of a mutating action (open/quit/create/delete). */

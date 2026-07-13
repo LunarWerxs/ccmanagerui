@@ -70,6 +70,12 @@ export function accountsCacheFile(): string {
   return path.join(appDataDir(), 'instances-cache.json')
 }
 
+/** Per-instance UI metadata (display label + icon + color), keyed by normalized dir. Pure
+ *  presentation, never a secret; see server/src/core/instance-meta.ts. */
+export function instanceMetaFile(): string {
+  return path.join(appDataDir(), 'instance-meta.json')
+}
+
 export function logFile(): string {
   return path.join(appDataDir(), 'ccmanagerui.log')
 }

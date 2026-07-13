@@ -31,7 +31,14 @@ export type {
   CMActionResult,
   CMDesktopInstall,
   CMInstance,
+  InstanceColorKey,
+  InstanceIconKey,
 } from './core/shared'
+// Value re-exports (the curated icon/color key sets + label cap) so the web app drives its
+// icon/color pickers from the exact same source of truth the server validates against. These
+// are pure literal constants; ./core/shared imports nothing runtime-heavy, so pulling them into
+// the browser bundle is safe.
+export { INSTANCE_COLOR_KEYS, INSTANCE_ICON_KEYS, INSTANCE_LABEL_MAX } from './core/shared'
 /** Portable-window opener result (see ./portable-window.mjs), re-exported here so the web
  * app only ever imports types from this one module, same as every other DTO in this file. */
 export type { PortableWindowResult } from './portable-window.mjs'
