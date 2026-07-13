@@ -32,7 +32,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 const REPO_ROOT = resolve(import.meta.dir, '..') // tests -> repo root (flat layout: server/web live at root)
@@ -116,7 +116,9 @@ describe.skipIf(!win)('tray launcher', () => {
       'Next',
       'WScript.Echo matchName & "|" & matchCount',
     ].join('\r\n')
-    const probePath = join(REPO_ROOT, 'tmp', 'tray-launch-probe.vbs')
+    const tmpDir = join(REPO_ROOT, 'tmp')
+    mkdirSync(tmpDir, { recursive: true }) // tmp/ is gitignored, so absent on a fresh CI checkout
+    const probePath = join(tmpDir, 'tray-launch-probe.vbs')
     writeFileSync(probePath, probe, 'utf8')
     try {
       const out = execFileSync('cscript', ['//NoLogo', probePath], { encoding: 'utf8' }).trim()
