@@ -1,95 +1,57 @@
-# CC Manager UI
+<div align="center">
 
-One daemon, two jobs: it's a **multi-instance Claude Desktop manager** (see every isolated Desktop
-instance on the machine, which Anthropic account each is logged into, open/quit/create/delete them)
-**and** a **Claude Code session scheduler + dispatch queue** (browse local Claude Code sessions,
-tail their transcripts, and queue/dispatch `claude` CLI runs — each with its own prompt, model,
-effort, permission mode, and account).
+<img alt="CC Manager UI — run, queue and orchestrate Claude: many instances, one dashboard" src=".github/og-image.png" width="820" />
 
-It brings a multi-instance management backend together with a mature scheduler / queue /
-dispatch / sessions app on the shared house stack: same `lunarwerx-ui` kit, same Bun + Hono
-daemon shape, same browser + system-tray launcher.
+<p>
+  <a href="#what-you-get">Features</a>
+  &nbsp;·&nbsp; <a href="#quick-start">Quick start</a>
+  &nbsp;·&nbsp; <a href="#mcp-server">MCP</a>
+  &nbsp;·&nbsp; <a href="https://github.com/LunarWerxs/ccmanagerui/releases">Releases</a>
+  &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-## Stack
+<p>
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-c15f3c" />
+  <img alt="Runtime: Bun" src="https://img.shields.io/badge/runtime-Bun-c15f3c" />
+  <img alt="UI: Vue 3" src="https://img.shields.io/badge/UI-Vue%203-c15f3c" />
+  <img alt="Local and private" src="https://img.shields.io/badge/local-%26%20private-c15f3c" />
+</p>
 
-| Layer | Choice |
-|---|---|
-| Frontend | Vue 3 + Vite, **shared `lunarwerx-ui` kit** (shadcn-vue `reka-mira` on Reka UI), Tailwind v4, `@lucide/vue`, TypeScript |
-| Backend | **Bun + Hono**, `bun:sqlite` (queue/dispatch/scheduler/accounts) + JSON under `CONFIG_DIR` (instance identity cache, settings), SSE (`hono/streaming`) for live run output |
-| Dispatch | `Bun.spawn` of the real `claude` CLI (no Agent SDK) |
-| Multi-instance | per-OS instance discovery/launch/quit/create (`server/src/core/*`) — Windows DPAPI / macOS Keychain / Linux libsecret for reading each isolated instance's stored credentials |
-| Theme | kit `useTheme()` — dark-default, `localStorage['lunarwerx-theme']`, no-flash boot |
-| Launcher | Windows browser + system-tray (`misc/`) — Open / Rebuild & Restart / Restart / Quit |
-| Tooling | Biome (vendored kit files excluded from lint) |
+</div>
 
-## Features
+---
 
-- **Instances** — list every isolated Claude Desktop instance on the machine (running state, PID,
-  size, uptime), resolve which Anthropic account each is signed into (email + plan/tier), and
-  open / quit / create / delete instances from one sortable table.
-- **Sessions** — browse local Claude Code sessions (`~/.claude/projects/**/*.jsonl`), tail
-  transcripts live, with "thinking" hidden by default.
-- **Queue + Scheduler** — build a queue of `claude` CLI runs (prompt, model, effort, permission
-  mode, account, new-chat/fork), dispatch on demand or let the scheduler run them with
-  concurrency + spacing controls. Scheduler is **off by default**.
+**CC Manager UI** is a local dashboard for running Claude. See every isolated Claude Desktop instance and which account it's on, browse and live-tail your Claude Code sessions, and build a queue of `claude` runs — each with its own prompt, model, effort, permissions and account — dispatched on demand or on a schedule. One daemon, your browser, a tray icon. Nothing leaves your machine.
+
+## What you get
+
+- 🎛️ &nbsp;**Multi-instance manager** — every isolated Claude Desktop instance on the machine, its account (email + plan), live memory and uptime, in one sortable table. Open / quit / create / delete / rename, and drop a per-instance desktop shortcut.
+- 🧵 &nbsp;**Sessions across every instance** — browse and live-tail your Claude Code transcripts (`~/.claude/projects`), filtered by instance, with "thinking" hidden by default. Open or download the raw `.jsonl`.
+- 💬 &nbsp;**Chat composer** — type at the bottom of a transcript and dispatch straight to that session; queue it, or schedule for later (15 min / 1 h / 4 h / tomorrow). Multi-select to message many sessions at once.
+- ⏱️ &nbsp;**Queue + scheduler** — build a queue of `claude` runs (prompt, model, effort, permission mode, account) and dispatch on demand, or let the scheduler run them with concurrency + spacing controls. Off by default.
+- ♻️ &nbsp;**Runs that survive a restart** — dispatched runs run under a detached supervisor and reattach after a quit or an auto-update, instead of dying mid-flight.
+- 🏠 &nbsp;**Local & private** — one daemon on your machine + your regular browser + a tray icon. No cloud, no account needed to run it.
+
+## Quick start
+
+```sh
+git clone https://github.com/LunarWerxs/ccmanagerui.git
+cd ccmanagerui && bun install
+bun run build && bun run start      # daemon serves the UI + API on http://localhost:7787
+```
+
+Or **desktop**: double-click `CCManagerUI.lnk` in the repo root for a **system-tray icon** (Open / Restart / Quit) that boots the daemon and opens the UI in your browser. The daemon prefers port **7787**, hops if it's busy, and records the real URL in `~/.ccmanagerui/runtime.json`.
+
+**Dev (hot reload):** `bun run dev` — Hono API on `:7787` + Vite web on `:5173` → http://localhost:5173
+
+> **Trying it out?** Set `CCMANAGERUI_FAKE=1` so dispatch uses a harmless stand-in for the `claude` CLI (no quota, no real repos). The scheduler is off by default; queued items only run on the **Run** button or when you enable the scheduler in Settings. Multi-instance actions (open / quit / create / delete) act on **real** Claude Desktop instances — delete is a guarded, confirm-by-name operation.
 
 ## Requirements
 
 - **[Bun](https://bun.sh)** on PATH (the daemon, build, and test runner all use it).
-- Windows for the browser + tray launcher and the multi-instance Windows-credential path (DPAPI via
-  `bun:ffi`); macOS (Keychain) and Linux (libsecret) instance-account resolution are source-accurate
-  but not yet verified on those platforms.
-- The `claude` CLI installed (for real dispatch) and/or Claude Desktop installed (for instance
-  management).
-- **Windows Claude Desktop build matters:** instance management needs the **classic (Squirrel
-  `.exe`) installer** (~217 MB, installs to `%LOCALAPPDATA%\AnthropicClaude`). The newer
-  **MSIX** build (what the claude.ai download page's ~7 MB `ClaudeSetup.exe` bootstrapper
-  installs, under `C:\Program Files\WindowsApps`) can't be launched with an isolated profile.
-  The Instances tab detects an MSIX-only machine and links the classic installer
-  ([latest x64 exe](https://claude.ai/api/desktop/win32/x64/exe/latest/redirect)).
-
-## Run it
-
-```
-bun install
-```
-
-**Desktop (the normal way):** double-click `CCManagerUI.lnk` in the repo root → a **system-tray
-icon** appears (right-click: Open / Rebuild & Restart / Restart / Quit) and the browser opens the
-UI. The daemon serves the built SPA + API on one port (preferred **7787**, hops if busy and records
-the real URL in `~/.ccmanagerui/runtime.json`). First run installs deps / builds the SPA
-automatically if needed.
-
-**Dev (two processes, hot reload):**
-
-```
-bun run dev          # Hono API on :7787 + Vite web on :5173  → http://localhost:5173
-```
-
-**Single process (prod):** `bun run build && bun run start` → the Hono daemon serves `web/dist` + API.
-
-### Safety / fake mode
-
-Dispatch spawns the **real** `claude` CLI (spends quota, acts on real repos). Set
-`CCMANAGERUI_FAKE=1` to exercise the whole dispatch→parse→stream→status pipeline with a harmless
-stand-in (`server/src/fake-claude.ts`). The scheduler is **off by default**; queued items only run
-on the **Run** button or when you enable the scheduler in Settings.
-
-Multi-instance actions (open/quit/create/delete) act on **real** Claude Desktop instances and
-their local data directories — delete is a guarded, confirm-by-name operation.
-
-## Config (env)
-
-| Var | Default | Meaning |
-|---|---|---|
-| `PORT` | `7787` | preferred API/UI port (hops if busy) |
-| `CCMANAGERUI_PORT_FIXED` | unset | `1` = bind PORT exactly, skip the single-instance/port-hop |
-| `CCMANAGERUI_HOME` | `~/.ccmanagerui` | config dir (`runtime.json`, instance-identity cache live here) |
-| `CCMANAGERUI_SHUTDOWN_TOKEN` | unset | if set, `/api/shutdown` requires the matching `x-ccmanagerui-shutdown-token` header (the tray sets it) |
-| `CCMANAGERUI_FAKE` | unset | dispatch uses the harmless fake CLI |
-| `CCMANAGERUI_DB` | `server/data/ccmanagerui.db` | sqlite path |
-
-`/api/health` returns `service: "ccmanagerui"` — load-bearing for the single-instance pointer.
+- **Windows** for the browser + tray launcher and the Windows-credential path (DPAPI via `bun:ffi`); macOS (Keychain) and Linux (libsecret) instance-account resolution are source-accurate but not yet verified there.
+- The `claude` CLI (for real dispatch) and/or Claude Desktop (for instance management).
+- **Windows Claude Desktop build matters:** instance management needs the **classic (Squirrel `.exe`) installer** (~217 MB, into `%LOCALAPPDATA%\AnthropicClaude`). The newer **MSIX** build (the claude.ai `ClaudeSetup.exe` bootstrapper, under `C:\Program Files\WindowsApps`) can't be launched with an isolated profile. The Instances tab detects an MSIX-only machine and links the classic installer ([latest x64 exe](https://claude.ai/api/desktop/win32/x64/exe/latest/redirect)).
 
 ## MCP server
 
@@ -106,7 +68,20 @@ The daemon's REST API is also exposed over MCP stdio (`server/src/mcp.ts`, or `b
 }
 ```
 
-17 tools: sessions (list/get/tail), queue (list/add/update/run/cancel/events), accounts (secrets always masked), scheduler (get/set), instances (list/launch/quit), update check. Mutating tools say "MUTATES:" in their description; there is deliberately no shutdown tool.
+Tools cover sessions (list / get / tail), the queue (list / add / update / run / cancel / events), accounts (secrets always masked), the scheduler (get / set), and instances (list / launch / quit) — plus an update check. Mutating tools say `MUTATES:` in their description; there is deliberately no shutdown tool.
+
+## Config (env)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `PORT` | `7787` | preferred API/UI port (hops if busy) |
+| `CCMANAGERUI_PORT_FIXED` | unset | `1` = bind `PORT` exactly, skip the single-instance/port-hop |
+| `CCMANAGERUI_HOME` | `~/.ccmanagerui` | config dir (`runtime.json`, instance-identity cache) |
+| `CCMANAGERUI_SHUTDOWN_TOKEN` | unset | if set, `/api/shutdown` requires a matching `x-ccmanagerui-shutdown-token` header (the tray sets it) |
+| `CCMANAGERUI_FAKE` | unset | dispatch uses the harmless fake CLI |
+| `CCMANAGERUI_DB` | `server/data/ccmanagerui.db` | sqlite path |
+
+`/api/health` returns `service: "ccmanagerui"` — load-bearing for the single-instance pointer.
 
 ## Auto-update
 
@@ -116,45 +91,37 @@ Opt-in background self-update (off by default; it restarts the daemon):
 POST /api/update/settings   { "enabled": true, "intervalSecs": 21600 }
 ```
 
-`intervalSecs` clamps to [900, 604800]; default 21600 (6h). Each tick checks the remote and, only if the working tree is clean, applies (`git pull --ff-only` + reinstall + rebuild) and relaunches itself on the same port (`CCMANAGERUI_RELAUNCH=1` makes the successor wait for the predecessor to free it). A dirty tree is never touched. `GET /api/update` includes the current state under `autoUpdate`.
+`intervalSecs` clamps to [900, 604800]; default 21600 (6h). Each tick checks the remote and, only if the working tree is clean, applies (`git pull --ff-only` + reinstall + rebuild) and relaunches itself on the same port (`CCMANAGERUI_RELAUNCH=1` makes the successor wait for the predecessor to free it). A dirty tree is never touched.
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| Frontend | Vue 3 + Vite, a shared LunarWerx UI kit (shadcn-vue `reka-mira` on Reka UI), Tailwind v4, `@lucide/vue`, TypeScript |
+| Backend | **Bun + Hono**, `bun:sqlite` (queue / dispatch / scheduler / accounts) + JSON under `CONFIG_DIR`, SSE (`hono/streaming`) for live run output |
+| Dispatch | `Bun.spawn` of the real `claude` CLI (no Agent SDK) |
+| Multi-instance | per-OS instance discovery / launch / quit / create (`server/src/core/*`) — Windows DPAPI / macOS Keychain / Linux libsecret for reading each isolated instance's stored credentials |
+| Launcher | Windows browser + system-tray (`misc/`) |
 
 ## Layout
 
 ```
 server/    Bun + Hono daemon: sqlite, session reader, transcript tail, dispatch, scheduler,
            instance pointer, core/ (multi-instance crypto/paths/process/instances/lifecycle/accounts)
-web/       Vue 3 SPA on the shared kit (Sessions / Queue / Instances views)
+web/       Vue 3 SPA (Sessions / Queue / Instances views)
 tests/     launcher.test.ts (the tray guard, Windows-gated) + server/instance unit tests
 misc/      the Windows launcher toolkit (tray .ps1 / .vbs / .ico / Create-Shortcut / Make-Icon / Rebuild.bat)
 ```
 
-## Shared kit
-
-The UI primitives, tokens, shell (`AppContainer`, `SettingsPanel`/`usePushPanel`), theme, and the
-server libs (`instance-pointer`, `find-free-port`) are **synced** from an internal shared
-LunarWerx UI kit, not hand-written. CC Manager UI is registered there under the `ccmanagerui` sync
-target (build-time only, invisible to users); kit updates are pulled in by the kit's own owner-run
-sync tooling.
-
-Do **not** hand-edit the synced files (`web/src/components/ui/**`, `web/src/shell/**`, the synced
-`web/src/lib/*`, `web/src/styles/kit-*.css`, and `server/src/{instance-pointer,find-free-port}.*`).
-
-> `bun run check` (below) runs `check:kit` against this kit, which needs an internal LunarWerx kit
-> checkout — it's owner-only and is skipped in CI. External contributors should run the individual
-> checks (`lint`, `check:i18n`, `build`, `test`, `typecheck`) instead of the aggregate `check`.
-
 ## Checks
 
-`bun run check` runs Biome + the i18n gate + the kit drift-check:
+`bun run check` runs Biome + the i18n gate + a kit drift-check. The kit check needs an internal LunarWerx kit checkout, so it's **owner-only and skipped in CI** — external contributors should run the individual checks instead:
+
+- `bun run lint` — Biome.
 - `bun run --cwd web check:i18n` — no hardcoded UI strings; every `t()` key resolves (also gates `build`).
-- `bun run check:kit` — `sync.mjs --check` against the kit; fails if a synced file drifted.
 - `bun test` — includes the Windows-gated tray launcher guard and instance/crypto tests.
+- `bun run typecheck` — web (`vue-tsc`) + server (`tsc`).
 
-## Deviations from the sibling apps (deliberate)
+## License
 
-- **Full-width dashboard.** Sessions is a two-pane master/detail monitor, so the main area is
-  full-width rather than wrapped in `AppContainer` (the siblings are single-column list apps). The
-  kit tokens/components/theme/shell-panel are all used; only the width cap is skipped for the grid.
-- **Browser + tray, not a native webview.** Unlike the multi-instance backend's origin app,
-  CC Manager UI keeps its original desktop shell: no frameless window, no embedded webview — just
-  the daemon + your regular browser + a system-tray icon for lifecycle control.
+[MIT](LICENSE).
