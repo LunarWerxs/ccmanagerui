@@ -1,0 +1,4 @@
+/* App entry stylesheet — the two kit imports plus genuinely app-specific rules only.
+   Tokens, dark mode, Inter, and shared utilities all come from the kit. */
+@import "./styles/kit-base.css";
+@import "./styles/kit-accent.css";

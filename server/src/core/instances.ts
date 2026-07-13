@@ -1,0 +1,634 @@
+// server/src/core/instances.ts: instance discovery + open/quit (PLAN.md §2).
+// Adapted verbatim (behavior) from an internal LunarWerx tool's instance discovery module;
+// the import paths were adapted (./shared instead of ../../../shared/index.ts, no .ts
+// extensions to match this repo's convention), and openInstance's no-binary failure message
+// is now MSIX-aware (core/desktop-install.ts) instead of the ported generic one.
+//
+// Depends on:
+//   core/paths.ts    : instancesRoot(), resolveLaunchBinary(), launchArgs(dir), normalizePath()
+//   core/process.ts  : listClaudeProcesses(): CMProcessInfo[] (per-OS main-process enumeration,
+//                       already filtered to exclude Electron `--type=` children and parsed for
+//                       `--user-data-dir`)
+//   core/shared.ts    : CMInstance, CMActionResult DTOs
+//
+// Nothing here throws for expected failure conditions (missing dirs, no processes found, spawn
+// failures, permission errors); every public function returns a status-carrying result instead.
+
+import { existsSync, readdirSync, statSync } from 'node:fs'
+import { basename } from 'node:path'
+import { buildDetachedSpawn } from '../detached-spawn.mjs'
+import { detectDesktopInstall } from './desktop-install'
+import { instancesRoot, launchArgs, normalizePath, resolveLaunchBinary } from './paths'
+import { type CMProcessInfo, listClaudeProcesses } from './process'
+import type { CMActionResult, CMInstance } from './shared'
+
+// ----------------------------------------------------------------------------
+// Discovery
+// ----------------------------------------------------------------------------
+
+/** Metadata for one discovered instance dir, prior to attaching running-state. */
+interface DiscoveredMeta {
+  name: string
+  dir: string // normalized
+  isExternal: boolean
+}
+
+/**
+ * Enumerates the subdirectories of `instancesRoot()`. Best-effort: a missing root
+ * (first run) or a listing error yields an empty array rather than throwing.
+ */
+function listInstanceRootDirs(): DiscoveredMeta[] {
+  const root = instancesRoot()
+  const out: DiscoveredMeta[] = []
+  try {
+    if (!existsSync(root)) return out
+    const entries = readdirSync(root, { withFileTypes: true })
+    for (const entry of entries) {
+      try {
+        if (!entry.isDirectory()) continue
+        const full = normalizePath(`${root}/${entry.name}`)
+        out.push({ name: entry.name, dir: full, isExternal: false })
+      } catch {
+        // Skip anything we can't stat/read (permissions, race with deletion, etc.).
+      }
+    }
+  } catch {
+    // Root unreadable; treat as "no known instances", callers still see running ones.
+  }
+  return out
+}
+
+/** Best-effort recursive byte size of a directory. Returns undefined on any failure. */
+function dirSizeBytes(dir: string): number | undefined {
+  try {
+    if (!existsSync(dir)) return undefined
+    let total = 0
+    const stack: string[] = [dir]
+    while (stack.length) {
+      const current = stack.pop()
+      if (current === undefined) continue
+      let entries: string[]
+      try {
+        entries = readdirSync(current)
+      } catch {
+        continue // locked/permission-denied subdir, skip it and keep summing the rest
+      }
+      for (const name of entries) {
+        const full = `${current}/${name}`
+        try {
+          const st = statSync(full)
+          if (st.isDirectory()) stack.push(full)
+          else if (st.isFile()) total += st.size
+        } catch {
+          // Individual file/dir vanished or is locked; skip, best-effort only.
+        }
+      }
+    }
+    return total
+  } catch {
+    return undefined
+  }
+}
+
+export interface ListInstancesOptions {
+  /** Attach account identity (slow path: decrypt + one network call per instance). */
+  includeAccount?: boolean
+  /** Compute on-disk size per instance (walks the tree, can be slow for large profiles). */
+  includeSize?: boolean
+  /** Resolver used when includeAccount is set. Injected so instances.ts has no hard
+   *  dependency on core/accounts.ts (kept decoupled + easy to unit test). */
+  resolveAccount?: (
+    dir: string,
+  ) => Promise<CMInstance['account'] | null | undefined> | CMInstance['account'] | null | undefined
+}
+
+/**
+ * Union of (a) subdirs of `instancesRoot()` and (b) dirs seen on a running Claude
+ * process's `--user-data-dir`. One `CMInstance` per normalized dir. Dirs only seen
+ * via a running process (i.e. launched from outside the instances root) are still
+ * listed, flagged `isExternal: true`.
+ */
+export async function listInstances(options: ListInstancesOptions = {}): Promise<CMInstance[]> {
+  const known = new Map<string, DiscoveredMeta>()
+  for (const meta of listInstanceRootDirs()) known.set(meta.dir, meta)
+
+  let procs: CMProcessInfo[] = []
+  try {
+    // includeChildren: one scan yields both the main process per dir (for pid/startTime/running)
+    // AND every `--type=` child, so per-instance memory is the summed working set of the whole
+    // Electron tree — not just the (small) main process. Same single CIM/ps call as before.
+    procs = await listClaudeProcesses({ includeChildren: true })
+  } catch {
+    // Process enumeration failed entirely (e.g. wmic/ps unavailable); fall back to
+    // "nothing is running", still surface the known instance dirs.
+    procs = []
+  }
+
+  const runningByDir = new Map<string, CMProcessInfo>()
+  const memoryByDir = new Map<string, number>()
+  const root = normalizePath(instancesRoot())
+  for (const proc of procs) {
+    if (!proc.dir) continue
+    const normDir = normalizePath(proc.dir)
+
+    // Memory: sum every process (main + children) sharing this dir. WorkingSetSize double-counts
+    // shared pages across the tree, same as Task Manager's per-process column — an accepted
+    // approximation of "roughly how much RAM this instance uses".
+    if (typeof proc.memoryBytes === 'number' && Number.isFinite(proc.memoryBytes)) {
+      memoryByDir.set(normDir, (memoryByDir.get(normDir) ?? 0) + proc.memoryBytes)
+    }
+
+    // Running-state representative: the MAIN process only (it carries the pid + startTime we show);
+    // keep the earliest-seen, defensive against duplicate scans.
+    if (proc.isMain && !runningByDir.has(normDir)) runningByDir.set(normDir, proc)
+
+    if (!known.has(normDir)) {
+      const isUnderRoot = normDir.toLowerCase().startsWith(root.toLowerCase())
+      known.set(normDir, {
+        name: basename(normDir),
+        dir: normDir,
+        isExternal: !isUnderRoot,
+      })
+    }
+  }
+
+  const results: CMInstance[] = []
+  for (const meta of known.values()) {
+    const running = runningByDir.get(meta.dir)
+    let account: CMInstance['account'] = null
+    if (options.includeAccount && options.resolveAccount) {
+      try {
+        account = (await options.resolveAccount(meta.dir)) ?? null
+      } catch {
+        account = null
+      }
+    }
+
+    const sizeBytes = options.includeSize ? (dirSizeBytes(meta.dir) ?? null) : null
+    const memoryBytes = running ? (memoryByDir.get(meta.dir) ?? null) : null
+
+    const instance: CMInstance = {
+      name: meta.name,
+      dir: meta.dir,
+      isRunning: Boolean(running),
+      pid: running?.pid ?? null,
+      startTime: running?.startTime ?? null,
+      sizeBytes,
+      memoryBytes,
+      account,
+      isExternal: meta.isExternal,
+    }
+    results.push(instance)
+  }
+
+  results.sort((a, b) => a.name.localeCompare(b.name))
+  return results
+}
+
+// ----------------------------------------------------------------------------
+// Open
+// ----------------------------------------------------------------------------
+
+/** The argv + spawn flag used to launch an instance so it OUTLIVES this daemon. */
+export interface InstanceLaunch {
+  argv: string[]
+  /** Pass `detached: true` to Bun.spawn (POSIX only; creates a new session via setsid). */
+  detached: boolean
+}
+
+/**
+ * Builds the launch argv for an instance binary, per-OS, such that the launched Claude Desktop
+ * is NOT a descendant of this daemon, so quitting CC Manager UI can't take the instance with it.
+ *
+ * WHY this matters: the Windows tray host quits by tree-killing the daemon's whole process tree
+ * (`taskkill /PID <daemon> /T /F`, see lunarwerx-ui/src/tray-host/Tray-Host.ts). A Claude Desktop
+ * launched as a direct child of the daemon (plain `Bun.spawn([binary, ...args]).unref()`) is IN
+ * that tree, so Quit drags the whole instance down with it.
+ *
+ * The Windows `cmd /c start ""` hand-off and the POSIX `detached:true` are the shared kit primitive
+ * (buildDetachedSpawn — see server-lib/detached-spawn.mjs, which documents why `.unref()` /
+ * `detached:true` don't break the Windows tree). The ONE app-specific twist here is darwin: we hand
+ * the launch to LaunchServices via `open` (which locates + launches Claude Desktop itself, never as
+ * our child) instead of spawning the resolved binary — so darwin is handled here and everything else
+ * delegates to the primitive. Pure + exported so the detach contract is locked in by unit tests
+ * (see instances-launch.test.ts).
+ */
+export function buildInstanceLaunch(
+  platform: NodeJS.Platform,
+  binary: string,
+  args: string[],
+): InstanceLaunch {
+  // darwin: `open ...args` hands off to LaunchServices (already detached); the resolved binary is
+  // intentionally dropped — `open` finds and launches the app itself.
+  if (platform === 'darwin') return { argv: ['open', ...args], detached: false }
+  // win32 (`cmd /c start ""` hand-off) + linux (setsid `detached:true`) share the kit primitive.
+  return buildDetachedSpawn(platform, [binary, ...args])
+}
+
+/**
+ * Opens (launches) the given instance dir. If already running, this is a no-op
+ * that returns an "already running" success result (focusing the existing window
+ * is left to the shell layer (out of scope for this app's browser+tray shell).
+ */
+export async function openInstance(dir: string): Promise<CMActionResult> {
+  const normDir = normalizePath(dir)
+
+  try {
+    const procs = await listClaudeProcesses()
+    const running = procs.find((p) => p.dir && normalizePath(p.dir) === normDir)
+    if (running) {
+      return {
+        ok: true,
+        action: 'open',
+        dir: normDir,
+        message: 'already running',
+        data: { pid: running.pid },
+      }
+    }
+  } catch {
+    // Best-effort; if we can't determine running state, still attempt the launch
+    // rather than silently failing here.
+  }
+
+  let binary: string | null = null
+  try {
+    binary = await resolveLaunchBinary()
+  } catch {
+    binary = null
+  }
+
+  if (!binary) {
+    // Say WHY when we can: on Windows the usual culprit is the MSIX build (not launchable
+    // with --user-data-dir, see core/desktop-install.ts), so the failure toast becomes
+    // actionable instead of a dead end.
+    let message = 'No Claude launch binary could be resolved.'
+    try {
+      const install = await detectDesktopInstall()
+      if (install.platform === 'win32') {
+        message = install.msixDetected
+          ? 'Only the MSIX (Windows Apps) build of Claude Desktop is installed; it cannot be launched with an isolated profile. Install the classic Windows installer.'
+          : 'No Claude Desktop installation was found. Install the classic Windows installer.'
+      }
+    } catch {
+      // Detection is best-effort; keep the generic message.
+    }
+    return {
+      ok: false,
+      action: 'open',
+      dir: normDir,
+      message,
+      data: {},
+    }
+  }
+
+  try {
+    const { argv, detached } = buildInstanceLaunch(process.platform, binary, launchArgs(normDir))
+    const proc = Bun.spawn(argv, {
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+      ...(detached ? { detached: true } : {}),
+    })
+    proc.unref()
+    return {
+      ok: true,
+      action: 'open',
+      dir: normDir,
+      message: 'launched',
+      // NOTE: on win32/darwin `proc.pid` is the transient hand-off process (cmd/open), not the
+      // instance; the instance's real PID is (re)discovered by the next listInstances() scan.
+      data: { binary, pid: proc.pid },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      action: 'open',
+      dir: normDir,
+      message: `Failed to launch: ${message}`,
+      data: {},
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Quit
+// ----------------------------------------------------------------------------
+
+export interface QuitInstanceOptions {
+  /** Skip the graceful phase and force-kill immediately. */
+  force?: boolean
+  /** How long to wait for a graceful exit before force-killing (ms). Default 5000. */
+  gracefulTimeoutMs?: number
+}
+
+/** True once none of `pids` are alive anymore (best-effort liveness probe). */
+function anyAlive(pids: number[]): boolean {
+  for (const pid of pids) {
+    try {
+      // signal 0 = liveness probe only, doesn't actually kill (Node/Bun convention on all OSes).
+      process.kill(pid, 0)
+      return true
+    } catch {
+      // ESRCH (no such process) => this one's dead; keep checking the rest.
+    }
+  }
+  return false
+}
+
+async function forceKillPid(pid: number): Promise<void> {
+  if (process.platform === 'win32') {
+    try {
+      const proc = Bun.spawn(['taskkill', '/pid', String(pid), '/f', '/t'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      })
+      await proc.exited
+    } catch {
+      // Best-effort; process may have already exited between scan and kill.
+    }
+    return
+  }
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // Already dead or not ours; ignore.
+  }
+}
+
+async function gracefulKillPid(pid: number): Promise<void> {
+  if (process.platform === 'win32') {
+    try {
+      // No /f: asks the process to close its main window first (best-effort graceful).
+      const proc = Bun.spawn(['taskkill', '/pid', String(pid), '/t'], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+      })
+      await proc.exited
+    } catch {
+      // Ignore; we'll force-kill on timeout regardless.
+    }
+    return
+  }
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch {
+    // Already dead or not ours; ignore.
+  }
+}
+
+/**
+ * Finds every Claude process (main + `--type=` children) whose `--user-data-dir`
+ * matches `dir`, tries a graceful shutdown first (unless `force`), then force-kills
+ * anything still alive after the grace period. Returns the count actually stopped.
+ */
+export async function quitInstance(
+  dir: string,
+  options: QuitInstanceOptions = {},
+): Promise<CMActionResult> {
+  const normDir = normalizePath(dir)
+  const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 5000
+
+  let matched: CMProcessInfo[]
+  try {
+    const all = await listClaudeProcesses({ includeChildren: true })
+    matched = all.filter((p) => p.dir && normalizePath(p.dir) === normDir)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      action: 'quit',
+      dir: normDir,
+      message: `Failed enumerating processes: ${message}`,
+      data: { killedCount: 0 },
+    }
+  }
+
+  if (matched.length === 0) {
+    return {
+      ok: true,
+      action: 'quit',
+      dir: normDir,
+      message: 'not running',
+      data: { killedCount: 0 },
+    }
+  }
+
+  const pids = matched.map((p) => p.pid)
+
+  if (!options.force) {
+    const main = matched.find((p) => p.isMain) ?? matched[0]
+    if (main) {
+      await gracefulKillPid(main.pid)
+      const deadline = Date.now() + gracefulTimeoutMs
+      while (Date.now() < deadline && anyAlive(pids)) {
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
+    }
+  }
+
+  const stillAlive = pids.filter((pid) => {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  })
+
+  let forceKilled = 0
+  if (stillAlive.length > 0) {
+    await Promise.all(
+      stillAlive.map(async (pid) => {
+        await forceKillPid(pid)
+        forceKilled += 1
+      }),
+    )
+  }
+
+  const gracefullyStopped = pids.length - stillAlive.length
+  const totalAccountedFor = Math.max(0, gracefullyStopped) + forceKilled
+
+  return {
+    ok: true,
+    action: 'quit',
+    dir: normDir,
+    message: `stopped ${totalAccountedFor} process(es)`,
+    data: { killedCount: totalAccountedFor },
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Focus
+// ----------------------------------------------------------------------------
+
+/** Runs a small PowerShell snippet that finds the first visible top-level window owned by
+ *  `pid`, restores it if minimized, and brings it to the foreground via user32. Returns
+ *  'focused' | 'no-window' | an error string. Never throws. */
+async function focusWindowByPid(pid: number): Promise<'focused' | 'no-window' | string> {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -Namespace CCManagerUI -Name Win32 -MemberDefinition @"' +
+      '\n[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);' +
+      '\n[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);' +
+      '\n[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);' +
+      '\n[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);' +
+      '\n[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);' +
+      '\npublic delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);' +
+      '\n"@',
+    `$targetPid = ${pid}`,
+    '$found = [IntPtr]::Zero',
+    '$callback = {',
+    '  param([IntPtr]$hWnd, [IntPtr]$lParam)',
+    '  $procId = 0',
+    '  [void][CCManagerUI.Win32]::GetWindowThreadProcessId($hWnd, [ref]$procId)',
+    '  if ($procId -eq $targetPid -and [CCManagerUI.Win32]::IsWindowVisible($hWnd)) {',
+    '    $script:found = $hWnd',
+    '    return $false',
+    '  }',
+    '  return $true',
+    '}',
+    '[void][CCManagerUI.Win32]::EnumWindows($callback, [IntPtr]::Zero)',
+    'if ($found -eq [IntPtr]::Zero) {',
+    '  Write-Output "NO_WINDOW"',
+    '} else {',
+    '  [void][CCManagerUI.Win32]::ShowWindow($found, 9)',
+    '  $ok = [CCManagerUI.Win32]::SetForegroundWindow($found)',
+    '  if ($ok) { Write-Output "FOCUSED" } else { Write-Output "FOREGROUND_DENIED" }',
+    '}',
+  ].join('\n')
+
+  type CaptureProc = Bun.Subprocess<'ignore', 'pipe', 'pipe'>
+  let proc: CaptureProc | null = null
+  try {
+    proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], {
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    }) as CaptureProc
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    const trimmed = stdout.trim()
+    if (trimmed.includes('FOCUSED')) return 'focused'
+    if (trimmed.includes('NO_WINDOW')) return 'no-window'
+    if (trimmed.includes('FOREGROUND_DENIED')) return 'foreground denied by Windows'
+    if (exitCode !== 0) return stderr.trim() || `powershell exited with code ${exitCode}`
+    return 'no-window'
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+/**
+ * Brings the running instance's main window to the foreground on Windows (PID-driven, via
+ * user32 EnumWindows/SetForegroundWindow). Gracefully no-ops on non-Windows platforms and
+ * when the instance isn't currently running.
+ */
+export async function focusInstance(dir: string): Promise<CMActionResult> {
+  const normDir = normalizePath(dir)
+
+  if (process.platform !== 'win32') {
+    return {
+      ok: false,
+      action: 'focus',
+      dir: normDir,
+      message: 'not supported on this platform',
+      data: {},
+    }
+  }
+
+  let procs: CMProcessInfo[]
+  try {
+    procs = await listClaudeProcesses()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      action: 'focus',
+      dir: normDir,
+      message: `Failed enumerating processes: ${message}`,
+      data: {},
+    }
+  }
+
+  const running = procs.find((p) => p.dir && normalizePath(p.dir) === normDir)
+  if (!running) {
+    return { ok: false, action: 'focus', dir: normDir, message: 'not running', data: {} }
+  }
+
+  try {
+    const outcome = await focusWindowByPid(running.pid)
+    if (outcome === 'focused') {
+      return {
+        ok: true,
+        action: 'focus',
+        dir: normDir,
+        message: 'focused',
+        data: { pid: running.pid },
+      }
+    }
+    if (outcome === 'no-window') {
+      return {
+        ok: false,
+        action: 'focus',
+        dir: normDir,
+        message: 'no window found for this instance',
+        data: { pid: running.pid },
+      }
+    }
+    return {
+      ok: false,
+      action: 'focus',
+      dir: normDir,
+      message: outcome,
+      data: { pid: running.pid },
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      action: 'focus',
+      dir: normDir,
+      message: `Failed to focus: ${message}`,
+      data: {},
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Reveal folder
+// ----------------------------------------------------------------------------
+
+/** Reveals the instance's profile directory in the OS file browser (Explorer/Finder/xdg-open).
+ *  Fire-and-forget, matching the existing open-file route's style (index.ts's /open-file);
+ *  Explorer's own exit code is unreliable, so success just means the spawn didn't throw. */
+export async function revealInstanceFolder(dir: string): Promise<CMActionResult> {
+  const normDir = normalizePath(dir)
+  try {
+    const cmd =
+      process.platform === 'win32'
+        ? ['explorer', normDir]
+        : process.platform === 'darwin'
+          ? ['open', normDir]
+          : ['xdg-open', normDir]
+    Bun.spawn(cmd, { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' }).unref()
+    return { ok: true, action: 'reveal', dir: normDir, message: 'opened', data: {} }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      action: 'reveal',
+      dir: normDir,
+      message: `Failed to open folder: ${message}`,
+      data: {},
+    }
+  }
+}

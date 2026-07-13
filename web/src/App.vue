@@ -1,0 +1,219 @@
+<script setup lang="ts">
+import { Boxes, ListChecks, MessagesSquare, Plus, Settings2 } from '@lucide/vue'
+import { computed, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
+import InstancesView from '@/components/InstancesView.vue'
+import QueueBuilder from '@/components/QueueBuilder.vue'
+import QueueView from '@/components/QueueView.vue'
+import SessionsView from '@/components/SessionsView.vue'
+import SettingsView from '@/components/SettingsView.vue'
+import { Button } from '@/components/ui/button'
+import { Toaster } from '@/components/ui/sonner'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { useBuilder } from '@/composables/useBuilder'
+import { useData } from '@/composables/useData'
+import { usePanels } from '@/composables/usePanels'
+import { SHELL_BASE_MAX, SHELL_WIDE_MAX, useShellWidth } from '@/composables/useShellWidth'
+import SettingsPanel from '@/shell/SettingsPanel.vue'
+import Sidebar from '@/shell/Sidebar.vue'
+import { usePushPanel } from '@/shell/usePushPanel'
+
+const { t } = useI18n()
+
+const { queue, startPolling } = useData()
+const { openBuilder } = useBuilder()
+
+type View = 'sessions' | 'instances'
+const view = ref<View>('sessions')
+
+// settings + queue share the right edge; usePanels keeps them mutually exclusive
+const { settingsOpen, queueOpen } = usePanels()
+const anyPanelOpen = computed(() => settingsOpen.value || queueOpen.value)
+const { wide } = useShellWidth()
+// widthPx drives the content shift, the --content-inset-right var, and both panels'
+// rendered width below — one value so they can never disagree. shellMaxWidth makes the
+// shift the panel's actual overlap with the centered shell (0 on a wide monitor).
+const { side, containerStyle, widthPx } = usePushPanel(anyPanelOpen, {
+  widthPx: 480,
+  shellMaxWidth: () => (wide.value ? SHELL_WIDE_MAX : SHELL_BASE_MAX),
+})
+// The header shares the panel shift but must keep its own 16px (px-4) of breathing room
+// on top of it; a bare containerStyle would put the buttons flush against the panel edge.
+const headerStyle = computed(() =>
+  containerStyle.value.paddingRight
+    ? { paddingRight: `calc(${containerStyle.value.paddingRight} + 1rem)` }
+    : {},
+)
+
+// Everything in Settings auto-saves; the footer button flushes the one buffered
+// form (scheduler numbers) and gives the reassuring "saved" moment people expect.
+// (Typed structurally, not via InstanceType<typeof SettingsView>: a type-position-only
+// reference makes biome demote the import to type-only, unmounting the component.)
+const settingsView = ref<{ save: () => Promise<void> } | null>(null)
+function saveSettings() {
+  settingsView.value?.save()
+}
+
+const nav: { id: View; labelKey: string; icon: typeof MessagesSquare }[] = [
+  { id: 'sessions', labelKey: 'app.tabSessions', icon: MessagesSquare },
+  { id: 'instances', labelKey: 'app.tabInstances', icon: Boxes },
+]
+
+const runningCount = computed(() => queue.value.filter((q) => q.status === 'running').length)
+
+// The "Sync my settings with Connections" sign-in (SettingsView.vue) opens /oauth/login in a
+// NEW tab; that tab's SPA boots fresh here and lands back on ?connected=1 / ?connect=failed
+// after the daemon's /oauth/callback redirect. Surface the outcome, open Settings so the
+// result is visible, and strip the query param so a refresh doesn't re-trigger the toast.
+function handleConnectRedirect() {
+  const params = new URLSearchParams(window.location.search)
+  const connected = params.get('connected')
+  const failed = params.get('connect')
+  if (!connected && !failed) return
+  params.delete('connected')
+  params.delete('connect')
+  const query = params.toString()
+  window.history.replaceState(null, '', window.location.pathname + (query ? `?${query}` : ''))
+  settingsOpen.value = true
+  if (connected === '1') toast.success(t('settings.cloudSyncEnableToggle'))
+  else if (failed === 'failed') toast.error(t('settings.cloudSyncConnectFailed'))
+}
+
+onMounted(startPolling)
+onMounted(handleConnectRedirect)
+</script>
+
+<template>
+  <!-- TooltipProvider: required ancestor for every kit Tooltip/InfoHint (mounted once, like ReDesign) -->
+  <TooltipProvider :delay-duration="120">
+  <!-- fixed-viewport shell, centered at a comfortable reading width: each view scrolls
+       its own columns internally; the page itself never scrolls. Views that benefit from
+       room (an open transcript) request the wide cap via useShellWidth and the whole
+       shell — header included — animates out to meet them. -->
+  <div
+    class="mx-auto flex h-dvh w-full flex-col overflow-hidden border-x border-border transition-[max-width] duration-300 ease-in-out"
+    :style="{ maxWidth: `${wide ? SHELL_WIDE_MAX : SHELL_BASE_MAX}px` }"
+  >
+    <!-- top bar (borderless: the content columns carry their own separators). Shares the
+         push-panel padding shift with the main content, or an open drawer would cover the
+         right-side buttons instead of nudging them over. -->
+    <header
+      class="flex shrink-0 items-center gap-3 bg-background px-4 py-2 transition-[padding] duration-300 ease-in-out"
+      :style="headerStyle"
+    >
+      <div class="flex items-center gap-2.5">
+        <!-- the real brand mark (same asset as the favicon/tray icon), not a placeholder glyph -->
+        <img src="/favicon.svg" alt="" class="size-8 rounded-lg" />
+        <span class="hidden text-sm font-bold tracking-tight min-[480px]:inline">CC Manager UI</span>
+      </div>
+
+      <!-- view tabs -->
+      <nav class="ml-2 flex items-center gap-1">
+        <Button
+          v-for="n in nav"
+          :key="n.id"
+          :variant="view === n.id ? 'secondary' : 'ghost'"
+          size="sm"
+          :title="$t(n.labelKey)"
+          @click="view = n.id"
+        >
+          <component :is="n.icon" />
+          <span class="hidden sm:inline">{{ $t(n.labelKey) }}</span>
+        </Button>
+      </nav>
+
+      <div class="ml-auto flex items-center gap-2">
+        <!-- expanding icon button (DevWebUI TopBar pattern): a bare plus that widens on
+             hover/keyboard-focus to reveal its label -->
+        <Button
+          size="sm"
+          class="group/newrun gap-0 overflow-hidden transition-all"
+          :aria-label="$t('app.newRun')"
+          @click="openBuilder()"
+        >
+          <Plus class="shrink-0" />
+          <span
+            class="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover/newrun:ml-1.5 group-hover/newrun:max-w-[7rem] group-hover/newrun:opacity-100 group-focus-visible/newrun:ml-1.5 group-focus-visible/newrun:max-w-[7rem] group-focus-visible/newrun:opacity-100"
+          >{{ $t('app.newRun') }}</span>
+        </Button>
+        <!-- queue drawer toggle: stays available on every view. Brand-purple (primary)
+             at rest; this is now the ONE queue button, so it carries the accent the
+             old in-chat one had; secondary while the drawer is open (pressed state). -->
+        <Button
+          :variant="queueOpen ? 'secondary' : 'default'"
+          size="sm"
+          :title="$t('app.queue')"
+          :aria-pressed="queueOpen"
+          @click="queueOpen = !queueOpen"
+        >
+          <ListChecks />
+          <span class="hidden sm:inline">{{ $t('app.queue') }}</span>
+          <span
+            v-if="runningCount > 0"
+            class="ml-0.5 inline-flex size-4 items-center justify-center rounded-full text-[0.625rem] font-semibold"
+            :class="queueOpen ? 'bg-info/15 text-info' : 'bg-primary-foreground/25 text-primary-foreground'"
+          >
+            {{ runningCount }}
+          </span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          :title="$t('app.settings')"
+          :aria-pressed="settingsOpen"
+          @click="settingsOpen = !settingsOpen"
+        >
+          <Settings2 />
+        </Button>
+      </div>
+    </header>
+
+    <!-- main (pushes left when a right-docked panel overlaps the shell) -->
+    <div class="min-h-0 flex-1 transition-[padding] duration-300 ease-in-out" :style="containerStyle">
+      <main class="h-full min-h-0">
+        <Transition name="view-fade" mode="out-in">
+          <SessionsView v-if="view === 'sessions'" />
+          <InstancesView v-else />
+        </Transition>
+      </main>
+    </div>
+
+    <QueueBuilder />
+
+    <!-- queue: a push-in drawer so the list rides alongside whatever you're doing -->
+    <Sidebar
+      v-model:open="queueOpen"
+      :side="side"
+      :title="$t('queue.title')"
+      :width-px="widthPx"
+      body-class="flex min-h-0 flex-1 flex-col"
+    >
+      <QueueView />
+    </Sidebar>
+
+    <!-- settings: the shared push-in panel -->
+    <SettingsPanel v-model:open="settingsOpen" :side="side" :title="$t('app.settings')" :width-px="widthPx">
+      <SettingsView ref="settingsView" />
+      <template #footer>
+        <div class="flex justify-end">
+          <Button size="sm" @click="saveSettings">{{ $t('settings.saveSettings') }}</Button>
+        </div>
+      </template>
+    </SettingsPanel>
+
+    <Toaster />
+  </div>
+  </TooltipProvider>
+</template>
+
+<style scoped>
+.view-fade-enter-active,
+.view-fade-leave-active {
+  transition: opacity 150ms ease;
+}
+.view-fade-enter-from,
+.view-fade-leave-to {
+  opacity: 0;
+}
+</style>

@@ -1,0 +1,1044 @@
+# =====================================================================================
+# Shared tray-host engine (Windows). A parameterized WinForms tray host that runs a
+# Bun (or any) daemon with no console window, showing a tray icon menu:
+# Open / Rebuild & Restart / Restart / Quit.
+#
+# Reusable engine: a small per-app launcher builds a $TrayConfig hashtable (app name,
+# port, start/build commands, icon, health check, etc.), dot-sources this file, then
+# calls Start-TrayHost for a normal run or Invoke-TrayHostSelfTest for a headless
+# self-check. All app-specific behavior comes from that config; the engine stays generic.
+#
+# Runs under Windows PowerShell 5.1 (powershell.exe, via the .vbs launchers) — so NO
+# PowerShell-7-only syntax anywhere (no ternary `? :`, no `??`, no `?.`, no `&&`/`||`).
+#
+# Responsiveness: "Rebuild & Restart" and "Restart" run their slow work (build, stop,
+# port wait / graceful shutdown, readiness poll) on a BACKGROUND runspace, and a
+# WinForms timer marshals the result back to the UI thread, so the tray never freezes
+# (no "Not Responding"). Daemon control is STATELESS — it locates the live instance via
+# the runtime pointer + /api/health and acts on the bound port (or, for token apps, asks
+# the daemon to shut itself down) — so the exact same helper functions run identically
+# on the UI thread AND inside the worker runspace, surviving repeated restarts, with
+# zero dependence on a shared Process handle.
+#
+# -------------------------------------------------------------------------------------
+# $TrayConfig CONTRACT — the hashtable the adapter builds and passes to Start-TrayHost /
+# Invoke-TrayHostSelfTest. Every key is documented here; the engine reads ONLY these keys.
+# Keys marked (adapter-computed) are values the adapter derives from its own $PSScriptRoot /
+# env overrides / preferred port before building the config.
+# -------------------------------------------------------------------------------------
+#   DisplayName            [string]  User-facing name for NotifyIcon.Text and every balloon /
+#                                    MessageBox title (e.g. 'CC Manager UI', or 'RēDesign' with
+#                                    its macron U+0113). May contain non-ASCII — do not assume
+#                                    ASCII app names.
+#   ServiceName            [string]  Expected /api/health body.service value (case-sensitive
+#                                    `-eq`), the anti-collision check that stops the tray
+#                                    mistaking another app's server on the same port for its
+#                                    own. $null for an app that only validates body.ok
+#                                    (DevWebUI's health payload carries no service field).
+#   IconFile               [string]  Icon filename inside misc/ (e.g. 'Reimagine.ico').
+#   Port                   [int]     Preferred port (the adapter passes its own -Port through).
+#                                    NOT a guarantee — if busy the daemon hops to the next free
+#                                    port and records where it landed in runtime.json.
+#   UrlHost                [string]  Host for the preferred-port fallback URL: '127.0.0.1'
+#                                    (ReDesign/RepoYeti) or 'localhost' (DevWebUI/CCManagerUI).
+#                                    Optional; defaults to '127.0.0.1'.
+#   InfoFile               [string]  (adapter-computed) Absolute path to runtime.json (from the
+#                                    app's <APP>_HOME env override, else ~/.<app>).
+#   DaemonLogPath          [string]  (adapter-computed) Log path surfaced in the watchdog crash
+#                                    balloons so the user knows where to look. $null if the app
+#                                    has no daemon log.
+#   StartCommand           [string]  The cmd.exe /c payload that launches the daemon, EXACTLY as
+#                                    the app's current script has it, e.g.
+#                                    'bun run src\index.ts serve' (ReDesign),
+#                                    'bun run src\index.ts start --port {PORT}' (RepoYeti — the
+#                                    {PORT} token is substituted with the effective port),
+#                                    'bun server/src/index.ts' (DevWebUI / CCManagerUI). Launched
+#                                    via cmd.exe /c specifically because bun on Windows is a
+#                                    bun.cmd/bun.ps1 shim with no bare bun.exe, and Win32
+#                                    CreateProcess (UseShellExecute=$false) skips PATHEXT
+#                                    resolution — so FileName="bun" throws silently. cmd.exe /c
+#                                    DOES resolve the shim, and taskkill /T later reaps the whole
+#                                    cmd->bun tree. The literal '{PORT}' (if present) is replaced
+#                                    with the effective port.
+#   StartEnv               [hashtable] Extra child env vars set on the ProcessStartInfo, e.g.
+#                                    @{ DEVWEBUI_PORT = '{PORT}' }. The engine ALWAYS also sets
+#                                    PORT from the effective port UNLESS PortEnvVar overrides the
+#                                    name. Any '{PORT}' / '{TOKEN}' token in a value is
+#                                    substituted (TOKEN only meaningful when ShutdownTokenEnvVar
+#                                    is set). Optional; defaults to empty.
+#   PortEnvVar             [string]  Name of the env var the daemon reads as its PREFERRED port.
+#                                    Defaults to 'PORT'. DevWebUI uses 'DEVWEBUI_PORT'. Set to
+#                                    $null to NOT export any port env var (RepoYeti pins the port
+#                                    via its --port flag in StartCommand instead).
+#   EntryFile              [string]  (adapter-computed, RELATIVE to app root) Daemon entry path
+#                                    the SelfTest checks for existence, e.g. 'src\index.ts' or
+#                                    'server\src\index.ts'.
+#   FirstRun               [scriptblock] Optional scriptblock(appRoot) with the app's
+#                                    install/build-if-missing bootstrap (deps install + web
+#                                    build), run BLOCKING once at cold start after the tray icon
+#                                    is already visible. $null to skip. Receives the app root as
+#                                    its single argument; may call Get-Command bun etc. freely.
+#   RebuildCommand         [string OR scriptblock] The build command "Rebuild & Restart" runs.
+#                                    A plain string (DevWebUI/CCManagerUI 'bun run build',
+#                                    RepoYeti 'bun run --cwd web build:fast'), OR a
+#                                    scriptblock(appRoot, scriptDir) RESOLVER returning a string
+#                                    or $null (ReDesign resolves misc\Rebuild.bat first, then an
+#                                    'npm run build' fallback). Resolved fresh each rebuild AND
+#                                    re-resolved inside the worker. $null for no rebuild support.
+#   RebuildLogName         [string]  Rebuild-log filename written into misc/ (e.g.
+#                                    'DevWebUI-Rebuild.log'). Surfaced in the build-failed
+#                                    balloon.
+#   IsDevTree              [bool]    (adapter-computed) Whether the "Rebuild & Restart" item is
+#                                    offered. The engine gates the menu item at menu-ADD time AND
+#                                    re-checks inside Start-Job-Async AND inside the worker (the
+#                                    original dual/triple gate — preserved). Apps with no
+#                                    dev/distribution split pass $true (always show).
+#   SentinelFile           [string]  (adapter-computed) shutdown.request path, or $null. When
+#                                    set, the engine CLEARS it at startup (so a stale one from a
+#                                    hard-killed prior run can't trigger an instant quit) and
+#                                    POLLS it on the 500ms watch timer to trigger Quit (a web-UI
+#                                    "Shut Down" / `<app> stop` drops the file; without this the
+#                                    watchdog would just resurrect the daemon the user stopped).
+#                                    CCManagerUI has none.
+#   ShutdownTokenEnvVar    [string]  Env var carrying the per-session shutdown-token GUID to the
+#                                    daemon (DevWebUI 'DEVWEBUI_TRAY_SHUTDOWN_TOKEN', CCManagerUI
+#                                    'CCMANAGERUI_SHUTDOWN_TOKEN'), or $null for the force-kill
+#                                    apps (ReDesign/RepoYeti). When set, the engine mints a GUID
+#                                    at startup, passes it via this env var at spawn, and can POST
+#                                    /api/shutdown with the token headers below for a graceful
+#                                    stop (force-killing the port only as a fallback).
+#   ShutdownHeaderPrefix   [string]  Header-name prefix for the token shutdown POST, e.g.
+#                                    'x-devwebui' → 'x-devwebui-shutdown-token' /
+#                                    'x-devwebui-shutdown-source'. $null when ShutdownTokenEnvVar
+#                                    is $null.
+#   OnStrayDaemon          [string]  'attach' or 'warn' — behavior when THIS host wins the mutex
+#                                    but a daemon is ALREADY answering. 'attach' (RepoYeti /
+#                                    DevWebUI / CCManagerUI): adopt the live URL and keep hosting
+#                                    the tray, do NOT launch a second daemon, and do NOT force
+#                                    it down at Quit (startedByUs stays false). 'warn' (ReDesign):
+#                                    a listening port without OUR tray means a headless orphan —
+#                                    MessageBox telling the user to stop that process, release the
+#                                    mutex, and exit without hosting.
+#   SelfTestMarker         [string]  The self-test output marker, e.g. 'CCMANAGERUI_TRAY_SELFTEST'
+#                                    — the engine prints '<marker>_OK' / '<marker>_FAIL: ...'
+#                                    EXACTLY as each app does today, with the same exit codes.
+#   MenuOpenLabel          [string]  Exact current 'Open <App>' menu label (e.g. 'Open RepoYeti',
+#                                    'Open CC Manager UI').
+#   MutexName              [string]  (adapter-computed for ReDesign) Exact mutex string. Fixed
+#                                    global names for three apps ('RepoYetiTrayHost',
+#                                    'DevWebUITrayHost', 'CCManagerUITrayHost'); ReDesign's
+#                                    adapter computes its hashed per-checkout
+#                                    'Local\redesign.tray.<sha16>' itself so a second checkout on
+#                                    the same machine gets its own tray host.
+#   RuntimeCheckCommand    [string]  Command name the SelfTest requires on PATH (Get-Command),
+#                                    e.g. 'bun'. Defaults to 'bun'.
+#   CrashLoopMax           [int]     Optional override; engine default 4.
+#   CrashLoopWindowSec     [int]     Optional override; engine default 120.
+#   RestartRetries         [int]     Optional. Extra restart attempts inside the worker after the
+#                                    first Start fails to bind (ReDesign does ONE retry: pass 1;
+#                                    the others do none: default 0). Preserves each app's current
+#                                    restart policy instead of picking one for everyone.
+#   UsePortFreeWait        [bool]    Optional. When $true (ReDesign) the worker waits for the
+#                                    listen socket to actually release after a force-kill before
+#                                    relaunching (Windows can hold it briefly). Default $false —
+#                                    the token/graceful apps and RepoYeti rely on their Stop
+#                                    helper's own settle poll instead. Only meaningful for the
+#                                    force-kill (non-token) apps.
+#   StartupWaitSec         [int]     Optional. Seconds the cold-start path waits for the daemon to
+#                                    bind before opening the browser. Default 15.
+#   WorkerWaitSec          [int]     Optional. Seconds the worker's readiness poll waits.
+#                                    Default 12.
+#   WatchdogRequiresOwnership [bool] Optional; attach apps only. When $true (default), the
+#                                    auto-restart watchdog only revives a daemon THIS tray
+#                                    started (startedByUs) — an attached instance owned by
+#                                    another session is left alone. CCManagerUI sets $false:
+#                                    its OLD watchdog revived unconditionally.
+#   NoScanRootHint         [string]  Optional. RepoYeti-only: extra MessageBox body shown when the
+#                                    cold-start daemon starts but never serves (its most-likely
+#                                    cause is no scan root configured), with the exact remediation
+#                                    command. $null for apps without this domain-specific hint.
+# -------------------------------------------------------------------------------------
+#
+# Exports:
+#   Start-TrayHost($Config)            — runs the full host lifecycle (mutex, icon, daemon,
+#                                        worker, watchdog, watch-timer, message loop).
+#   Invoke-TrayHostSelfTest($Config)   — implements -SelfTest: RuntimeCheckCommand on PATH,
+#                                        EntryFile existence, icon load + small-frame byte parse +
+#                                        a real NotifyIcon construct/dispose, then the exact
+#                                        marker output + exit codes. Fully headless (no browser,
+#                                        no mutex, no message loop) — safe for CI.
+# =====================================================================================
+
+$ErrorActionPreference = "SilentlyContinue"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# --- Config accessor with defaults ---------------------------------------------------
+# Central place for the engine's default timing/policy values, so an app only overrides a
+# key when its CURRENT behavior genuinely differs (never silently changed). $Config is the
+# hashtable the adapter passed in; $Key missing/$null falls back to $Default.
+function Get-TrayConfigValue($Config, [string]$Key, $Default) {
+  if ($Config.ContainsKey($Key) -and $null -ne $Config[$Key]) { return $Config[$Key] }
+  return $Default
+}
+
+# --- Icon helpers (shared by SelfTest and the live host) -----------------------------
+# Byte-level ICO validation: a valid header (magic 0,0,1,0) and at least one small (<=48px)
+# frame. A 256-only .ico renders BLANK in the notification area (the classic "tray icon is
+# broken"), so we require a real tray-sized frame. Width byte 0 means 256px, so it doesn't
+# count. Pure byte parse — no GDI+ decode — so it's cheap and dependency-free.
+function Test-TrayIconHasSmallFrame([string]$icoPath) {
+  try {
+    $icoBytes = [System.IO.File]::ReadAllBytes($icoPath)
+    if ($icoBytes.Length -le 6 -or $icoBytes[0] -ne 0 -or $icoBytes[1] -ne 0 -or $icoBytes[2] -ne 1 -or $icoBytes[3] -ne 0) { return $false }
+    $frameCount = [BitConverter]::ToUInt16($icoBytes, 4)
+    for ($fi = 0; $fi -lt $frameCount; $fi++) {
+      $fw = $icoBytes[6 + $fi * 16]
+      if ($fw -ne 0 -and $fw -le 48) { return $true }
+    }
+  } catch {}
+  return $false
+}
+
+# Build a live tray NotifyIcon from the app's icon: validate the bytes, pull the TRAY-SIZED
+# frame out of the multi-size .ico so it renders crisply (not blank) in the notification area,
+# force a decode, and construct a real NotifyIcon. Hard startup gate — no generic-system-icon
+# fallback: the shortcut may only drive the daemon once the REAL notification-area icon exists.
+function New-TrayHostIcon([string]$icoPath, [string]$displayName) {
+  if (-not (Test-Path $icoPath)) { throw "Tray icon file is missing: $icoPath" }
+  if (-not (Test-TrayIconHasSmallFrame $icoPath)) { throw "Tray icon has no small (<=48px) frame for the Windows notification area." }
+  $ico = New-Object System.Drawing.Icon($icoPath, [System.Windows.Forms.SystemInformation]::SmallIconSize) -ErrorAction Stop
+  $null = $ico.ToBitmap()   # force decode of the chosen frame — catches a corrupt/blank icon now
+  $ni = New-Object System.Windows.Forms.NotifyIcon -ErrorAction Stop
+  $ni.Text = $displayName
+  $ni.Icon = $ico
+  return $ni
+}
+
+# =====================================================================================
+# Invoke-TrayHostSelfTest — headless -SelfTest. Proves the tray can actually start (runtime on
+# PATH, daemon entry exists, the icon LOADS into a real NotifyIcon then disposes), then reports
+# the exact per-app marker and exits WITHOUT opening a browser, touching the mutex, or entering
+# the message loop. A missing/corrupt icon makes this exit non-zero. Safe to run standalone in CI.
+# =====================================================================================
+function Invoke-TrayHostSelfTest($Config) {
+  $scriptDir = $Config.ScriptDir
+  $root = $Config.Root
+  $marker = $Config.SelfTestMarker
+  $runtimeCmd = Get-TrayConfigValue $Config 'RuntimeCheckCommand' 'bun'
+
+  $fail = @()
+  if (-not (Get-Command $runtimeCmd -ErrorAction SilentlyContinue)) { $fail += "$runtimeCmd not on PATH" }
+  $entry = Join-Path $root $Config.EntryFile
+  if (-not (Test-Path $entry)) { $fail += "daemon entry $($Config.EntryFile) missing" }
+  $icoPath = Join-Path $scriptDir $Config.IconFile
+  if (-not (Test-Path $icoPath)) {
+    $fail += "tray icon $($Config.IconFile) missing"
+  } else {
+    try {
+      # Load the TRAY-sized frame (not the 256 jumbo), force a decode, construct+dispose a real
+      # NotifyIcon (proves it loads into a tray-capable object, not just that the file exists),
+      # then re-parse the bytes for a <=48px frame — catches the 256-only "renders blank" icon.
+      $ico = New-Object System.Drawing.Icon($icoPath, [System.Windows.Forms.SystemInformation]::SmallIconSize)
+      $null = $ico.ToBitmap()
+      $ni = New-Object System.Windows.Forms.NotifyIcon
+      $ni.Icon = $ico
+      $ni.Dispose(); $ico.Dispose()
+      if (-not (Test-TrayIconHasSmallFrame $icoPath)) { $fail += "tray icon has no small (<=48px) frame; a 256-only icon renders blank" }
+    } catch { $fail += "tray icon failed to load: $($_.Exception.Message)" }
+  }
+  if ($fail.Count) { Write-Output ("${marker}_FAIL: " + ($fail -join "; ")); exit 1 }
+  Write-Output "${marker}_OK"; exit 0
+}
+
+# =====================================================================================
+# Start-TrayHost — the full host lifecycle. Everything below runs on the UI thread except the
+# background $worker runspace (rebuild/restart). Structured to preserve every behavioral
+# invariant of the four originals: mutex BEFORE icon; loser attaches + exits without an icon or
+# timers; icon ALWAYS created with Visible=$true on the winner path before the hide gate;
+# healthTimer live-syncs Visible from the hide setting; Open-AppUi never touches visibility;
+# Quit sets intentionalStop before any teardown; watchdog has revive-grace + crash-loop pause;
+# mutex released on icon-failure AND on Quit.
+# =====================================================================================
+function Start-TrayHost($Config) {
+  # --- Resolve config into locals (engine idioms match the originals' variable names) ---
+  $scriptDir   = $Config.ScriptDir
+  $root        = $Config.Root
+  $displayName = $Config.DisplayName
+  $serviceName = $Config.ServiceName                 # $null ⇒ validate only body.ok
+  $infoFile    = $Config.InfoFile
+  $logPath     = $Config.DaemonLogPath               # daemon log, for crash balloons ($null ok)
+  $script:url  = "http://$(Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1'):$($Config.Port)"
+  $port        = $Config.Port
+
+  $CrashLoopMax       = Get-TrayConfigValue $Config 'CrashLoopMax' 4          # restarts…
+  $CrashLoopWindowSec = Get-TrayConfigValue $Config 'CrashLoopWindowSec' 120  # …within this many seconds ⇒ pause
+  $restartRetries     = Get-TrayConfigValue $Config 'RestartRetries' 0        # extra worker retries (ReDesign: 1)
+  $usePortFreeWait    = Get-TrayConfigValue $Config 'UsePortFreeWait' $false  # wait for the socket to release (ReDesign)
+  $startupWaitSec     = Get-TrayConfigValue $Config 'StartupWaitSec' 15
+  $workerWaitSec      = Get-TrayConfigValue $Config 'WorkerWaitSec' 12
+  # Attach apps only (OnStrayDaemon='attach'): does the auto-restart watchdog require THIS tray to
+  # own the daemon (startedByUs) before it will revive a crashed one? Default $true preserves the
+  # DevWebUI-derived behavior (an attached instance owned by another session is left alone — no
+  # revive, no balloon). CCManagerUI's OLD watchdog had no such gate — it unconditionally relaunched
+  # on any health-check failure — so its adapter sets this $false to keep that parity.
+  $watchdogRequiresOwnership = Get-TrayConfigValue $Config 'WatchdogRequiresOwnership' $true
+
+  # Shutdown protocol flavor: token+HTTP (DevWebUI/CCManagerUI) vs force-kill (ReDesign/RepoYeti).
+  $tokenEnvVar   = $Config.ShutdownTokenEnvVar       # $null ⇒ no graceful token shutdown
+  $headerPrefix  = $Config.ShutdownHeaderPrefix
+  $useToken      = [bool]$tokenEnvVar
+  $script:shutdownToken = if ($useToken) { [System.Guid]::NewGuid().ToString("N") } else { $null }
+
+  # Stray-daemon policy when we win the mutex but a daemon is already alive.
+  $onStray = Get-TrayConfigValue $Config 'OnStrayDaemon' 'attach'
+
+  # Full-shutdown sentinel (web-UI "Shut Down" / `<app> stop`). $null ⇒ no sentinel.
+  $script:shutdownRequestFile = $Config.SentinelFile
+
+  # $startedByUs: did THIS tray launch the daemon? Only an owned daemon is force-stopped at Quit
+  # and revived by the watchdog. For the force-kill apps that always own on the winner path, it's
+  # implicitly true; the token/attach apps track it explicitly (an attached instance is left alone).
+  $script:startedByUs = $false
+  $script:trayMutex = $null
+  $script:ownsTrayMutex = $false
+
+  # =====================================================================================
+  # Daemon control — defined once as a scriptblock so the EXACT same functions run on the UI
+  # thread (launch, quit) AND inside the background worker runspace (rebuild, restart). All
+  # stateless: they locate the live instance via the runtime pointer + /api/health and act on
+  # the bound port (or ask the daemon to stop, for the token apps), so nothing depends on
+  # WinForms or a shared Process handle. Stringified and re-hydrated in the worker via
+  # [scriptblock]::Create($helpersText) — so these must stay closure-free of app-scope vars
+  # (every input is passed in explicitly). App-specific bits (service-id, start command, env,
+  # token/header names, url host) are threaded in as PARAMETERS, never closed over.
+  # =====================================================================================
+  $ServerControl = {
+    # Is OUR daemon answering here? /api/health is unauthenticated; when $service is non-empty
+    # we also require body.service -eq $service (case-sensitive) — the anti-collision check that
+    # stops the tray mistaking another app's server on the same port for its own. When $service
+    # is empty we validate only body.ok (DevWebUI's health payload carries no service field).
+    function Test-Daemon($u, $service) {
+      if (-not $u) { return $false }
+      try {
+        $r = Invoke-RestMethod -Uri "$u/api/health" -TimeoutSec 1 -ErrorAction Stop
+        if ($service) { return ($r.ok -eq $true -and $r.service -eq $service) }
+        return [bool]$r.ok
+      } catch { return $false }
+    }
+    # The URL of a live instance (runtime pointer, else preferred port), or $null.
+    function Get-RunningUrl($infoFile, $port, $service, $urlHost) {
+      if (Test-Path $infoFile) {
+        try {
+          $info = Get-Content $infoFile -Raw | ConvertFrom-Json
+          if ($info.url -and (Test-Daemon $info.url $service)) { return $info.url }
+        } catch { }
+      }
+      $u = "http://${urlHost}:$port"
+      if (Test-Daemon $u $service) { return $u }
+      return $null
+    }
+    function Get-PortFromUrl($u) { try { return ([uri]$u).Port } catch { return 0 } }
+    # Is anything LISTENING on this port? Pure .NET, no module dependency, so it works in a
+    # fresh runspace where Get-NetTCPConnection may not be auto-loaded.
+    function Test-PortListening([int]$p) {
+      try {
+        foreach ($ep in [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()) {
+          if ($ep.Port -eq $p) { return $true }
+        }
+      } catch {}
+      return $false
+    }
+    # PIDs LISTENING on a port (via netstat, always present). Plain `netstat -ano` (no `-p tcp`)
+    # so IPv4 AND IPv6 listeners are both included — do NOT "clean up" that omission.
+    function Get-PortPids([int]$p) {
+      $ids = @()
+      try {
+        foreach ($line in (& netstat -ano 2>$null)) {
+          $t = $line.Trim()
+          if ($t -notmatch 'LISTENING') { continue }
+          $parts = $t -split '\s+'
+          if ($parts.Length -ge 5 -and $parts[1] -match (':' + $p + '$') -and $parts[4] -match '^\d+$') { $ids += [int]$parts[4] }
+        }
+      } catch {}
+      return ($ids | Select-Object -Unique)
+    }
+    # Wait for the listen socket to actually release after a force-kill (Windows can hold it
+    # briefly), so the new instance doesn't lose the port race. Used only by UsePortFreeWait apps.
+    function Wait-PortFree([int]$p, [int]$seconds) {
+      $deadline = (Get-Date).AddSeconds($seconds)
+      while ((Get-Date) -lt $deadline) {
+        if (-not (Test-PortListening $p)) { return $true }
+        Start-Sleep -Milliseconds 150
+      }
+      return $false
+    }
+    # Ask the daemon to shut itself down cleanly (token-gated; only a daemon we started this
+    # session honours our token). Header names are '<prefix>-shutdown-token' /
+    # '<prefix>-shutdown-source'. Best-effort; returns whether the POST succeeded.
+    function Invoke-DaemonShutdown($u, $token, $headerPrefix, $timeoutSec) {
+      if (-not $u) { return $false }
+      if (-not $timeoutSec) { $timeoutSec = 20 }
+      try {
+        $headers = @{}
+        $headers["$headerPrefix-shutdown-token"] = $token
+        $headers["$headerPrefix-shutdown-source"] = "ui"
+        Invoke-RestMethod -Uri "$u/api/shutdown" -Method Post -Headers $headers -TimeoutSec $timeoutSec -ErrorAction Stop | Out-Null
+        return $true
+      } catch { return $false }
+    }
+    # Stop the live daemon. Token apps: graceful shutdown first (only when $forceKill — i.e. we
+    # own it; an attached instance another session owns is left alone), then force-kill the port
+    # owner as a fallback. Force-kill apps ($token empty): straight port-owner tree-kill of BOTH
+    # the preferred port AND the runtime-pointer's actually-bound port (handles a hop), then wait
+    # for it to go quiet. Both paths are stateless and safe on the UI thread and in the worker.
+    # $skipGraceful: caller already ran its own bounded graceful POST (e.g. Quit's belt-and-braces
+    # sweep) — skip the second 20s-bounded Invoke-DaemonShutdown + 10s poll and go straight to the
+    # port-kill so a still-alive daemon can't turn Quit into a ~30s hang.
+    function Stop-Daemon($infoFile, $port, $service, $urlHost, $token, $headerPrefix, $forceKill, [bool]$skipGraceful = $false) {
+      $u = Get-RunningUrl $infoFile $port $service $urlHost
+      if ($token) {
+        # --- Token/graceful flavor ---
+        if (-not $u) { return }
+        if (-not $forceKill) { return }   # only act on a daemon we own
+        if (-not $skipGraceful) {
+          if (Invoke-DaemonShutdown $u $token $headerPrefix 20) {
+            for ($i = 0; $i -lt 40; $i++) {
+              if (-not (Get-RunningUrl $infoFile $port $service $urlHost)) { return }
+              Start-Sleep -Milliseconds 250
+            }
+          }
+        }
+        $ports = @($port); $pp = Get-PortFromUrl $u; if ($pp -gt 0) { $ports += $pp }
+        foreach ($pp in ($ports | Select-Object -Unique)) {
+          foreach ($procId in (Get-PortPids $pp)) { if ($procId -gt 0) { & taskkill /PID $procId /T /F 2>$null | Out-Null } }
+        }
+        for ($i = 0; $i -lt 20; $i++) {
+          if (-not (Get-RunningUrl $infoFile $port $service $urlHost)) { return }
+          Start-Sleep -Milliseconds 200
+        }
+      } else {
+        # --- Force-kill flavor (no token) ---
+        $ports = @($port)
+        if ($u) { $pp = Get-PortFromUrl $u; if ($pp -gt 0) { $ports += $pp } }
+        foreach ($pp in ($ports | Select-Object -Unique)) {
+          foreach ($procId in (Get-PortPids $pp)) { if ($procId -gt 0) { & taskkill /PID $procId /T /F 2>$null | Out-Null } }
+        }
+        # Settle poll so a follow-on Start doesn't race a socket that's still shutting down.
+        for ($i = 0; $i -lt 25; $i++) {
+          if (-not (Get-RunningUrl $infoFile $port $service $urlHost)) { return }
+          Start-Sleep -Milliseconds 200
+        }
+      }
+    }
+    # Launch the daemon via cmd.exe /c (so bun.cmd/bun.ps1's PATHEXT shim resolves and taskkill
+    # /T can later reap the whole cmd->bun tree). $startCommand is the app's exact payload with
+    # any {PORT} token already substituted. $portEnvVar (if non-empty) is set to the port;
+    # $extraEnv is the app's StartEnv hashtable (already token/port-substituted). $proc handle
+    # returned so a caller can track its PID and fail fast if it exits before serving.
+    function Start-Daemon($appRoot, $port, $startCommand, $portEnvVar, $extraEnv) {
+      $psi = New-Object System.Diagnostics.ProcessStartInfo
+      $psi.FileName = "cmd.exe"
+      $psi.Arguments = "/c $startCommand"
+      $psi.WorkingDirectory = $appRoot
+      $psi.UseShellExecute = $false                 # required so CreateNoWindow works
+      $psi.CreateNoWindow = $true
+      $psi.WindowStyle = "Hidden"
+      if ($portEnvVar) { $psi.EnvironmentVariables[$portEnvVar] = "$port" }
+      if ($extraEnv) {
+        foreach ($k in $extraEnv.Keys) { $psi.EnvironmentVariables[$k] = "$($extraEnv[$k])" }
+      }
+      return [System.Diagnostics.Process]::Start($psi)
+    }
+    # Wait for the daemon to come up and return the URL it ACTUALLY bound (validated via
+    # /api/health), which may differ from the preferred port if it hopped. If a process handle is
+    # given, bail early when it exits before serving (RepoYeti: usually "no scan root configured").
+    function Wait-ForUrl($infoFile, $port, $service, $urlHost, $seconds, $proc) {
+      $deadline = (Get-Date).AddSeconds($seconds)
+      while ((Get-Date) -lt $deadline) {
+        $u = Get-RunningUrl $infoFile $port $service $urlHost
+        if ($u) { return $u }
+        if ($proc -and $proc.HasExited) { return (Get-RunningUrl $infoFile $port $service $urlHost) }
+        Start-Sleep -Milliseconds 250
+      }
+      return (Get-RunningUrl $infoFile $port $service $urlHost)
+    }
+  }
+  . $ServerControl   # make the functions available on the UI thread
+
+  # Effective start command / env with {PORT} and {TOKEN} tokens substituted, computed once and
+  # reused by cold start, worker, and watchdog (so all launch paths are byte-identical).
+  $portEnvVar = if ($Config.ContainsKey('PortEnvVar')) { $Config['PortEnvVar'] } else { 'PORT' }
+  $startCommand = ($Config.StartCommand -replace '\{PORT\}', "$port")
+  $startEnv = @{}
+  $rawStartEnv = Get-TrayConfigValue $Config 'StartEnv' @{}
+  foreach ($k in $rawStartEnv.Keys) {
+    $v = "$($rawStartEnv[$k])" -replace '\{PORT\}', "$port"
+    if ($useToken) { $v = $v -replace '\{TOKEN\}', "$script:shutdownToken" }
+    $startEnv[$k] = $v
+  }
+  # Token apps also inject the shutdown-token env var at spawn (the daemon reads it and only
+  # honours a shutdown POST bearing the matching token).
+  if ($useToken) { $startEnv[$tokenEnvVar] = $script:shutdownToken }
+
+  # Small UI-thread wrappers that bind the app-specific parameters so the rest of the host reads
+  # cleanly (the worker binds them itself from the passed-in config args).
+  function Get-LiveUrl { return (Get-RunningUrl $infoFile $port $serviceName (Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1')) }
+  function Start-DaemonHere($proc) { return (Start-Daemon $root $port $startCommand $portEnvVar $startEnv) }
+  function Stop-DaemonHere([bool]$forceKill, [bool]$skipGraceful = $false) { Stop-Daemon $infoFile $port $serviceName (Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1') $script:shutdownToken $headerPrefix $forceKill $skipGraceful }
+
+  # --- Portable-window open path (UI-thread only) --------------------------------------
+  # First installed Chromium-family browser that understands --app= (msedge preferred, then
+  # Chrome), or $null. Mirrors src/portable-window.mjs's Windows candidate list so the tray's
+  # cold-start behavior (before the daemon is up) matches the daemon's own.
+  function Resolve-ChromiumBrowser {
+    $candidates = @()
+    $pf86 = ${env:ProgramFiles(x86)}
+    if ($pf86) { $candidates += (Join-Path $pf86 "Microsoft\Edge\Application\msedge.exe") }
+    if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles "Microsoft\Edge\Application\msedge.exe") }
+    if ($env:ProgramFiles) { $candidates += (Join-Path $env:ProgramFiles "Google\Chrome\Application\chrome.exe") }
+    if ($pf86) { $candidates += (Join-Path $pf86 "Google\Chrome\Application\chrome.exe") }
+    if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe") }
+    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
+    return $null
+  }
+
+  # Open the app UI at $url, honouring portableMode: re-reads runtime.json FRESH on every call
+  # (so a setting flipped after this tray started is picked up on the next open) and, when
+  # portableMode is truthy AND a Chromium browser is found, launches it as a chromeless --app=
+  # window (with a dedicated profile) instead of a normal tab. Never throws — worst case it
+  # falls back. Its body NEVER references hideTrayIcon or $tray.Visible: visibility and
+  # where-the-UI-opens are orthogonal concerns (the launcher tests assert this decoupling).
+  function Open-AppUi([string]$url) {
+    $portable = $false
+    try {
+      if (Test-Path $infoFile) {
+        $info = Get-Content $infoFile -Raw | ConvertFrom-Json
+        if ($info.portableMode) { $portable = $true }
+      }
+    } catch { $portable = $false }
+    if ($portable) {
+      $browser = Resolve-ChromiumBrowser
+      if ($browser) {
+        # Dedicated Chromium profile (sibling of runtime.json, named 'portable-profile') so the
+        # app window remembers its own size/position across launches instead of sharing/fighting
+        # over the default profile — the same convention the daemon's POST /api/portable-window
+        # uses, so both open paths agree. If it can't be created, still open the window (just
+        # without geometry memory) rather than dropping to a plain tab.
+        $profileDir = Join-Path (Split-Path -Parent $infoFile) "portable-profile"
+        $profileArgs = @()
+        try {
+          if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Force -Path $profileDir | Out-Null }
+          $profileArgs = @("--user-data-dir=`"$profileDir`"", "--no-first-run", "--no-default-browser-check")
+        } catch {
+          $profileArgs = @()
+        }
+        Start-Process $browser -ArgumentList ($profileArgs + @("--app=$url"))
+        return
+      }
+    }
+    Start-Process $url
+  }
+
+  # "Hide tray icon" opt-in (web Settings → runtime.json's hideTrayIcon, same pattern as
+  # portableMode). Read fresh every call. Only ever gates the NotifyIcon's .Visible — the icon
+  # object itself is ALWAYS created (Quit/menu/watchdog machinery hangs off it). Missing/corrupt
+  # runtime.json ⇒ icon stays visible (default).
+  function Get-HideTrayIcon {
+    try {
+      if (Test-Path $infoFile) {
+        $info = Get-Content $infoFile -Raw | ConvertFrom-Json
+        if ($info.hideTrayIcon) { return $true }
+      }
+    } catch {}
+    return $false
+  }
+
+  # --- Rebuild command resolver --------------------------------------------------------
+  # RebuildCommand is either a plain string or a scriptblock(appRoot, scriptDir) resolver
+  # (ReDesign: Rebuild.bat-first, then npm-run-build fallback). Resolve fresh each time.
+  $rebuildSpec = Get-TrayConfigValue $Config 'RebuildCommand' $null
+  function Resolve-RebuildCommand {
+    if ($null -eq $rebuildSpec) { return $null }
+    if ($rebuildSpec -is [scriptblock]) {
+      try { return (& $rebuildSpec $root $scriptDir) } catch { return $null }
+    }
+    return $rebuildSpec
+  }
+  $rebuildLogName = Get-TrayConfigValue $Config 'RebuildLogName' 'Rebuild.log'
+  $isDevTree = [bool]$Config.IsDevTree
+
+  # --- Mutex: one tray host per (app / checkout). Acquired BEFORE NotifyIcon creation. ---
+  # A listening port WITHOUT this mutex means the daemon is running headless. 'attach' hosts a
+  # tray for it; 'warn' refuses (ReDesign — a headless orphan the user must stop). Either way the
+  # loser branch (mutex already held elsewhere) resolves the running URL, opens it, and returns
+  # WITHOUT creating an icon or any timers — so exactly one tray icon ever exists per session.
+  function Release-TrayMutex {
+    if ($script:ownsTrayMutex -and $script:trayMutex) {
+      try { $script:trayMutex.ReleaseMutex() } catch {}
+    }
+    if ($script:trayMutex) {
+      try { $script:trayMutex.Dispose() } catch {}
+    }
+    $script:trayMutex = $null
+    $script:ownsTrayMutex = $false
+  }
+
+  $createdMutex = $false
+  try {
+    $script:trayMutex = New-Object System.Threading.Mutex($true, $Config.MutexName, [ref]$createdMutex)
+    $script:ownsTrayMutex = $createdMutex
+    if (-not $createdMutex) {
+      # A non-abandoned failure to create means someone else owns it — treat as loser below.
+      # (WaitOne semantics differ across the originals; New-Object(...,[ref]) is the uniform path.
+      # An AbandonedMutexException would surface on a later WaitOne, not here.)
+    }
+  } catch {
+    [System.Windows.Forms.MessageBox]::Show("$displayName could not verify that the tray host is available. It will not start without the tray icon.", $displayName) | Out-Null
+    Release-TrayMutex
+    return
+  }
+
+  if (-not $script:ownsTrayMutex) {
+    # Loser: open the running UI and exit — no icon, no timers. If Get-LiveUrl finds nothing yet,
+    # the winning instance is still cold-starting (daemon not bound to its port yet) — tell the
+    # user to wait rather than opening a browser tab against the bare, unvalidated preferred-port
+    # guess URL, which would just show a connection-refused error since nothing is listening.
+    $u = Get-LiveUrl
+    if ($u) {
+      Open-AppUi $u
+    } else {
+      [System.Windows.Forms.MessageBox]::Show("$displayName is already starting in the tray. Wait a moment, then open it from the tray icon.", $displayName) | Out-Null
+    }
+    if ($script:trayMutex) { try { $script:trayMutex.Dispose() } catch {} }
+    $script:trayMutex = $null
+    return
+  }
+
+  # --- Stray-daemon check (we won the mutex; is a daemon already alive?) ---
+  $existing = Get-LiveUrl
+  if ($existing) {
+    if ($onStray -eq 'warn') {
+      # ReDesign: a live daemon without our tray is a headless orphan — refuse and tell the user.
+      [System.Windows.Forms.MessageBox]::Show("$displayName is already serving at $existing, but the tray icon is not running. Stop that process, then run the shortcut again.", $displayName) | Out-Null
+      Release-TrayMutex
+      return
+    }
+    # 'attach' (RepoYeti/DevWebUI/CCManagerUI): adopt the live URL, host a tray for it, and don't
+    # spin up a second daemon. startedByUs stays $false so Quit/watchdog leave it alone.
+    $script:url = $existing
+  }
+
+  # --- Bun (runtime) must be on PATH before we try to launch anything ---
+  $runtimeCmd = Get-TrayConfigValue $Config 'RuntimeCheckCommand' 'bun'
+  if (-not $existing -and -not (Get-Command $runtimeCmd -ErrorAction SilentlyContinue)) {
+    [System.Windows.Forms.MessageBox]::Show("$runtimeCmd was not found on PATH.`nInstall it from https://bun.sh then click $displayName again.", $displayName) | Out-Null
+    Release-TrayMutex
+    return
+  }
+
+  # --- Create the tray icon (ALWAYS, on the winner path) ---
+  # The NotifyIcon is ALWAYS created here with Visible=$true BEFORE the hide gate — the
+  # icon-first guarantee the launcher tests assert. Quit/menu/watchdog all hang off it; only
+  # .Visible is ever gated. On failure: dispose, message, release the mutex, and don't start.
+  $tray = $null
+  try {
+    $tray = New-TrayHostIcon (Join-Path $scriptDir $Config.IconFile) $displayName
+    $tray.Visible = $true
+    # Gate visibility on the saved preference right after the unconditional line above. A LIVE
+    # re-read happens on the health timer below so re-enabling from web Settings restores the
+    # icon within a few seconds without restarting anything.
+    if (Get-HideTrayIcon) { $tray.Visible = $false }
+  } catch {
+    if ($tray) { try { $tray.Visible = $false; $tray.Dispose() } catch {} }
+    [System.Windows.Forms.MessageBox]::Show("$displayName could not start because the tray icon could not be created.`n`n$($_.Exception.Message)", $displayName) | Out-Null
+    Release-TrayMutex
+    return
+  }
+
+  # --- Cold start: first-run bootstrap + launch the daemon (only if none already alive) ---
+  if (-not $existing) {
+    # First run (blocking, once): the app's install/build-if-missing bootstrap. The tray icon is
+    # already visible so the app doesn't look hung. $null to skip.
+    $firstRun = Get-TrayConfigValue $Config 'FirstRun' $null
+    if ($firstRun) { try { & $firstRun $root } catch {} }
+
+    $startProc = Start-DaemonHere $null
+    if ($startProc) { $script:shared.serverPid = $startProc.Id }
+    $urlHost = Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1'
+    $readyUrl = Wait-ForUrl $infoFile $port $serviceName $urlHost $startupWaitSec $startProc
+    if ($readyUrl) { $script:url = $readyUrl }
+    $script:startedByUs = $true
+
+    # RepoYeti-style "started but not serving" guidance (most-likely cause: no scan root). Only
+    # when the app supplied a hint AND nothing is serving after the wait.
+    $noScanHint = Get-TrayConfigValue $Config 'NoScanRootHint' $null
+    if ($noScanHint -and -not (Get-LiveUrl)) {
+      Stop-DaemonHere $true
+      [System.Windows.Forms.MessageBox]::Show($noScanHint, $displayName) | Out-Null
+      $tray.Visible = $false
+      $tray.Dispose()
+      Release-TrayMutex
+      return
+    }
+  }
+
+  # =====================================================================================
+  # Background worker — runs the whole rebuild+restart (or plain restart) sequence off the UI
+  # thread and returns a result object. Self-contained: it re-defines the server-control helpers
+  # from the passed-in text so it needs nothing from the parent runspace. Nine positional args
+  # (order-dependent, must match the AddArgument sequence in Start-Job-Async exactly).
+  # =====================================================================================
+  $worker = {
+    param($appRoot, $appScriptDir, $infoFile, $appPort, $service, $urlHost, $startCommand, $portEnvVar, $extraEnvJson, $token, $headerPrefix, $doRebuild, $buildCommand, $rebuildLogName, $helpersText, $shared, $isDevTree, $restartRetries, $usePortFreeWait, $workerWaitSec)
+    $ErrorActionPreference = 'SilentlyContinue'
+    . ([scriptblock]::Create($helpersText))
+    # Re-hydrate the extra-env hashtable from JSON (a Synchronized hashtable doesn't marshal
+    # cleanly across the runspace as a live object; JSON is the safe wire format).
+    $extraEnv = @{}
+    if ($extraEnvJson) {
+      try {
+        $obj = $extraEnvJson | ConvertFrom-Json
+        foreach ($p in $obj.PSObject.Properties) { $extraEnv[$p.Name] = $p.Value }
+      } catch {}
+    }
+    $result = [pscustomobject]@{ Ok = $true; Skipped = $false; Ready = $false; Url = $null }
+
+    # Defense-in-depth: refuse a rebuild outside a dev tree even if one was somehow requested
+    # (the menu item isn't even added there, and Start-Job-Async re-checks too — triple gate).
+    if ($doRebuild -and -not $isDevTree) { $result.Ok = $false; return $result }
+
+    if ($doRebuild) {
+      if (-not $buildCommand) {
+        $result.Skipped = $true
+      } else {
+        $logPath = Join-Path $appScriptDir $rebuildLogName
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "cmd.exe"
+        $psi.Arguments = "/c cd /d `"$appRoot`" && $buildCommand > `"$logPath`" 2>&1"
+        $psi.WorkingDirectory = $appRoot
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.WindowStyle = "Hidden"
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $shared.buildPid = $p.Id
+        # Poll HasExited (interruptible) instead of WaitForExit so a Quit can cancel promptly and
+        # reap the build tree instead of the UI blocking on it.
+        while (-not $p.HasExited) {
+          if ($shared.cancel) { try { & taskkill /PID $p.Id /T /F 2>$null | Out-Null } catch {}; $result.Ok = $false; return $result }
+          Start-Sleep -Milliseconds 200
+        }
+        $shared.buildPid = 0
+        if ($p.ExitCode -ne 0) { $result.Ok = $false; return $result }
+      }
+    }
+    if ($shared.cancel) { return $result }
+
+    Stop-Daemon $infoFile $appPort $service $urlHost $token $headerPrefix $true
+    if ($usePortFreeWait) { Wait-PortFree $appPort 6 | Out-Null }
+    Start-Sleep -Milliseconds 300
+    $sp = Start-Daemon $appRoot $appPort $startCommand $portEnvVar $extraEnv
+    if ($sp) { $shared.serverPid = $sp.Id }
+    $u = Wait-ForUrl $infoFile $appPort $service $urlHost $workerWaitSec $sp
+    $result.Url = $u
+    $result.Ready = [bool]$u
+
+    # Optional extra restart attempts (ReDesign does ONE): slow/failed to bind ⇒ kill the tracked
+    # process (even if it never listened), wait for the port, and retry.
+    $attempt = 0
+    while (-not $result.Ready -and -not $shared.cancel -and $attempt -lt $restartRetries) {
+      $attempt++
+      if ($shared.serverPid -gt 0) { try { & taskkill /PID $shared.serverPid /T /F 2>$null | Out-Null } catch {} }
+      Stop-Daemon $infoFile $appPort $service $urlHost $token $headerPrefix $true
+      if ($usePortFreeWait) { Wait-PortFree $appPort 6 | Out-Null }
+      Start-Sleep -Milliseconds 400
+      $sp = Start-Daemon $appRoot $appPort $startCommand $portEnvVar $extraEnv
+      if ($sp) { $shared.serverPid = $sp.Id }
+      $u = Wait-ForUrl $infoFile $appPort $service $urlHost $workerWaitSec $sp
+      $result.Url = $u
+      $result.Ready = [bool]$u
+    }
+    return $result
+  }
+
+  # --- Worker plumbing + watchdog state ------------------------------------------------
+  $script:busy = $false
+  $script:ps = $null
+  $script:psAsync = $null
+  $script:jobKind = ''
+  # Shared with the worker runspace (same process heap): the worker records the PIDs it spawns so
+  # Quit can reap them, and Quit sets `cancel` to stop the worker early.
+  $script:shared = [hashtable]::Synchronized(@{ buildPid = 0; serverPid = 0; cancel = $false })
+  # Auto-restart watchdog state. Nothing else brings the daemon back if it dies on its own. This
+  # host is the natural supervisor: the health timer probes /api/health and relaunches a daemon
+  # that died. Guards keep it from fighting deliberate stops:
+  #   · $intentionalStop  — set during Quit so we never resurrect a daemon we're closing.
+  #   · $script:busy       — a Rebuild/Restart worker owns the daemon; the watchdog stands down.
+  #   · $script:startedByUs — only revive a daemon THIS tray launched (attach apps leave an
+  #                            externally-owned instance alone).
+  #   · reviveGraceUntil   — after firing a relaunch, wait for it to bind before trying again.
+  #   · crash-loop guard   — >= MAX restarts within WINDOW seconds ⇒ pause + notify.
+  $script:intentionalStop = $false
+  $script:autoRestartPaused = $false
+  $script:reviveGraceUntil = [DateTime]::MinValue
+  $script:restartTimes = New-Object System.Collections.Generic.List[DateTime]
+  # Re-entrancy guard: the Quit menu item and the watch timer can both fire the full teardown.
+  $script:quitting = $false
+
+  # --- Menu -----------------------------------------------------------------------------
+  $menu = New-Object System.Windows.Forms.ContextMenuStrip
+  $openItem = New-Object System.Windows.Forms.ToolStripMenuItem($Config.MenuOpenLabel)
+  # "Rebuild && Restart" — the literal double-ampersand is deliberate: WinForms treats a single
+  # '&' as a mnemonic-underline escape, so '&&' renders one visible '&'. Only shown in a dev tree.
+  $rebuildItem = New-Object System.Windows.Forms.ToolStripMenuItem("Rebuild && Restart")
+  $restartItem = New-Object System.Windows.Forms.ToolStripMenuItem("Restart")
+  $quitItem = New-Object System.Windows.Forms.ToolStripMenuItem("Quit")
+
+  # --- pollTimer: marshals the async worker result back to the UI thread ---------------
+  # Ticks on the UI thread — polls the worker and, once it finishes, reports the outcome, updates
+  # the live URL, and re-enables the menu. Only place worker results touch the UI (no cross-thread
+  # control access). Interval matches the family default.
+  $pollTimer = New-Object System.Windows.Forms.Timer
+  $pollTimer.Interval = 350
+  $pollTimer.Add_Tick({
+    if (-not $script:ps -or -not $script:psAsync) { $pollTimer.Stop(); return }
+    if (-not $script:psAsync.IsCompleted) { return }
+    $pollTimer.Stop()
+    $out = $null
+    try {
+      $res = $script:ps.EndInvoke($script:psAsync)
+      if ($res -and $res.Count -gt 0) { $out = $res[$res.Count - 1] }
+    } catch {}
+    try { $script:ps.Dispose() } catch {}
+    $script:ps = $null; $script:psAsync = $null
+
+    if ($out -and -not $out.Ok) {
+      $tray.ShowBalloonTip(3500, $displayName, "Build failed. See misc\$rebuildLogName.", [System.Windows.Forms.ToolTipIcon]::Error)
+    } elseif ($out -and $out.Ready) {
+      if ($out.Url) { $script:url = $out.Url }
+      $script:startedByUs = $true
+      if ($script:jobKind -eq 'rebuild') { Open-AppUi $script:url }
+    } else {
+      $tray.ShowBalloonTip(3500, $displayName, "Restarted, but $displayName isn't answering yet.", [System.Windows.Forms.ToolTipIcon]::Warning)
+    }
+    $rebuildItem.Enabled = $true
+    $restartItem.Enabled = $true
+    $script:busy = $false
+  })
+
+  # Kick off the worker without blocking the UI thread.
+  function Start-Job-Async([bool]$doRebuild) {
+    if ($script:busy) { return }
+    # Defense-in-depth: the menu item is never even added outside a dev tree, but refuse a rebuild
+    # request here too rather than trust only the menu's absence.
+    if ($doRebuild -and -not $isDevTree) { return }
+    $script:busy = $true
+    $script:jobKind = if ($doRebuild) { 'rebuild' } else { 'restart' }
+    # An explicit Restart/Rebuild is the user re-arming things: clear any crash-loop pause and the
+    # restart history so the watchdog resumes cleanly once the worker hands the daemon back.
+    $script:autoRestartPaused = $false
+    $script:restartTimes.Clear()
+    $rebuildItem.Enabled = $false
+    $restartItem.Enabled = $false
+
+    try {
+      $script:shared = [hashtable]::Synchronized(@{ buildPid = 0; serverPid = 0; cancel = $false })
+      $buildCommand = if ($doRebuild) { Resolve-RebuildCommand } else { $null }
+      $urlHost = Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1'
+      $extraEnvJson = $startEnv | ConvertTo-Json -Compress
+      $script:ps = [System.Management.Automation.PowerShell]::Create()
+      [void]$script:ps.AddScript($worker.ToString())
+      [void]$script:ps.AddArgument($root)              # 1  appRoot
+      [void]$script:ps.AddArgument($scriptDir)         # 2  appScriptDir
+      [void]$script:ps.AddArgument($infoFile)          # 3  infoFile
+      [void]$script:ps.AddArgument($port)              # 4  appPort
+      [void]$script:ps.AddArgument($serviceName)       # 5  service
+      [void]$script:ps.AddArgument($urlHost)           # 6  urlHost
+      [void]$script:ps.AddArgument($startCommand)      # 7  startCommand
+      [void]$script:ps.AddArgument($portEnvVar)        # 8  portEnvVar
+      [void]$script:ps.AddArgument($extraEnvJson)      # 9  extraEnvJson
+      [void]$script:ps.AddArgument($script:shutdownToken) # 10 token
+      [void]$script:ps.AddArgument($headerPrefix)      # 11 headerPrefix
+      [void]$script:ps.AddArgument($doRebuild)         # 12 doRebuild
+      [void]$script:ps.AddArgument($buildCommand)      # 13 buildCommand
+      [void]$script:ps.AddArgument($rebuildLogName)    # 14 rebuildLogName
+      [void]$script:ps.AddArgument($ServerControl.ToString()) # 15 helpersText
+      [void]$script:ps.AddArgument($script:shared)     # 16 shared
+      [void]$script:ps.AddArgument($isDevTree)         # 17 isDevTree
+      [void]$script:ps.AddArgument($restartRetries)    # 18 restartRetries
+      [void]$script:ps.AddArgument($usePortFreeWait)   # 19 usePortFreeWait
+      [void]$script:ps.AddArgument($workerWaitSec)     # 20 workerWaitSec
+      $script:psAsync = $script:ps.BeginInvoke()
+      $pollTimer.Start()
+    } catch {
+      # Kicking off the runspace failed — never leave the menu stuck disabled.
+      if ($script:ps) { try { $script:ps.Dispose() } catch {} }
+      $script:ps = $null; $script:psAsync = $null
+      $rebuildItem.Enabled = $true
+      $restartItem.Enabled = $true
+      $script:busy = $false
+      $tray.ShowBalloonTip(3500, $displayName, "Couldn't start the background worker. Try again.", [System.Windows.Forms.ToolTipIcon]::Error)
+    }
+  }
+
+  # --- Quit teardown -------------------------------------------------------------------
+  # Called by BOTH the Quit menu item AND the watch timer that fires on a web-UI "Shut Down"
+  # (which drops the sentinel). Sets intentionalStop BEFORE any teardown so the watchdog doesn't
+  # relaunch what we're stopping. Token apps ask their own daemon to shut down gracefully first
+  # (bounded, so Quit can't hang); force-kill apps go straight to the port sweep. Reaps in-flight
+  # worker PIDs when busy; releases the mutex; exits the message loop.
+  function Invoke-QuitApp {
+    if ($script:quitting) { return }   # re-entrancy guard (menu + watch timer could both fire)
+    $script:quitting = $true
+    $script:intentionalStop = $true
+    if ($healthTimer) { try { $healthTimer.Stop() } catch {} }
+    if ($script:shutdownRequestFile) { Remove-Item $script:shutdownRequestFile -Force -ErrorAction SilentlyContinue }
+    if ($watchTimer) { try { $watchTimer.Stop() } catch {} }
+    $script:shared.cancel = $true
+    $pollTimer.Stop()
+    # Token apps: best-effort graceful shutdown of OUR own daemon, bounded (3s) so Quit can't hang.
+    if ($useToken -and $script:startedByUs) {
+      try { Invoke-DaemonShutdown $script:url $script:shutdownToken $headerPrefix 3 | Out-Null } catch {}
+    }
+    # If a job is in flight, reap what the worker spawned (build + a daemon that may not have bound
+    # yet) so nothing is orphaned and $script:ps.Stop() doesn't block on the build's WaitForExit.
+    # When idle the tracked PIDs are stale (the live daemon is killed by-port below) — skip so we
+    # never taskkill a reused PID.
+    if ($script:busy) {
+      foreach ($k in @('buildPid', 'serverPid')) {
+        $procId = $script:shared[$k]
+        if ($procId -and $procId -gt 0) { try { & taskkill /PID $procId /T /F 2>$null | Out-Null } catch {} }
+      }
+    }
+    if ($script:ps) { try { $script:ps.Stop(); $script:ps.Dispose() } catch {} }
+    # Stop the live daemon. Force-kill apps (ReDesign/RepoYeti) ALWAYS sweep the port at Quit —
+    # matching their originals' unconditional Stop-Server/Stop-RepoYeti call (they own the daemon
+    # on the winner path). Token apps (DevWebUI/CCManagerUI) only stop a daemon THEY started, so an
+    # attached instance owned by another session is left running. The graceful POST above already
+    # ran for token apps (bounded to 3s so Quit can't hang) — pass skipGraceful so this
+    # belt-and-braces call goes straight to the port-kill instead of re-running a second,
+    # 20s-bounded graceful POST + 10s poll if the daemon is still alive (which would turn a fast
+    # Quit into a ~30s hang, the exact case the fast fallback exists for).
+    if (-not $useToken) {
+      Stop-DaemonHere $true
+    } elseif ($script:startedByUs) {
+      Stop-DaemonHere $true $true
+    }
+    $tray.Visible = $false
+    $tray.Dispose()
+    Release-TrayMutex
+    [System.Windows.Forms.Application]::Exit()
+  }
+
+  $openItem.Add_Click({ Open-AppUi $script:url })
+  $rebuildItem.Add_Click({ Start-Job-Async $true })
+  $restartItem.Add_Click({ Start-Job-Async $false })
+  $quitItem.Add_Click({ Invoke-QuitApp })
+
+  $menu.Items.Add($openItem) | Out-Null
+  # Only shown in a dev tree — a distributed build never gets this menu item at all (not merely a
+  # disabled one). Gated here at menu-ADD time; re-checked in Start-Job-Async and the worker.
+  if ($isDevTree -and $rebuildSpec) { $menu.Items.Add($rebuildItem) | Out-Null }
+  $menu.Items.Add($restartItem) | Out-Null
+  $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+  $menu.Items.Add($quitItem) | Out-Null
+  $tray.ContextMenuStrip = $menu
+  $tray.Add_MouseDoubleClick({ Open-AppUi $script:url })
+
+  # --- Auto-restart watchdog -----------------------------------------------------------
+  # Ticks on the UI thread; each tick is cheap (one /api/health probe) and NEVER blocks — a
+  # relaunch is fire-and-forget (Start-Daemon returns as soon as it spawns), and recovery is
+  # observed on a later tick, so the tray stays responsive even while the daemon reboots. Also
+  # live-syncs the tray icon's visibility with the hideTrayIcon setting so re-enabling it in web
+  # Settings restores the icon within one tick, no restart needed.
+  $healthTimer = New-Object System.Windows.Forms.Timer
+  $healthTimer.Interval = 5000
+  $healthTimer.Add_Tick({
+    # Deliberate close, a Rebuild/Restart worker owns the daemon, or (attach apps) this tray never
+    # launched the daemon → stand down. The visibility live-sync below still needs to run on every
+    # tick, so do it BEFORE this early-return only when we're not shutting down.
+    if ($script:intentionalStop -or $script:busy) { return }
+
+    # Live-sync the tray icon's visibility with the web Settings toggle (hideTrayIcon).
+    $wantHidden = Get-HideTrayIcon
+    if ($tray.Visible -eq $wantHidden) { $tray.Visible = -not $wantHidden }
+
+    # Attach apps: only supervise a daemon we started — UNLESS the app opts out via
+    # WatchdogRequiresOwnership=$false (CCManagerUI: OLD revived regardless of ownership).
+    if ($useToken -and -not $script:startedByUs -and $watchdogRequiresOwnership) { return }
+
+    $u = Get-LiveUrl
+    if ($u) { $script:url = $u; return }         # healthy (track where it actually bound)
+
+    # Down. Wait out the grace window after a relaunch so a still-booting daemon isn't
+    # double-spawned, and honour a crash-loop pause.
+    if ((Get-Date) -lt $script:reviveGraceUntil) { return }
+    if ($script:autoRestartPaused) { return }
+
+    # Crash-loop guard: prune attempts outside the window, then bail if we've hit the cap.
+    $cutoff = (Get-Date).AddSeconds(-$CrashLoopWindowSec)
+    for ($i = $script:restartTimes.Count - 1; $i -ge 0; $i--) {
+      if ($script:restartTimes[$i] -lt $cutoff) { $script:restartTimes.RemoveAt($i) }
+    }
+    if ($script:restartTimes.Count -ge $CrashLoopMax) {
+      $script:autoRestartPaused = $true
+      $tray.ShowBalloonTip(6000, $displayName, "$displayName keeps crashing - auto-restart paused. See $logPath, then use Restart to try again.", [System.Windows.Forms.ToolTipIcon]::Error)
+      return
+    }
+
+    # Relaunch (same path the tray uses everywhere else — cmd->bun so taskkill /T can reap it).
+    $script:restartTimes.Add((Get-Date))
+    $script:reviveGraceUntil = (Get-Date).AddSeconds(20)
+    $script:startedByUs = $true
+    $relaunched = Start-DaemonHere $null
+    if ($relaunched) { $script:shared.serverPid = $relaunched.Id }
+    $tray.ShowBalloonTip(4000, $displayName, "$displayName stopped unexpectedly - restarting. Log: $logPath", [System.Windows.Forms.ToolTipIcon]::Warning)
+  })
+
+  # --- Watch timer: full-shutdown sentinel + (for some apps) the hide-tray live-sync ----
+  # Only created when the app has a sentinel. Polls for the shutdown.request the daemon drops on a
+  # web-UI "Shut Down" (or `<app> stop`) and tears the WHOLE app down (reusing Quit's teardown so
+  # $intentionalStop is set and the watchdog stands down). Skipped while $script:busy so a
+  # Rebuild/Restart's internal stop isn't mistaken for a user quit. Guarded so a Quit already in
+  # progress is left alone.
+  $watchTimer = $null
+  if ($script:shutdownRequestFile) {
+    # Clear any stale sentinel from a hard-killed previous run so it can't make us quit instantly.
+    Remove-Item $script:shutdownRequestFile -Force -ErrorAction SilentlyContinue
+    $watchTimer = New-Object System.Windows.Forms.Timer
+    $watchTimer.Interval = 500
+    $watchTimer.Add_Tick({
+      if ($script:intentionalStop) { return }
+      if ($script:busy) { return }
+      if (Test-Path $script:shutdownRequestFile) {
+        $watchTimer.Stop()
+        Remove-Item $script:shutdownRequestFile -Force -ErrorAction SilentlyContinue
+        Invoke-QuitApp
+      }
+    })
+    $watchTimer.Start()
+  }
+
+  $healthTimer.Start()
+
+  # --- Startup banner + open the UI ----------------------------------------------------
+  $tray.ShowBalloonTip(2500, $displayName, "Running in the tray - right-click for options.", [System.Windows.Forms.ToolTipIcon]::Info)
+  # Wait for a freshly-spawned daemon to bind before opening the browser, so the first paint isn't
+  # ERR_CONNECTION_REFUSED (Bun takes ~1s to boot), resolving $script:url to wherever it ACTUALLY
+  # bound (it may have hopped past the preferred port). Only meaningful on the cold-start path;
+  # when we attached to a live daemon, $script:url is already correct.
+  if ($script:startedByUs) {
+    $urlHost = Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1'
+    $readyUrl = Wait-ForUrl $infoFile $port $serviceName $urlHost $startupWaitSec $null
+    if ($readyUrl) { $script:url = $readyUrl }
+  }
+  Open-AppUi $script:url
+
+  # Run the WinForms message loop (keeps the tray alive until Quit). The finally guarantees the
+  # mutex is released even on a crashed exit of the loop.
+  try {
+    [System.Windows.Forms.Application]::Run()
+  } finally {
+    Release-TrayMutex
+  }
+}

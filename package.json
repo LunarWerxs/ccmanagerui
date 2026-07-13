@@ -1,0 +1,28 @@
+{
+  "name": "ccmanagerui",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"bun run dev:server\" \"bun run dev:web\"",
+    "dev:server": "bun run --cwd server dev",
+    "dev:web": "bun run --cwd web dev",
+    "build": "bun run --cwd web build",
+    "start": "bun run --cwd server start",
+    "mcp": "bun server/src/mcp.ts",
+    "check": "biome check . && bun run --cwd web check:i18n && bun run check:kit",
+    "check:kit": "node ../lunarwerx-ui/sync.mjs --check --app ccmanagerui",
+    "lint": "biome check .",
+    "typecheck": "bun run --cwd web typecheck && bun run --cwd server typecheck",
+    "format": "biome format --write .",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "concurrently": "^9.1.0"
+  }
+}

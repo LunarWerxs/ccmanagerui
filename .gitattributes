@@ -1,0 +1,21 @@
+# Normalize line endings on checkin, check out as LF everywhere (incl. Windows) to stop
+# the LF/CRLF diff churn. Git still auto-detects binary files.
+* text=auto eol=lf
+
+# Windows-only scripts are edited/run on Windows and read more naturally with CRLF; keep them
+# native so double-clicking / editors don't complain, but this is cosmetic — `eol=lf` above
+# would work fine too since Notepad/PowerShell/cmd all handle LF now.
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets — never touch, never diff as text.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.lnk binary

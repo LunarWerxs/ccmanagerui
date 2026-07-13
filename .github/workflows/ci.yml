@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: lint · typecheck · build · test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint + format (Biome)
+        run: bun run lint
+
+      - name: i18n check (web)
+        run: bun run --cwd web check:i18n
+
+      - name: Build (web SPA)
+        run: bun run build
+
+      - name: Test
+        run: bun test
+
+    # NOTE: the windows-latest leg exercises the tray's Windows -SelfTest
+    # (tests/launcher.test.ts's `test.skipIf(!isWin)` cases run automatically here, skip on
+    # ubuntu) and the golden crypto vectors in server/tests/instances-crypto.test.ts, which are
+    # gated on BOTH platform and the presence of this machine's real credential fixture — they
+    # skip gracefully on any CI runner (no fixture present) rather than failing.
+    #
+    # check:kit is intentionally NOT run here — it needs the private lunarwerx-ui kit repo as a
+    # sibling checkout, which CI doesn't have.

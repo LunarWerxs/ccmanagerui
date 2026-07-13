@@ -1,0 +1,774 @@
+<script setup lang="ts">
+import {
+  ArrowLeft,
+  Boxes,
+  Check,
+  Clock,
+  Copy,
+  Download,
+  FileSymlink,
+  FolderGit2,
+  GitBranch,
+  ListTodo,
+  MessagesSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
+  Wrench,
+  X,
+} from '@lucide/vue'
+import { useMediaQuery, useStorage } from '@vueuse/core'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
+import SessionComposer, { type ComposerTarget } from '@/components/SessionComposer.vue'
+import StatusBadge from '@/components/StatusBadge.vue'
+import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
+import { useData } from '@/composables/useData'
+import { useShellWidth } from '@/composables/useShellWidth'
+import type { SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
+import * as api from '@/lib/api'
+import { baseName, shortId, timeAgo } from '@/lib/format'
+import IconTooltip from '@/shell/IconTooltip.vue'
+
+const { sessions, sessionsLoading, refreshSessions, queue, sessionInstanceFilter } = useData()
+const { t } = useI18n()
+
+// Named instances for the filter dropdown; "default"/"other" are fixed options.
+// A failed fetch just leaves the named entries out.
+const instanceNames = ref<string[]>([])
+onMounted(async () => {
+  try {
+    instanceNames.value = (await api.listInstances()).map((i) => i.name)
+  } catch {
+    /* dropdown falls back to All / Default / Other */
+  }
+})
+watch(sessionInstanceFilter, () => refreshSessions())
+
+const sessionFileUrl = api.sessionFileUrl
+async function openFile(id: string) {
+  try {
+    const r = await api.openSessionFile(id)
+    if (!r.ok) toast.error(t('sessions.openFileFailed'))
+  } catch {
+    toast.error(t('sessions.openFileFailed'))
+  }
+}
+
+const search = ref('')
+const selectedId = ref<string | null>(null)
+const tail = ref<TailResult | null>(null)
+const tailLoading = ref(false)
+// verbose mode: also show tool_use / tool_result events (off = responses only)
+const showTools = useStorage('ccmanagerui.sessions.showTools', false)
+
+// --- sidebar: persisted drag-resize + animated collapse, auto-collapsing when narrow ---
+const RAIL_WIDTH = 44
+const SIDEBAR_MIN = 240
+const SIDEBAR_MAX = 560
+const SIDEBAR_DEFAULT = 340
+const clampWidth = (w: number) => Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, w))
+
+const sidebarWidth = useStorage('ccmanagerui.sessions.sidebarWidth', SIDEBAR_DEFAULT)
+sidebarWidth.value = clampWidth(sidebarWidth.value)
+
+const isWide = useMediaQuery('(min-width: 1024px)')
+const collapsed = ref(!isWide.value)
+watch(isWide, (wide) => {
+  collapsed.value = !wide
+})
+
+const resizing = ref(false)
+function startResize(e: PointerEvent) {
+  const startX = e.clientX
+  const startWidth = sidebarWidth.value
+  resizing.value = true
+  const onMove = (ev: PointerEvent) => {
+    sidebarWidth.value = clampWidth(startWidth + ev.clientX - startX)
+  }
+  const onUp = () => {
+    resizing.value = false
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+  }
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+}
+
+// Never wider than the viewport allows (a 340px sidebar on a 390px phone would
+// crush the transcript); the width transition animates the collapse toggle but is
+// suspended during a drag so resizing tracks the pointer 1:1.
+const asideStyle = computed(() => ({
+  width: collapsed.value ? `${RAIL_WIDTH}px` : `min(${sidebarWidth.value}px, calc(100vw - 56px))`,
+}))
+
+const filtered = computed(() => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return sessions.value
+  return sessions.value.filter(
+    (s) =>
+      s.title.toLowerCase().includes(q) ||
+      s.cwd.toLowerCase().includes(q) ||
+      s.session_id.includes(q),
+  )
+})
+
+// --- advanced (body) search: server-side, streams every transcript's raw content ---------
+// Deliberately independent of `filtered` above (client-side, metadata-only, always fast);
+// this is a slower opt-in path that only runs when the user explicitly submits it.
+const advancedOpen = ref(false)
+const advancedQuery = ref('')
+const advancedRegex = ref(false)
+const advancedCaseSensitive = useStorage('ccmanagerui.sessions.advancedCaseSensitive', false)
+const bodySearching = ref(false)
+const bodySearchActive = ref(false)
+const bodySearchQueryUsed = ref('')
+const bodyResults = ref<SessionSearchResult[]>([])
+
+async function runBodySearch() {
+  const q = advancedQuery.value.trim()
+  if (!q) return
+  bodySearching.value = true
+  try {
+    const results = await api.searchSessionBodies(q, {
+      regex: advancedRegex.value,
+      caseSensitive: advancedCaseSensitive.value,
+      instance: sessionInstanceFilter.value || undefined,
+    })
+    bodyResults.value = results
+    bodySearchQueryUsed.value = q
+    bodySearchActive.value = true
+    advancedOpen.value = false
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : ''
+    toast.error(msg || t('sessions.searchFailed'))
+  } finally {
+    bodySearching.value = false
+  }
+}
+
+function exitBodySearch() {
+  bodySearchActive.value = false
+  bodyResults.value = []
+}
+
+/** Jump from a body-search hit to the full transcript, same as clicking it in the plain list. */
+function selectFromBodyResult(r: SessionSearchResult) {
+  const s = sessions.value.find((x) => x.session_id === r.session_id)
+  if (s) {
+    exitBodySearch()
+    select(s)
+    return
+  }
+  // Not in the currently-loaded metadata window (e.g. older than the 200-session cap); still
+  // open the transcript directly by id so the hit isn't a dead end.
+  exitBodySearch()
+  selectedId.value = r.session_id
+  loadTail()
+}
+
+// Last-known summary, not a bare find(): an actively-written session can drop out of
+// one 12s scan cycle (partial JSONL mid-write), and a null flash would blank the
+// transcript and yank the shell width. Keep showing what we knew until it reappears.
+const selected = ref<SessionSummary | null>(null)
+watch(
+  [sessions, selectedId],
+  () => {
+    if (!selectedId.value) {
+      selected.value = null
+      return
+    }
+    const s = sessions.value.find((x) => x.session_id === selectedId.value)
+    if (s) selected.value = s
+  },
+  { immediate: true },
+)
+
+// an open transcript benefits from room; widen the whole shell while one is selected
+const { wide: shellWide } = useShellWidth()
+watch(
+  () => !!selected.value,
+  (hasSelection) => {
+    shellWide.value = hasSelection
+  },
+  { immediate: true },
+)
+onBeforeUnmount(() => {
+  shellWide.value = false
+})
+
+// --- transcript: long-output capping + per-message copy ---
+const LONG_CHARS = 1000
+const LONG_LINES = 16
+const isLong = (text: string) => text.length > LONG_CHARS || text.split('\n').length > LONG_LINES
+
+const events = computed(() =>
+  (tail.value?.events ?? []).map((ev) => ({ ...ev, long: isLong(ev.text) })),
+)
+
+const expandedMsgs = ref<Set<number>>(new Set())
+const isExpanded = (i: number) => expandedMsgs.value.has(i)
+function toggleExpand(i: number) {
+  const next = new Set(expandedMsgs.value)
+  if (next.has(i)) next.delete(i)
+  else next.add(i)
+  expandedMsgs.value = next
+}
+
+const copiedIdx = ref<number | null>(null)
+let copiedTimer: number | undefined
+function copyMessage(i: number, text: string) {
+  navigator.clipboard?.writeText(text).catch(() => {})
+  copiedIdx.value = i
+  window.clearTimeout(copiedTimer)
+  copiedTimer = window.setTimeout(() => {
+    copiedIdx.value = null
+  }, 1200)
+}
+
+const chatEl = ref<HTMLElement | null>(null)
+
+async function loadTail(opts: { silent?: boolean } = {}) {
+  const id = selectedId.value
+  if (!id) return
+  // measured BEFORE the fetch: whether the reader was already at the conversation's end
+  const el = chatEl.value
+  const nearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  if (!opts.silent) tailLoading.value = true
+  try {
+    const r = await api.getTail(id, { limit: 40, textOnly: !showTools.value })
+    if (selectedId.value !== id) return // selection moved on while we fetched
+    tail.value = r
+  } catch {
+    if (!opts.silent) tail.value = null
+  } finally {
+    if (!opts.silent) tailLoading.value = false
+  }
+  if (!opts.silent) expandedMsgs.value = new Set()
+  // chat convention: land at the bottom; silent refreshes only stick if already there
+  await nextTick()
+  if (!opts.silent || nearBottom) chatEl.value?.scrollTo({ top: chatEl.value.scrollHeight })
+}
+
+function select(s: SessionSummary) {
+  selectedId.value = s.session_id
+  loadTail()
+}
+
+watch(showTools, () => loadTail())
+
+// --- live transcript: follow the selected session's queue run -----------------
+// A run starting or finishing means the CLI just appended to the transcript on
+// disk; while one is active, poll so the reply streams into view.
+const runningRunId = computed(
+  () =>
+    queue.value.find((q) => q.session_id === selectedId.value && q.status === 'running')?.id ??
+    null,
+)
+let tailPollTimer: number | undefined
+watch(runningRunId, (id, oldId) => {
+  window.clearInterval(tailPollTimer)
+  if (id) tailPollTimer = window.setInterval(() => loadTail({ silent: true }), 4000)
+  if (!!id !== !!oldId && selectedId.value) loadTail({ silent: true })
+})
+onBeforeUnmount(() => window.clearInterval(tailPollTimer))
+
+// --- multi-select: pick several sessions, message them all at once ------------
+const selectMode = ref(false)
+const checkedIds = ref<Set<string>>(new Set())
+const isChecked = (s: SessionSummary) => checkedIds.value.has(s.session_id)
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value
+  if (!selectMode.value) checkedIds.value = new Set()
+}
+function toggleChecked(s: SessionSummary) {
+  const next = new Set(checkedIds.value)
+  if (next.has(s.session_id)) next.delete(s.session_id)
+  else next.add(s.session_id)
+  checkedIds.value = next
+}
+function checkAllFiltered() {
+  checkedIds.value = new Set(filtered.value.map((s) => s.session_id))
+}
+function rowClick(s: SessionSummary) {
+  if (selectMode.value) toggleChecked(s)
+  else select(s)
+}
+
+const composerTargets = computed<ComposerTarget[]>(() => {
+  if (selectMode.value)
+    return sessions.value
+      .filter((s) => checkedIds.value.has(s.session_id))
+      .map((s) => ({ session_id: s.session_id, title: s.title, cwd: s.cwd }))
+  const s = selected.value
+  return s ? [{ session_id: s.session_id, title: s.title, cwd: s.cwd }] : []
+})
+
+function onComposerSent(mode: 'now' | 'queued') {
+  // the queue watcher above catches the status flip; this covers the first tokens
+  if (mode === 'now' && selectedId.value) window.setTimeout(() => loadTail({ silent: true }), 1200)
+}
+
+function copy(text: string) {
+  navigator.clipboard?.writeText(text).catch(() => {})
+}
+</script>
+
+<template>
+  <div class="flex h-full min-h-0">
+    <!-- sidebar: session list in its own scroll column; collapses to a slim rail with an
+         animated width morph (the toggle button rides the sliding right edge) -->
+    <aside
+      class="relative min-h-0 shrink-0 overflow-hidden border-r border-border"
+      :class="resizing ? '' : 'transition-[width] duration-300 ease-in-out'"
+      :style="asideStyle"
+    >
+      <IconTooltip :label="collapsed ? $t('sessions.expandSidebar') : $t('sessions.collapseSidebar')">
+        <Button
+          variant="ghost"
+          size="icon"
+          class="absolute right-2 top-3 z-10"
+          @click="collapsed = !collapsed"
+        >
+          <PanelLeftOpen v-if="collapsed" />
+          <PanelLeftClose v-else />
+        </Button>
+      </IconTooltip>
+
+      <!-- expanded content keeps its full width while animating so it clips, not reflows -->
+      <div
+        class="flex h-full min-h-0 flex-col transition-opacity duration-200"
+        :class="collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'"
+        :style="{ width: `min(${sidebarWidth}px, calc(100vw - 56px))` }"
+      >
+        <div class="flex shrink-0 items-center gap-2 border-b border-border p-3 pr-11">
+          <div class="relative flex-1">
+            <Search class="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              v-model="search"
+              :placeholder="$t('sessions.searchPlaceholder')"
+              class="pl-8 pr-8"
+            />
+            <Popover v-model:open="advancedOpen">
+              <IconTooltip :label="$t('sessions.advancedSearch')" :description="$t('sessions.advancedSearchHint')">
+                <PopoverTrigger as-child>
+                  <button
+                    type="button"
+                    class="absolute right-2 top-1/2 -translate-y-1/2 rounded text-muted-foreground transition-colors hover:text-foreground"
+                    :aria-label="$t('sessions.advancedSearch')"
+                    @click="advancedQuery = advancedQuery || search"
+                  >
+                    <SlidersHorizontal class="size-4" />
+                  </button>
+                </PopoverTrigger>
+              </IconTooltip>
+              <PopoverContent align="end" class="w-80 space-y-3 p-3">
+                <p class="text-xs font-semibold">{{ $t('sessions.advancedSearchTitle') }}</p>
+                <div class="space-y-1.5">
+                  <label class="text-xs font-medium text-muted-foreground">
+                    {{ $t('sessions.advancedSearchQueryLabel') }}
+                  </label>
+                  <Input
+                    v-model="advancedQuery"
+                    :placeholder="$t('sessions.advancedSearchQueryPlaceholder')"
+                    class="font-mono text-xs"
+                    @keydown.enter="runBodySearch"
+                  />
+                </div>
+                <div class="flex items-center justify-between">
+                  <IconTooltip :label="$t('sessions.regexMode')" :description="$t('sessions.regexModeHint')">
+                    <span class="text-xs" tabindex="0">{{ $t('sessions.regexMode') }}</span>
+                  </IconTooltip>
+                  <Switch v-model="advancedRegex" size="sm" />
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-xs">{{ $t('sessions.caseSensitive') }}</span>
+                  <Switch v-model="advancedCaseSensitive" size="sm" />
+                </div>
+                <Button
+                  size="sm"
+                  class="w-full"
+                  :disabled="!advancedQuery.trim() || bodySearching"
+                  @click="runBodySearch"
+                >
+                  {{ bodySearching ? $t('sessions.searching') : $t('sessions.searchButton') }}
+                </Button>
+              </PopoverContent>
+            </Popover>
+          </div>
+          <IconTooltip :label="$t('sessions.refresh')" :description="$t('sessions.refreshHint')">
+            <Button variant="outline" size="icon" @click="refreshSessions">
+              <RefreshCw :class="sessionsLoading ? 'animate-spin' : ''" />
+            </Button>
+          </IconTooltip>
+          <DropdownMenu>
+            <IconTooltip :label="$t('sessions.filterInstance')" :description="$t('sessions.filterInstanceHint')">
+              <DropdownMenuTrigger as-child>
+                <Button :variant="sessionInstanceFilter ? 'secondary' : 'outline'" size="icon">
+                  <Boxes />
+                </Button>
+              </DropdownMenuTrigger>
+            </IconTooltip>
+            <DropdownMenuContent align="end" class="w-52">
+              <DropdownMenuRadioGroup v-model="sessionInstanceFilter">
+                <DropdownMenuRadioItem value="">{{ $t('sessions.instanceAll') }}</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="default">{{ $t('sessions.instanceDefault') }}</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem v-for="n in instanceNames" :key="n" :value="n">{{ n }}</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="other">{{ $t('sessions.instanceOther') }}</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <IconTooltip
+            :label="selectMode ? $t('sessions.exitMultiSelect') : $t('sessions.multiSelect')"
+            :description="selectMode ? undefined : $t('sessions.multiSelectHint')"
+          >
+            <Button :variant="selectMode ? 'secondary' : 'outline'" size="icon" @click="toggleSelectMode">
+              <ListTodo />
+            </Button>
+          </IconTooltip>
+        </div>
+
+        <div
+          v-if="selectMode"
+          class="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5 text-xs"
+        >
+          <span class="text-muted-foreground">{{ $t('sessions.selectedCount', { n: checkedIds.size }) }}</span>
+          <Button variant="ghost" size="xs" @click="checkAllFiltered">{{ $t('sessions.selectAll') }}</Button>
+          <Button
+            variant="ghost"
+            size="xs"
+            :disabled="checkedIds.size === 0"
+            @click="checkedIds = new Set()"
+          >
+            {{ $t('sessions.clearSelection') }}
+          </Button>
+        </div>
+
+        <!-- body-search results header: appears in place of the normal list once a content
+             search has been run; "back" restores the plain metadata-filtered list -->
+        <div
+          v-if="bodySearchActive"
+          class="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-1.5 text-xs"
+        >
+          <Button variant="ghost" size="xs" @click="exitBodySearch">
+            <ArrowLeft class="size-3" /> {{ $t('sessions.backToSessionList') }}
+          </Button>
+          <span class="truncate text-muted-foreground">
+            {{ $t('sessions.bodySearchResultsFor', { query: bodySearchQueryUsed }) }}
+          </span>
+        </div>
+
+        <div class="scroll-slim min-h-0 flex-1 overflow-y-auto p-2">
+          <!-- first-load skeletons so the list never looks blank -->
+          <template v-if="sessionsLoading && sessions.length === 0 && !bodySearchActive">
+            <div v-for="i in 6" :key="i" class="mb-1.5 px-3 py-2.5">
+              <Skeleton class="h-4" :style="{ width: `${88 - (i % 3) * 16}%` }" />
+              <div class="mt-2.5 flex items-center gap-2">
+                <Skeleton class="h-3 w-16" />
+                <Skeleton class="h-3 w-10" />
+                <Skeleton class="h-3 w-12" />
+              </div>
+            </div>
+          </template>
+
+          <!-- content (body) search results -->
+          <template v-else-if="bodySearchActive">
+            <p v-if="bodyResults.length === 0" class="p-4 text-center text-xs text-muted-foreground">
+              {{ $t('sessions.noBodyMatches') }}
+            </p>
+            <button
+              v-for="r in bodyResults"
+              :key="r.session_id"
+              class="mb-1.5 w-full rounded-lg border border-transparent px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-accent/50"
+              @click="selectFromBodyResult(r)"
+            >
+              <div class="flex items-start justify-between gap-2">
+                <span class="line-clamp-1 min-w-0 flex-1 font-mono text-xs text-muted-foreground">
+                  {{ baseName(r.cwd) }} · {{ shortId(r.session_id) }}
+                </span>
+                <span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                  {{ $t('sessions.matchCount', { n: r.match_count }) }}
+                </span>
+              </div>
+              <p
+                v-for="(snippet, i) in r.snippets"
+                :key="i"
+                class="mt-1 line-clamp-2 text-xs text-muted-foreground"
+              >
+                {{ snippet }}
+              </p>
+              <p v-if="r.truncated" class="mt-1 text-[11px] text-muted-foreground/70">
+                {{ r.match_count - r.snippets.length }} {{ $t('sessions.truncatedMatches') }}
+              </p>
+            </button>
+          </template>
+
+          <p v-else-if="filtered.length === 0" class="p-4 text-center text-xs text-muted-foreground">
+            {{ $t('sessions.noSessionsFound') }}
+          </p>
+
+          <template v-if="!bodySearchActive">
+            <button
+              v-for="s in filtered"
+              :key="s.session_id"
+              class="mb-1.5 w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
+              :class="
+                (selectMode ? isChecked(s) : s.session_id === selectedId)
+                  ? 'border-primary/50 bg-primary/10'
+                  : 'border-transparent hover:border-border hover:bg-accent/50'
+              "
+              @click="rowClick(s)"
+            >
+              <div class="flex items-start justify-between gap-2">
+                <span
+                  v-if="selectMode"
+                  class="mt-0.5 grid size-4 shrink-0 place-items-center rounded border transition-colors"
+                  :class="isChecked(s) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'"
+                >
+                  <Check v-if="isChecked(s)" class="size-3" />
+                </span>
+                <span class="line-clamp-2 min-w-0 flex-1 text-sm font-medium leading-snug">{{ s.title }}</span>
+                <StatusBadge v-if="s.queue_status" :status="s.queue_status" />
+              </div>
+              <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                <span class="inline-flex items-center gap-1"><FolderGit2 class="size-3" />{{ baseName(s.cwd) }}</span>
+                <span v-if="s.git_branch" class="inline-flex items-center gap-1"><GitBranch class="size-3" />{{ s.git_branch }}</span>
+                <span class="inline-flex items-center gap-1"><MessagesSquare class="size-3" />{{ s.message_count }}</span>
+                <span class="inline-flex items-center gap-1"><Clock class="size-3" />{{ timeAgo(s.last_activity_at) }}</span>
+                <span v-if="s.instance" class="inline-flex items-center gap-1">
+                  <Boxes class="size-3" />{{ s.instance === 'default' ? $t('sessions.instanceDefault') : s.instance }}
+                </span>
+              </div>
+            </button>
+          </template>
+        </div>
+      </div>
+
+      <!-- drag-resize handle (double-click resets) -->
+      <div
+        v-show="!collapsed"
+        class="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors"
+        :class="resizing ? 'bg-primary/40' : 'hover:bg-primary/25'"
+        :title="$t('sessions.resizeSidebar')"
+        @pointerdown.prevent="startResize"
+        @dblclick="sidebarWidth = SIDEBAR_DEFAULT"
+      />
+    </aside>
+
+    <!-- detail: its own scroll column, composer pinned at the bottom -->
+    <section class="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div v-if="!selected" class="flex min-h-0 flex-1 items-center justify-center px-6 text-sm text-muted-foreground">
+        <div class="text-center">
+          <MessagesSquare class="mx-auto mb-2 size-8 opacity-40" />
+          {{
+            selectMode
+              ? composerTargets.length
+                ? $t('sessions.composeToSelected', { n: composerTargets.length })
+                : $t('sessions.selectSessionsHint')
+              : $t('sessions.selectSessionPrompt')
+          }}
+        </div>
+      </div>
+
+      <template v-else>
+        <!-- borderless header: title + meta on the left, tool toggle + actions on the right -->
+        <div class="shrink-0 p-4 pb-3">
+          <div class="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+            <div class="min-w-0">
+              <h2 class="truncate text-base font-semibold">{{ selected.title }}</h2>
+              <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span class="font-mono">{{ shortId(selected.session_id) }}</span>
+                <span class="inline-flex items-center gap-1"><FolderGit2 class="size-3" />{{ selected.cwd }}</span>
+                <span class="inline-flex items-center gap-1">
+                  <MessagesSquare class="size-3" />{{ tail?.events.length ?? 0 }} {{ $t('sessions.turnsShown') }}
+                </span>
+              </div>
+            </div>
+            <div class="flex shrink-0 items-center gap-2">
+              <!-- icon-only toggle (same shape as the ID button): pressed = tool events shown -->
+              <IconTooltip :label="$t('sessions.showToolActivity')" :description="$t('sessions.showToolActivityHint')">
+                <Button
+                  :variant="showTools ? 'secondary' : 'outline'"
+                  size="sm"
+                  :aria-label="$t('sessions.showToolActivity')"
+                  :aria-pressed="showTools"
+                  @click="showTools = !showTools"
+                >
+                  <Wrench />
+                </Button>
+              </IconTooltip>
+              <IconTooltip :label="$t('sessions.openFile')" :description="$t('sessions.openFileHint')">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :aria-label="$t('sessions.openFile')"
+                  @click="openFile(selected.session_id)"
+                >
+                  <FileSymlink />
+                </Button>
+              </IconTooltip>
+              <IconTooltip :label="$t('sessions.saveCopy')" :description="$t('sessions.saveCopyHint')">
+                <Button
+                  as="a"
+                  variant="outline"
+                  size="sm"
+                  :href="sessionFileUrl(selected.session_id)"
+                  :download="`${selected.session_id}.jsonl`"
+                  :aria-label="$t('sessions.saveCopy')"
+                >
+                  <Download />
+                </Button>
+              </IconTooltip>
+              <IconTooltip :label="$t('sessions.copySessionId')">
+                <Button variant="outline" size="sm" @click="copy(selected.session_id)">
+                  <Copy /> {{ $t('sessions.id') }}
+                </Button>
+              </IconTooltip>
+              <!-- close the open transcript (back to the pick-a-session state); the queue
+                   drawer moved to the single purple button in the app header -->
+              <IconTooltip :label="$t('sessions.closeChat')">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :aria-label="$t('sessions.closeChat')"
+                  @click="selectedId = null"
+                >
+                  <X />
+                </Button>
+              </IconTooltip>
+            </div>
+          </div>
+        </div>
+
+        <!-- transcript, styled as a chat: user right / assistant left, tool events as log lines -->
+        <div ref="chatEl" class="scroll-slim min-h-0 flex-1 overflow-y-auto">
+          <div class="mx-auto w-full max-w-3xl px-4 py-4">
+            <template v-if="tailLoading">
+              <div class="space-y-4">
+                <div class="flex justify-end"><Skeleton class="h-9 w-2/5 rounded-2xl" /></div>
+                <div class="flex"><Skeleton class="h-20 w-4/5 rounded-2xl" /></div>
+                <div class="flex justify-end"><Skeleton class="h-9 w-1/3 rounded-2xl" /></div>
+                <div class="flex"><Skeleton class="h-14 w-3/5 rounded-2xl" /></div>
+              </div>
+            </template>
+
+            <p v-else-if="tail?.error" class="text-xs text-destructive">{{ tail.error }}</p>
+            <p v-else-if="events.length === 0" class="text-xs text-muted-foreground">
+              {{ $t('sessions.noDisplayableTurns') }}
+            </p>
+
+            <template v-else>
+              <div
+                v-for="(ev, i) in events"
+                :key="i"
+                class="group flex items-end gap-1.5"
+                :class="[
+                  i > 0 && events[i - 1].role === ev.role ? 'mt-1.5' : 'mt-4',
+                  ev.kind === 'text' && ev.role === 'user' ? 'justify-end' : 'justify-start',
+                ]"
+              >
+                <!-- user bubbles get their copy button on the left, assistant on the right;
+                     hover-revealed, but always faintly visible on touch screens -->
+                <Button
+                  v-if="ev.kind === 'text' && ev.role === 'user'"
+                  variant="ghost"
+                  size="icon-sm"
+                  class="shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-60"
+                  :title="$t('sessions.copyMessage')"
+                  @click="copyMessage(i, ev.text)"
+                >
+                  <Check v-if="copiedIdx === i" class="text-success" />
+                  <Copy v-else />
+                </Button>
+
+                <!-- tool activity: a compact log line, not a bubble -->
+                <div
+                  v-if="ev.kind !== 'text'"
+                  class="w-full min-w-0 rounded-md border-l-2 border-border bg-muted/20 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground"
+                >
+                  <div class="mb-0.5 flex items-center gap-1 font-semibold">
+                    <Wrench class="size-3" />{{ ev.tool_name ?? ev.kind }}
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      class="ml-auto opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-60"
+                      :title="$t('sessions.copyMessage')"
+                      @click="copyMessage(i, ev.text)"
+                    >
+                      <Check v-if="copiedIdx === i" class="text-success" />
+                      <Copy v-else />
+                    </Button>
+                  </div>
+                  <div
+                    class="whitespace-pre-wrap break-words"
+                    :class="ev.long && !isExpanded(i) ? 'max-h-48 overflow-hidden' : ''"
+                  >{{ ev.text }}</div>
+                  <button
+                    v-if="ev.long"
+                    class="mt-1 text-[11px] font-medium text-primary hover:underline"
+                    @click="toggleExpand(i)"
+                  >
+                    {{ isExpanded(i) ? $t('sessions.showLess') : $t('sessions.showMore') }}
+                  </button>
+                </div>
+
+                <!-- chat bubbles -->
+                <div
+                  v-else
+                  class="min-w-0 max-w-[85%] rounded-2xl px-3.5 py-2 text-sm"
+                  :class="ev.role === 'user' ? 'rounded-br-md bg-primary/15' : 'rounded-bl-md bg-muted/50'"
+                >
+                  <div
+                    class="whitespace-pre-wrap break-words"
+                    :class="ev.long && !isExpanded(i) ? 'max-h-56 overflow-hidden' : ''"
+                  >{{ ev.text }}</div>
+                  <button
+                    v-if="ev.long"
+                    class="mt-1 text-[11px] font-medium text-primary hover:underline"
+                    @click="toggleExpand(i)"
+                  >
+                    {{ isExpanded(i) ? $t('sessions.showLess') : $t('sessions.showMore') }}
+                  </button>
+                </div>
+
+                <Button
+                  v-if="ev.kind === 'text' && ev.role !== 'user'"
+                  variant="ghost"
+                  size="icon-sm"
+                  class="shrink-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-60"
+                  :title="$t('sessions.copyMessage')"
+                  @click="copyMessage(i, ev.text)"
+                >
+                  <Check v-if="copiedIdx === i" class="text-success" />
+                  <Copy v-else />
+                </Button>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- chat-style input: messages the open session, or every checked one -->
+      <SessionComposer
+        v-if="composerTargets.length"
+        class="shrink-0"
+        :targets="composerTargets"
+        @sent="onComposerSent"
+      />
+    </section>
+  </div>
+</template>

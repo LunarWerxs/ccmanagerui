@@ -1,0 +1,16 @@
+node_modules/
+dist/
+data/
+*.log
+.DS_Store
+.env
+.env.local
+.arkitect/reports/
+.claude/
+.arkitect/
+tmp/
+PLAN.md
+
+# tray launcher: the .lnk stores absolute paths - regenerate it per machine with
+# misc/New-TrayShortcut.ps1 (the tray host refreshes it on launch)
+/CCManagerUI.lnk

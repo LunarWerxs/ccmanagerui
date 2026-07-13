@@ -1,0 +1,784 @@
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import net from 'node:net'
+import { join, relative } from 'node:path'
+import { Hono } from 'hono'
+import { serveStatic } from 'hono/bun'
+import { cors } from 'hono/cors'
+import { streamSSE } from 'hono/streaming'
+import {
+  autoUpdateEnabled,
+  getAutoUpdateIntervalSecs,
+  loadAutoUpdateSettings,
+  setAutoUpdateEnabled,
+  setAutoUpdateHooks,
+  setAutoUpdateIntervalSecs,
+  startAutoUpdate,
+  stopAutoUpdate,
+} from './auto-update'
+import { CONFIG_DIR, HOST, PORT, SERVICE_NAME, WEB_DIST_CANDIDATES } from './config'
+import {
+  buildAuthorizeUrl,
+  disable,
+  enable,
+  handleCallback,
+  initConnections,
+  logout,
+  pullNow,
+  pushNow,
+  syncStatus,
+  updateAppearance,
+} from './connections'
+import { resolveAccount } from './core/accounts'
+import { detectDesktopInstall } from './core/desktop-install'
+import {
+  focusInstance,
+  listInstances,
+  openInstance,
+  quitInstance,
+  revealInstanceFolder,
+} from './core/instances'
+import { createInstance, removeInstance, renameInstance } from './core/lifecycle'
+import { createInstanceShortcut } from './core/shortcut'
+import { db, getSetting, setSetting } from './db'
+import {
+  activeCount,
+  cancelItem,
+  dispatchItem,
+  getRunEvents,
+  isActive,
+  isSessionActive,
+  type RunMessage,
+  reattachRuns,
+  subscribeRun,
+} from './dispatch'
+import { findFreePort } from './find-free-port.mjs'
+import {
+  clearInstanceInfo,
+  findLiveInstance,
+  readInstanceInfo,
+  updateInstanceInfo,
+  writeInstanceInfo,
+} from './instance'
+import { initFileLogging } from './log-file.mjs'
+import { openPortableWindow } from './portable-window.mjs'
+import { schedulerState, setSchedulerEnabled } from './scheduler'
+import { searchSessionBodies } from './session-search'
+import { getSession, listSessions } from './sessions'
+import { findTranscript, tailTranscript } from './transcript'
+import type { Account, QueueItem } from './types'
+import { applyUpdate, checkForUpdate } from './updater'
+
+// Persist console output to <CONFIG_DIR>/logs/daemon.log BEFORE anything else can throw, so the
+// crash reason logged just below actually survives the process (the tray runs us with a hidden
+// console, so without this the output would vanish). Best-effort; never throws. Shared LunarWerx
+// server-lib (./log-file.mjs); the config dir comes from CONFIG_DIR (config.ts), passed in
+// explicitly since the shared lib is app-agnostic and has no built-in default.
+initFileLogging(CONFIG_DIR)
+
+// Last-resort crash handlers: an unhandled throw/rejection anywhere in the daemon logs what
+// happened and exits non-zero instead of dying silently (or, for a rejection, limping on in an
+// unknown state). The tray's health watchdog then sees the daemon go unresponsive and relaunches
+// it; the console.error here is teed to daemon.log (above), so the reason is on disk even after
+// the process is gone. process.exit is safe here; the daemon already exits deliberately in its
+// own clean-shutdown paths below (unlike ReDesign, whose entry avoids it for undici's sake).
+process.on('uncaughtException', (err) => {
+  console.error('[ccmanagerui] uncaught exception:', err)
+  process.exit(1)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[ccmanagerui] unhandled rejection:', reason)
+  process.exit(1)
+})
+
+// --- portable mode (server/src/db.ts settings table; see server/src/portable-window.mjs) ---
+function portableModeEnabled(): boolean {
+  return getSetting('portable_mode') === '1'
+}
+function setPortableMode(value: boolean): void {
+  setSetting('portable_mode', value ? '1' : '0')
+  updateInstanceInfo({ portableMode: value })
+}
+
+// --- hide tray icon (server/src/db.ts settings table; read live by misc/CCManagerUI-Tray.ps1) ---
+function hideTrayIconEnabled(): boolean {
+  return getSetting('hide_tray_icon') === '1'
+}
+function setHideTrayIcon(value: boolean): void {
+  setSetting('hide_tray_icon', value ? '1' : '0')
+  updateInstanceInfo({ hideTrayIcon: value })
+}
+
+function coerceItem(row: any): QueueItem {
+  return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
+}
+
+function maskSecret(secret: string): string {
+  if (secret.length <= 8) return '••••'
+  return `${secret.slice(0, 4)}…${secret.slice(-4)}`
+}
+
+function listAccounts(): Account[] {
+  return db
+    .query<
+      { id: string; label: string; auth_type: string; secret: string; created_at: number },
+      []
+    >('select * from accounts order by created_at asc')
+    .all()
+    .map((r) => ({
+      id: r.id,
+      label: r.label,
+      auth_type: r.auth_type as Account['auth_type'],
+      secret_masked: maskSecret(r.secret),
+      created_at: r.created_at,
+    }))
+}
+
+const app = new Hono()
+app.use('/api/*', cors())
+
+// --- health (also the single-instance probe: body.service must equal SERVICE_NAME) ---
+app.get('/api/health', (c) => c.json({ ok: true, service: SERVICE_NAME, ts: Date.now() }))
+
+// --- self-update (git-based; see updater-engine.mjs via server/src/updater.ts) ---------------
+app.get('/api/update', async (c) =>
+  c.json({
+    ...(await checkForUpdate()),
+    autoUpdate: { enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() },
+  }),
+)
+app.post('/api/update/apply', async (c) => c.json(await applyUpdate()))
+
+// --- auto-update settings (background loop; see server/src/auto-update.ts) -------------------
+app.get('/api/update/settings', (c) =>
+  c.json({ enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() }),
+)
+app.post('/api/update/settings', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  if (typeof body.enabled === 'boolean') setAutoUpdateEnabled(body.enabled)
+  if (typeof body.intervalSecs === 'number') setAutoUpdateIntervalSecs(body.intervalSecs)
+  return c.json({ enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() })
+})
+
+// --- app settings (portable mode, hide tray icon; see server/src/db.ts) -----------------------
+app.get('/api/settings', (c) =>
+  c.json({ portableMode: portableModeEnabled(), hideTrayIcon: hideTrayIconEnabled() }),
+)
+app.post('/api/settings', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  if (typeof body.portableMode === 'boolean') setPortableMode(body.portableMode)
+  if (typeof body.hideTrayIcon === 'boolean') setHideTrayIcon(body.hideTrayIcon)
+  return c.json({ portableMode: portableModeEnabled(), hideTrayIcon: hideTrayIconEnabled() })
+})
+
+// --- "Sign in with Connections" + settings-sync (see server/src/connections.ts) ----------------
+// Loopback-only daemon: no auth gate, no session cookie; "signed in" simply means the daemon
+// holds a refresh token. Login/callback are full-page navigations (not /api), matching the
+// family pattern (DevWebUI).
+app.get('/oauth/login', async (c) => {
+  try {
+    const url = await buildAuthorizeUrl(new URL(c.req.url).origin)
+    return c.redirect(url)
+  } catch {
+    return c.redirect('/?connect=failed')
+  }
+})
+app.get('/oauth/callback', async (c) => {
+  const origin = new URL(c.req.url).origin
+  const code = c.req.query('code')
+  const stateTok = c.req.query('state')
+  let ok = false
+  if (code && stateTok) {
+    try {
+      ok = await handleCallback(origin, code, stateTok)
+    } catch {
+      ok = false
+    }
+  }
+  // If sync was already enabled before this sign-in, converge now that we have a token: pull the
+  // remote doc (applying it) OR seed the store from local if the remote is empty. Runs in the
+  // background so the redirect never waits on the network.
+  if (ok && syncStatus().enabled) void enable().catch(() => {})
+  return c.redirect(ok ? '/?connected=1' : '/?connect=failed')
+})
+
+/** Run a sync op and turn any failure into an inline `{ ok:false, error }` (HTTP 200,
+ *  non-fatal; the daemon keeps using local settings and the UI surfaces the reason). */
+async function guardSync<T extends object>(
+  c: import('hono').Context,
+  run: () => Promise<T>,
+): Promise<Response> {
+  try {
+    return c.json(await run())
+  } catch (e) {
+    const err = e as { code?: string; message?: string }
+    const code = err.code ?? (err.message === 'not_signed_in' ? 'not_signed_in' : 'sync_failed')
+    return c.json({ ok: false, error: code })
+  }
+}
+app.get('/api/settings/sync', (c) => c.json(syncStatus()))
+app.put('/api/settings/sync', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as {
+    enabled?: boolean
+    forget?: boolean
+    appearance?: Record<string, unknown>
+  }
+  return guardSync(c, async () => {
+    if (b.enabled === true) {
+      const { status } = await enable(b.appearance)
+      return status
+    }
+    if (b.enabled === false) return disable(b.forget === true)
+    if (b.appearance && typeof b.appearance === 'object') await updateAppearance(b.appearance)
+    return syncStatus()
+  })
+})
+app.post('/api/settings/sync/pull', (c) =>
+  guardSync(c, async () => {
+    await pullNow()
+    return syncStatus()
+  }),
+)
+app.post('/api/settings/sync/push', (c) =>
+  guardSync(c, async () => {
+    await pushNow()
+    return syncStatus()
+  }),
+)
+app.post('/api/settings/sync/logout', async (c) => {
+  await logout()
+  return c.json({ ok: true })
+})
+
+// --- sessions (read-only) ---------------------------------------------------
+app.get('/api/sessions', async (c) => {
+  const limit = c.req.query('limit')
+  const instance = c.req.query('instance')
+  return c.json(await listSessions(limit ? Number(limit) : 200, instance || undefined))
+})
+app.get('/api/sessions/:id', async (c) => {
+  const s = await getSession(c.req.param('id'))
+  return s ? c.json(s) : c.json({ error: 'session not found' }, 404)
+})
+// Download a copy of the raw transcript (browser save-as; works over remote too).
+app.get('/api/sessions/:id/file', async (c) => {
+  const tf = findTranscript(c.req.param('id'))
+  if (!tf) return c.json({ error: 'session not found' }, 404)
+  return new Response(Bun.file(tf.path), {
+    headers: {
+      'content-type': 'application/jsonl; charset=utf-8',
+      'content-disposition': `attachment; filename="${tf.session_id}.jsonl"`,
+    },
+  })
+})
+// Open the transcript with the OS default handler (loopback daemon: same posture as
+// the portable-window spawn; the file opens on the machine the daemon runs on).
+app.post('/api/sessions/:id/open-file', (c) => {
+  const tf = findTranscript(c.req.param('id'))
+  if (!tf) return c.json({ error: 'session not found' }, 404)
+  const cmd =
+    process.platform === 'win32'
+      ? ['cmd', '/c', 'start', '', tf.path]
+      : process.platform === 'darwin'
+        ? ['open', tf.path]
+        : ['xdg-open', tf.path]
+  try {
+    Bun.spawn(cmd, { stdio: ['ignore', 'ignore', 'ignore'] }).unref()
+    return c.json({ ok: true })
+  } catch {
+    return c.json({ ok: false }, 500)
+  }
+})
+app.get('/api/sessions/:id/tail', async (c) => {
+  const limit = c.req.query('limit')
+  const textOnly = c.req.query('textOnly')
+  return c.json(
+    await tailTranscript(c.req.param('id'), {
+      limit: limit ? Number(limit) : 40,
+      textOnly: textOnly === '1' || textOnly === 'true',
+    }),
+  )
+})
+// Advanced BODY search (streams every transcript file, substring or regex); deliberately a
+// separate, slower, opt-in path so the fast metadata list above (GET /api/sessions, used by the
+// default client-side filter) is never touched by this. See server/src/session-search.ts.
+app.get('/api/sessions/search', async (c) => {
+  const query = c.req.query('q') ?? ''
+  if (!query.trim()) return c.json([])
+  const regex = c.req.query('regex') === '1'
+  const caseSensitive = c.req.query('case') === '1'
+  const instance = c.req.query('instance') || undefined
+  try {
+    return c.json(await searchSessionBodies({ query, regex, caseSensitive, instance }))
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
+  }
+})
+
+// --- accounts ---------------------------------------------------------------
+app.get('/api/accounts', (c) => c.json(listAccounts()))
+app.post('/api/accounts', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  if (
+    !body ||
+    typeof body.label !== 'string' ||
+    !body.label.trim() ||
+    typeof body.secret !== 'string' ||
+    !body.secret ||
+    (body.auth_type !== 'oauth_token' && body.auth_type !== 'api_key')
+  ) {
+    return c.json({ error: 'label, auth_type (oauth_token|api_key), and secret are required' }, 400)
+  }
+  const id = crypto.randomUUID()
+  db.query(
+    'insert into accounts (id, label, auth_type, secret, created_at) values (?, ?, ?, ?, ?)',
+  ).run(id, body.label, body.auth_type, body.secret, Date.now())
+  return c.json(listAccounts().find((a) => a.id === id))
+})
+app.delete('/api/accounts/:id', (c) => {
+  db.query('delete from accounts where id = ?').run(c.req.param('id'))
+  return c.json({ ok: true })
+})
+
+// --- queue ------------------------------------------------------------------
+app.get('/api/queue', (c) =>
+  c.json(
+    db
+      .query<QueueItem, []>('select * from queue_items order by position asc, created_at asc')
+      .all()
+      .map(coerceItem),
+  ),
+)
+app.post('/api/queue', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  if (
+    !body ||
+    typeof body.title !== 'string' ||
+    !body.title.trim() ||
+    typeof body.cwd !== 'string' ||
+    !body.cwd.trim() ||
+    typeof body.prompt !== 'string' ||
+    !body.prompt.trim()
+  ) {
+    return c.json({ error: 'title, cwd, and prompt are required' }, 400)
+  }
+  const id = crypto.randomUUID()
+  const sessionId = body.new_chat ? (body.session_id ?? crypto.randomUUID()) : body.session_id
+  if (!sessionId)
+    return c.json({ error: 'session_id is required when resuming an existing session' }, 400)
+  if (
+    body.not_before != null &&
+    (typeof body.not_before !== 'string' || Number.isNaN(Date.parse(body.not_before)))
+  ) {
+    return c.json({ error: 'not_before must be an ISO timestamp' }, 400)
+  }
+  // normalize to UTC ISO so the scheduler's lexicographic compare is always sound
+  const notBefore = body.not_before ? new Date(Date.parse(body.not_before)).toISOString() : null
+  const posRow = db
+    .query<{ m: number | null }, []>('select max(position) as m from queue_items')
+    .get()
+  const position = (posRow?.m ?? 0) + 1
+  db.query(
+    `insert into queue_items
+       (id, session_id, title, cwd, prompt, model, effort, permission_mode, account_id, new_chat, fork, status, position, not_before, created_at)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+  ).run(
+    id,
+    sessionId,
+    body.title,
+    body.cwd,
+    body.prompt,
+    body.model ?? null,
+    body.effort ?? null,
+    body.permission_mode ?? null,
+    body.account_id ?? null,
+    body.new_chat ? 1 : 0,
+    body.fork ? 1 : 0,
+    position,
+    notBefore,
+    Date.now(),
+  )
+  return c.json(coerceItem(db.query('select * from queue_items where id = ?').get(id)))
+})
+app.patch('/api/queue/:id', async (c) => {
+  const id = c.req.param('id')
+  const existing = db.query('select * from queue_items where id = ?').get(id)
+  if (!existing) return c.json({ error: 'queue item not found' }, 404)
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  // reject (don't silently coerce) the two fields where a bad value corrupts the item:
+  // a cleared schedule dispatches early, a "null" session id reaches the CLI as --resume null
+  if (
+    'not_before' in body &&
+    body.not_before != null &&
+    (typeof body.not_before !== 'string' || Number.isNaN(Date.parse(body.not_before)))
+  ) {
+    return c.json({ error: 'not_before must be an ISO timestamp' }, 400)
+  }
+  if ('session_id' in body && (typeof body.session_id !== 'string' || !body.session_id.trim())) {
+    return c.json({ error: 'session_id must be a non-empty string' }, 400)
+  }
+  const allow: Record<string, (v: any) => unknown> = {
+    session_id: String,
+    title: String,
+    cwd: String,
+    prompt: String,
+    model: (v) => (v == null ? null : String(v)),
+    effort: (v) => (v == null ? null : String(v)),
+    permission_mode: (v) => (v == null ? null : String(v)),
+    account_id: (v) => (v == null ? null : String(v)),
+    status: String,
+    position: Number,
+    // normalized to UTC ISO (unparseable → null); scheduler compares these as text
+    not_before: (v) => {
+      if (v == null) return null
+      const ms = Date.parse(String(v))
+      return Number.isFinite(ms) ? new Date(ms).toISOString() : null
+    },
+    new_chat: (v) => (v ? 1 : 0),
+    fork: (v) => (v ? 1 : 0),
+  }
+  const fields: string[] = []
+  const values: unknown[] = []
+  for (const [k, coerce] of Object.entries(allow)) {
+    if (k in body) {
+      fields.push(`${k} = ?`)
+      values.push(coerce(body[k]))
+    }
+  }
+  if (fields.length) {
+    values.push(id)
+    db.query(`update queue_items set ${fields.join(', ')} where id = ?`).run(...(values as any[]))
+  }
+  return c.json(coerceItem(db.query('select * from queue_items where id = ?').get(id)))
+})
+app.delete('/api/queue/:id', (c) => {
+  const id = c.req.param('id')
+  if (isActive(id)) return c.json({ error: 'cannot delete a running item; cancel it first' }, 409)
+  db.query('delete from queue_items where id = ?').run(id)
+  return c.json({ ok: true })
+})
+app.post('/api/queue/:id/run', (c) => {
+  const id = c.req.param('id')
+  const row = db.query('select * from queue_items where id = ?').get(id)
+  if (!row) return c.json({ error: 'queue item not found' }, 404)
+  if (isActive(id)) return c.json({ error: 'already running' }, 409)
+  const item = coerceItem(row)
+  if (isSessionActive(item.session_id))
+    return c.json({ error: 'another run is already active for this session' }, 409)
+  void dispatchItem(item)
+  return c.json({ ok: true, started: true })
+})
+// Manual bulk drain: dispatch every currently-due queued item at once. Deliberately
+// ignores the scheduler's enabled/spacing/max_concurrent limits (same semantics as
+// pressing Run on each card) but honors the per-session run lock; items whose session
+// is (or just became) busy stay queued and are reported as skipped.
+app.post('/api/queue/run-due', (c) => {
+  const due = db
+    .query<QueueItem, [string]>(
+      `select * from queue_items
+       where status = 'queued' and (not_before is null or not_before <= ?)
+       order by position asc, created_at asc`,
+    )
+    .all(new Date().toISOString())
+  let started = 0
+  let skipped = 0
+  for (const row of due) {
+    const item = coerceItem(row)
+    // dispatchItem registers the session synchronously before its first await, so a
+    // second due item for the same session correctly lands in the skipped bucket
+    if (isActive(item.id) || isSessionActive(item.session_id)) {
+      skipped++
+      continue
+    }
+    void dispatchItem(item)
+    started++
+  }
+  return c.json({ ok: true, started, skipped })
+})
+app.post('/api/queue/:id/cancel', (c) => c.json({ ok: cancelItem(c.req.param('id')) }))
+app.get('/api/queue/:id/events', (c) => c.json(getRunEvents(c.req.param('id'))))
+
+// --- live run stream (SSE) --------------------------------------------------
+app.get('/api/queue/:id/stream', (c) => {
+  const id = c.req.param('id')
+  return streamSSE(c, async (stream) => {
+    const buffer: RunMessage[] = []
+    let closed = false
+    const unsub = subscribeRun(id, (m) => buffer.push(m))
+    stream.onAbort(() => {
+      closed = true
+      unsub()
+    })
+    // backlog first, deduped against anything the subscription also captured
+    const seen = new Set<number>()
+    for (const ev of getRunEvents(id)) {
+      seen.add(ev.id)
+      await stream.writeSSE({ data: JSON.stringify({ type: 'event', data: ev }) })
+    }
+    let ticks = 0
+    while (!closed) {
+      while (buffer.length) {
+        const m = buffer.shift()!
+        if (m.type === 'event' && seen.has(m.data.id)) continue
+        if (m.type === 'event') seen.add(m.data.id)
+        await stream.writeSSE({ data: JSON.stringify(m) })
+      }
+      await stream.sleep(300)
+      if (++ticks % 50 === 0) await stream.writeSSE({ data: '', event: 'ping' })
+    }
+  })
+})
+
+// --- scheduler --------------------------------------------------------------
+app.get('/api/scheduler', (c) => c.json(schedulerState()))
+app.post('/api/scheduler', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  if (typeof body.spacing_seconds === 'number')
+    setSetting('spacing_seconds', String(body.spacing_seconds))
+  if (typeof body.poll_seconds === 'number') setSetting('poll_seconds', String(body.poll_seconds))
+  if (typeof body.max_concurrent === 'number')
+    setSetting('max_concurrent', String(body.max_concurrent))
+  if (
+    typeof body.tomorrow_time === 'string' &&
+    /^([01]?\d|2[0-3]):[0-5]\d$/.test(body.tomorrow_time)
+  )
+    setSetting('tomorrow_time', body.tomorrow_time)
+  if (typeof body.enabled === 'boolean') setSchedulerEnabled(body.enabled)
+  return c.json(schedulerState())
+})
+
+// --- multi-instance (isolated Claude Desktop instances) --------------------
+// "instance account" = which Anthropic account a Desktop *instance* is logged into (resolved
+// by decrypting its local safeStorage token cache); distinct from the sqlite `accounts` table
+// above (Anthropic auth secrets for queue dispatch). Never touches that table.
+app.get('/api/instances', async (c) => {
+  return c.json(await listInstances())
+})
+// Which Claude Desktop build is installed; the Instances tab warns when only the MSIX
+// package is present (not launchable with --user-data-dir; see core/desktop-install.ts).
+app.get('/api/desktop-install', async (c) => {
+  const fresh = c.req.query('fresh')
+  return c.json(await detectDesktopInstall({ fresh: fresh === '1' || fresh === 'true' }))
+})
+app.get('/api/instances/:dir/account', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  const noNetwork = c.req.query('noNetwork')
+  const account = await resolveAccount(dir, {
+    noNetwork: noNetwork === '1' || noNetwork === 'true',
+  })
+  return c.json(account)
+})
+app.post('/api/instances/:dir/open', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  return c.json(await openInstance(dir))
+})
+app.post('/api/instances/:dir/quit', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  return c.json(await quitInstance(dir))
+})
+app.post('/api/instances/:dir/focus', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  return c.json(await focusInstance(dir))
+})
+app.post('/api/instances/:dir/reveal', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  return c.json(await revealInstanceFolder(dir))
+})
+// Create a desktop launcher (.lnk on Windows) that opens THIS instance directly with its
+// isolated --user-data-dir; see core/shortcut.ts. Runs on the daemon's machine, matching the
+// loopback posture of /open and /reveal.
+app.post('/api/instances/:dir/shortcut', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  return c.json(await createInstanceShortcut(dir))
+})
+app.delete('/api/instances/:dir', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  const body = await c.req.json().catch(() => ({}) as Record<string, unknown>)
+  const confirmName = typeof body.confirmName === 'string' ? body.confirmName : undefined
+  return c.json(await removeInstance(dir, { confirmName }))
+})
+// Rename an instance (its folder leaf name IS the instance name). Guarded server-side: must be
+// under the instances root, not the default profile, and not currently running (see lifecycle.ts).
+app.post('/api/instances/:dir/rename', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  const body = await c.req.json().catch(() => null)
+  if (!body || typeof body.newName !== 'string' || !body.newName.trim()) {
+    return c.json({ error: 'newName is required' }, 400)
+  }
+  return c.json(await renameInstance(dir, body.newName))
+})
+app.post('/api/instances', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  if (!body || typeof body.name !== 'string' || !body.name.trim()) {
+    return c.json({ error: 'name is required' }, 400)
+  }
+  return c.json(await createInstance(body.name))
+})
+
+// --- portable window (opens this daemon's own UI in a chromeless app window) -------------------
+app.post('/api/portable-window', async (c) => {
+  // readInstanceInfo() is populated at boot (writeInstanceInfo below) before the server starts
+  // accepting requests, so it always reflects the port we actually bound; PORT is just a
+  // last-resort fallback for an unusual boot order.
+  const url = readInstanceInfo()?.url ?? `http://${HOST}:${PORT}`
+  return c.json(await openPortableWindow(url, { profileDir: join(CONFIG_DIR, 'portable-profile') }))
+})
+
+// --- graceful shutdown (tray Quit calls this before falling back to taskkill) ---
+const SHUTDOWN_TOKEN = process.env.CCMANAGERUI_SHUTDOWN_TOKEN
+app.post('/api/shutdown', (c) => {
+  const token = c.req.header('x-ccmanagerui-shutdown-token')
+  if (SHUTDOWN_TOKEN && token !== SHUTDOWN_TOKEN) return c.json({ error: 'forbidden' }, 403)
+  setTimeout(() => {
+    clearInstanceInfo()
+    process.exit(0)
+  }, 150)
+  return c.json({ ok: true })
+})
+
+// --- serve the built SPA (single-process / production) ----------------------
+const dist = WEB_DIST_CANDIDATES.find((p) => existsSync(p))
+if (dist) {
+  const root = relative(process.cwd(), dist).replaceAll('\\', '/') || '.'
+  app.use('/assets/*', serveStatic({ root }))
+  // a stale hashed chunk must 404, not fall through to index.html (wrong MIME → module load error)
+  app.get('/assets/*', (c) => c.text('not found', 404, { 'cache-control': 'no-store' }))
+  // root-level public files (favicon.svg/.ico, …) must resolve as real files; without this the
+  // SPA fallback below answers the browser's favicon request with index.html and the tab icon
+  // (and the header logo, which uses the same asset) never loads.
+  app.use('/*', serveStatic({ root }))
+  app.get('/*', serveStatic({ path: `${root}/index.html` }))
+}
+
+/** True if something is already listening on `port` on `host` (non-intrusive TCP probe). Local to
+ *  index.ts rather than editing the kit's find-free-port.mjs; shape follows DevWebUI's ports.ts. */
+function isPortListening(port: number, host: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = new net.Socket()
+    const done = (v: boolean) => {
+      sock.removeAllListeners()
+      sock.destroy()
+      resolve(v)
+    }
+    sock.setTimeout(300)
+    sock.once('connect', () => done(true))
+    sock.once('timeout', () => done(false))
+    sock.once('error', () => done(false))
+    try {
+      sock.connect(port, host)
+    } catch {
+      done(false)
+    }
+  })
+}
+
+/** Poll until `port` is free (the predecessor released it), up to timeoutMs. Used by the
+ *  auto-update relaunch: a daemon respawned with CCMANAGERUI_RELAUNCH=1 waits for its predecessor
+ *  to free the preferred port so it rebinds the SAME port instead of hopping. */
+async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!(await isPortListening(port, HOST))) return
+    await new Promise((r) => setTimeout(r, 300))
+  }
+}
+
+// --- boot: single-instance guard, port hop, publish runtime pointer ---------
+if (process.env.CCMANAGERUI_PORT_FIXED !== '1') {
+  const live = await findLiveInstance()
+  if (live) {
+    console.log(
+      `\n  CC Manager UI is already running  →  ${live.url}\n  Not starting a second instance.\n`,
+    )
+    process.exit(0)
+  }
+}
+// A daemon relaunched by the auto-updater (CCMANAGERUI_RELAUNCH=1) waits for its predecessor to
+// free the preferred port BEFORE probing/binding, so it rebinds the SAME port (an open browser
+// tab's SSE then reconnects seamlessly instead of the daemon hopping to a port the tab can't reach).
+if (process.env.CCMANAGERUI_RELAUNCH === '1') await waitForPortFree(PORT, 8000)
+// Probe the SAME interface the server binds (HOST); the wildcard probe misses a
+// squatter that holds only 127.0.0.1 (e.g. wrangler dev's workerd on 8787).
+// A tray "Restart"/"Rebuild & Restart" spawns the successor while the predecessor is still
+// tearing down: its /api/health probe already fails (so the single-instance guard passes) yet
+// the socket lingers for a few seconds. Without the wait the successor hops to PORT+1 and every
+// open tab on the old port starts erroring; the "crashes on relaunch" symptom. A genuine
+// squatter (some other app on the port) just costs this one bounded wait, then we hop as before.
+let boundPort = PORT
+if (process.env.CCMANAGERUI_PORT_FIXED !== '1') {
+  if (await isPortListening(PORT, HOST)) await waitForPortFree(PORT, 5000)
+  boundPort = await findFreePort(PORT, 50, HOST)
+}
+
+writeInstanceInfo(boundPort, {
+  portableMode: portableModeEnabled(),
+  hideTrayIcon: hideTrayIconEnabled(),
+})
+process.on('exit', () => clearInstanceInfo())
+for (const sig of ['SIGINT', 'SIGTERM'] as const)
+  process.on(sig, () => {
+    clearInstanceInfo()
+    stopAutoUpdate()
+    process.exit(0)
+  })
+
+const moved = boundPort !== PORT ? `  (port ${PORT} was busy)` : ''
+console.log(`[ccmanagerui] http://${HOST}:${boundPort}${moved}`)
+
+// --- Connections cloud sync (opt-in; see server/src/connections.ts) ---------
+// Load the persisted session/sync state into memory before the server starts accepting requests.
+initConnections()
+
+// --- auto-update loop (opt-in; see server/src/auto-update.ts) ---------------
+// Prime the runtime flags from persisted settings now; the timer itself only starts after boot
+// (startAutoUpdate below), one interval out, so a fresh launch is never interrupted.
+loadAutoUpdateSettings()
+// When it applies an update it must restart the daemon ITSELF; the tray is a bare supervisor
+// that never relaunches us. So hand it a relaunch that spawns a DETACHED copy of this exact
+// launch command (CCMANAGERUI_RELAUNCH=1 so the successor waits for our port), then gracefully
+// shuts THIS daemon down to free the port.
+setAutoUpdateHooks({
+  // Don't auto-update (which relaunches the daemon) while dispatch runs are in flight.
+  hasActiveRuns: () => activeCount() > 0,
+  relaunch: () => {
+    try {
+      const child = spawn(process.argv[0]!, process.argv.slice(1), {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, CCMANAGERUI_RELAUNCH: '1', PORT: String(PORT) },
+      })
+      child.unref()
+    } catch (e) {
+      console.error(
+        '[ccmanagerui] auto-update relaunch failed to spawn; staying on the running version.',
+        e,
+      )
+      return // never shut down without a successor
+    }
+    console.log('[ccmanagerui] auto-update applied, relaunching the daemon…')
+    setTimeout(() => {
+      clearInstanceInfo()
+      stopAutoUpdate()
+      process.exit(0)
+    }, 800) // let the successor start, then free the port
+  },
+})
+
+// --- reattach in-flight dispatch runs (they OUTLIVE the daemon; see dispatch.ts) --------------
+// A tray Quit / auto-update relaunch / crash leaves detached `claude` runs still executing. Recover
+// them now: rebuild each run's events from its on-disk log and resume tailing to completion, so the
+// UI shows them live again and their final status is recorded instead of being stuck 'running'.
+void reattachRuns()
+
+startAutoUpdate()
+
+export default {
+  port: boundPort,
+  hostname: HOST,
+  fetch: app.fetch,
+  idleTimeout: 255,
+}
+
+export type App = typeof app

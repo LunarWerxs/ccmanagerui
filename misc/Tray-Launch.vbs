@@ -1,0 +1,58 @@
+' =====================================================================================
+' Boot the app's tray host with no visible window. Auto-discovers the sibling
+' "*-Tray.ps1" adapter in this folder and launches it hidden via PowerShell; the
+' adapter's own param() default supplies the port, so no arguments are passed here.
+'
+' AUTO-DISCOVER, zero per-app content by design: no hard-coded adapter name or PORT
+' const lives in this file. It scans misc/ for the one file whose lowercased name ends
+' in "-tray.ps1" (matches "<App>-Tray.ps1"). That rule excludes the engine
+' "Tray-Host.ps1" (ends "-host.ps1") and the shortcut scripts "Create-Shortcut.ps1" /
+' "New-TrayShortcut.ps1" (end "-shortcut.ps1"), so exactly the adapter is selected. If
+' zero or more than one "-tray.ps1" file is present, we abort with a clear message
+' rather than launch the wrong thing.
+'
+' Runs under classic Windows Script Host (wscript/cscript) — NO .NET, no PowerShell syntax.
+' =====================================================================================
+
+Dim sh, fso, scriptDir, root, adapter
+Set sh = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)   ' ...\misc
+root = fso.GetParentFolderName(scriptDir)                     ' project root
+' Parity with the old per-app launchers: run from the project root so the daemon's relative
+' paths (src\index.ts, web build outputs, runtime.json under the app home) resolve.
+sh.CurrentDirectory = root
+
+' --- Auto-discover the sibling adapter (the one "*-tray.ps1", case-insensitive) ---
+Dim f, lname, matchName, matchCount
+matchName = ""
+matchCount = 0
+For Each f In fso.GetFolder(scriptDir).Files
+  lname = LCase(f.Name)
+  ' Endswith "-tray.ps1": matches "<App>-Tray.ps1"; excludes "-host.ps1" and "-shortcut.ps1".
+  If Len(lname) >= 9 Then
+    If Right(lname, 9) = "-tray.ps1" Then
+      matchName = f.Name
+      matchCount = matchCount + 1
+    End If
+  End If
+Next
+
+If matchCount = 0 Then
+  MsgBox "Tray launcher: no '*-Tray.ps1' adapter found in " & scriptDir & vbCrLf & _
+         "Re-run node sync.mjs from lunarwerx-ui, or restore the app's <App>-Tray.ps1.", _
+         vbCritical, "LunarWerx tray launcher"
+  WScript.Quit 1
+End If
+If matchCount > 1 Then
+  MsgBox "Tray launcher: more than one '*-Tray.ps1' adapter found in " & scriptDir & _
+         vbCrLf & "Exactly one is expected. Leave only the app's <App>-Tray.ps1.", _
+         vbCritical, "LunarWerx tray launcher"
+  WScript.Quit 1
+End If
+adapter = matchName
+
+' --- Launch the adapter hidden, with NO -Port (its param default supplies the port) ---
+' 0 = hidden window (no console flash), False = don't wait.
+sh.Run "powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & scriptDir & "\" & adapter & """", 0, False

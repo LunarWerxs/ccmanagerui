@@ -1,0 +1,729 @@
+<script setup lang="ts">
+import {
+  AppWindow,
+  CalendarClock,
+  ChevronDown,
+  Cloud,
+  CloudCheck,
+  CloudCog,
+  CloudDownload,
+  CloudOff,
+  ExternalLink,
+  EyeOff,
+  KeyRound,
+  LogOut,
+  MessageCircleQuestion,
+  Plus,
+  Power,
+  RefreshCw,
+  ShieldCheck,
+  SlidersHorizontal,
+  SunMoon,
+  Trash2,
+  User,
+} from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+import { useData } from '@/composables/useData'
+import { usePanels } from '@/composables/usePanels'
+import { useUpdates } from '@/composables/useUpdates'
+import type { AuthType, SyncStatus } from '@/lib/api'
+import * as api from '@/lib/api'
+import { useTheme } from '@/lib/theme'
+import { useTooltipConfig } from '@/lib/tooltip-config'
+import ExpandTransition from '@/shell/ExpandTransition.vue'
+import InfoHint from '@/shell/InfoHint.vue'
+import SettingsGroup from '@/shell/SettingsGroup.vue'
+import SettingsRow from '@/shell/SettingsRow.vue'
+import SettingsTabs from '@/shell/SettingsTabs.vue'
+
+const { t } = useI18n()
+
+// The view groups its sections under three tabs so the everyday knobs come first.
+// Sections stay mounted behind v-show (SettingsTabs rule): the onMounted loaders
+// below hydrate every tab's data in one go.
+type TabId = 'general' | 'scheduler' | 'accounts'
+const tab = ref<TabId>('general')
+const tabs: { id: TabId; label: string }[] = [
+  { id: 'general', label: t('settings.tabGeneral') },
+  { id: 'scheduler', label: t('settings.tabScheduler') },
+  { id: 'accounts', label: t('settings.tabAccounts') },
+]
+const { accounts, scheduler, refreshAccounts, refreshScheduler } = useData()
+const { enabled: showTooltips } = useTooltipConfig()
+
+// Deep link from elsewhere in the app (e.g. the composer's tomorrow-preset gear): land on
+// the requested tab whether this view was already mounted or is mounting fresh, then clear
+// the one-shot request.
+const { settingsRequestedTab } = usePanels()
+function consumeRequestedTab() {
+  const req = settingsRequestedTab.value
+  if (req === 'general' || req === 'scheduler' || req === 'accounts') tab.value = req
+  if (req !== null) settingsRequestedTab.value = null
+}
+watch(settingsRequestedTab, consumeRequestedTab)
+onMounted(consumeRequestedTab)
+
+// --- updates ---
+const { updateStatus, updateChecking, updateApplying, checkForUpdate, applyUpdate } = useUpdates()
+// No git remote (and no CCMANAGERUI_UPDATE_REPO) means there is nowhere to pull updates
+// from: the no-source row explains it and the auto-update rows gray out.
+const noUpdateSource = computed(() => !!updateStatus.value && !updateStatus.value.remote)
+// The engine's `reason` is a terse internal string (e.g. "local changes must be committed or
+// stashed before updating"). Shown directly as the row's description (not tucked behind an
+// InfoHint icon) so "Update blocked" is never a dead end - the single most common cause (a
+// dirty working tree, since the updater refuses to overwrite uncommitted local edits) is
+// visible at a glance instead of requiring a hover.
+const updateBlockedReason = computed(() => updateStatus.value?.reason ?? undefined)
+const applyMessage = ref<string | null>(null)
+const applyError = ref<string | null>(null)
+const restartRequired = ref(false)
+
+onMounted(() => {
+  checkForUpdate()
+})
+
+async function onCheckForUpdate() {
+  applyMessage.value = null
+  applyError.value = null
+  await checkForUpdate()
+}
+async function onApplyUpdate() {
+  applyMessage.value = null
+  applyError.value = null
+  try {
+    const result = await applyUpdate()
+    applyMessage.value = result.message
+    restartRequired.value = result.restartRequired
+  } catch (e) {
+    applyError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+// --- portable mode ---
+const portableMode = ref(false)
+// --- hide tray icon ---
+const hideTrayIcon = ref(false)
+
+async function refreshSettings() {
+  try {
+    const s = await api.getSettings()
+    portableMode.value = s.portableMode
+    hideTrayIcon.value = s.hideTrayIcon
+  } catch {
+    /* keep last-known value on a failed refresh */
+  }
+}
+onMounted(refreshSettings)
+
+async function togglePortableMode(enabled: boolean) {
+  try {
+    const s = await api.updateSettings({ portableMode: enabled })
+    portableMode.value = s.portableMode
+  } catch {
+    toast.error(t('settings.portableModeToastFailed'))
+    return
+  }
+  if (!enabled) return
+  try {
+    const result = await api.openPortableWindow()
+    if (result.ok) {
+      toast.success(t('settings.portableModeToastOpened'))
+    } else {
+      toast.error(t('settings.portableModeToastNoBrowser'))
+    }
+  } catch {
+    toast.error(t('settings.portableModeToastNoBrowser'))
+  }
+}
+
+async function toggleHideTrayIcon(enabled: boolean) {
+  try {
+    const s = await api.updateSettings({ hideTrayIcon: enabled })
+    hideTrayIcon.value = s.hideTrayIcon
+  } catch {
+    toast.error(t('settings.hideTrayIconToastFailed'))
+  }
+}
+
+// --- theme (moved here from the app header) + cloud sync -----------------------
+const { mode: themeMode, setTheme } = useTheme()
+const themeOptions = [
+  { value: 'light' as const, label: t('settings.themeLight') },
+  { value: 'dark' as const, label: t('settings.themeDark') },
+  { value: 'system' as const, label: t('settings.themeSystem') },
+]
+const syncStatus = ref<SyncStatus>({
+  ok: true,
+  enabled: false,
+  connected: false,
+  name: null,
+  email: null,
+  picture: null,
+  lastSyncedAt: null,
+  version: 0,
+  appearance: null,
+})
+const syncBusy = ref(false)
+const syncError = ref<string | null>(null)
+const confirmDisconnect = ref(false)
+// Set right before applying a pulled appearance, so the theme watcher below doesn't turn
+// right around and push the value it just received.
+let applyingRemoteAppearance = false
+let syncPushTimer: ReturnType<typeof setTimeout> | undefined
+
+function currentAppearance(): Record<string, unknown> {
+  return { theme: themeMode.value }
+}
+function applyAppearance(appearance: Record<string, unknown> | null | undefined) {
+  if (!appearance) return
+  const theme = appearance.theme
+  if (theme === 'light' || theme === 'dark' || theme === 'system') {
+    applyingRemoteAppearance = true
+    setTheme(theme)
+    queueMicrotask(() => {
+      applyingRemoteAppearance = false
+    })
+  }
+}
+function absorbSyncResult(res: api.SyncResult): api.SyncResult {
+  if (res.ok) {
+    syncStatus.value = res
+    syncError.value = null
+  } else {
+    syncError.value = res.error
+  }
+  return res
+}
+async function refreshSyncStatus() {
+  try {
+    const s = await api.getSyncStatus()
+    syncStatus.value = s
+    syncError.value = null
+  } catch {
+    /* keep last-known value on a failed refresh */
+  }
+}
+onMounted(refreshSyncStatus)
+
+function goSignIn() {
+  // New tab so the current app state isn't lost - the new tab lands on /?connected=1 after
+  // auth; sync status here refreshes when the user returns to this tab.
+  window.open('/oauth/login', '_blank', 'noopener')
+}
+function onWindowFocus() {
+  if (!syncStatus.value.connected) void refreshSyncStatus()
+}
+onMounted(() => window.addEventListener('focus', onWindowFocus))
+onBeforeUnmount(() => window.removeEventListener('focus', onWindowFocus))
+
+async function onToggleSyncEnable(enabled: boolean) {
+  confirmDisconnect.value = false
+  syncBusy.value = true
+  try {
+    if (enabled) {
+      const res = await api.setSync({ enabled: true, appearance: currentAppearance() })
+      absorbSyncResult(res)
+      if (res.ok) applyAppearance(res.appearance)
+    } else {
+      absorbSyncResult(await api.setSync({ enabled: false }))
+    }
+  } catch (e) {
+    syncError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    syncBusy.value = false
+  }
+}
+async function onSyncNow() {
+  syncBusy.value = true
+  try {
+    const pulled = absorbSyncResult(await api.syncPull())
+    if (pulled.ok) {
+      applyAppearance(pulled.appearance)
+      const pushed = absorbSyncResult(await api.syncPush())
+      if (pushed.ok) toast.success(t('settings.cloudSyncSyncedToast'))
+    }
+  } catch (e) {
+    syncError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    syncBusy.value = false
+  }
+}
+async function onDisconnect() {
+  if (!confirmDisconnect.value) {
+    confirmDisconnect.value = true
+    return
+  }
+  confirmDisconnect.value = false
+  syncBusy.value = true
+  try {
+    absorbSyncResult(await api.setSync({ enabled: false, forget: true }))
+  } catch (e) {
+    syncError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    syncBusy.value = false
+  }
+}
+
+const syncedLabel = computed(() => {
+  const iso = syncStatus.value.lastSyncedAt
+  if (!iso) return t('settings.cloudSyncNeverSynced')
+  const ts = Date.parse(iso)
+  if (Number.isNaN(ts)) return t('settings.cloudSyncNeverSynced')
+  const seconds = Math.round((Date.now() - ts) / 1000)
+  if (seconds < 10) return t('settings.cloudSyncSyncedNow')
+  const minutes = Math.round(seconds / 60)
+  const hours = Math.round(minutes / 60)
+  const when =
+    seconds < 60
+      ? t('settings.cloudSyncSecondsAgo', { n: seconds })
+      : minutes < 60
+        ? t('settings.cloudSyncMinutesAgo', { n: minutes })
+        : t('settings.cloudSyncHoursAgo', { n: hours })
+  return t('settings.cloudSyncSyncedAgo', { when })
+})
+
+// When the theme changes AND sync is enabled+connected, debounce and push - but never echo a
+// value just applied from a pull/enable (applyingRemoteAppearance).
+watch(themeMode, () => {
+  if (applyingRemoteAppearance) return
+  if (!syncStatus.value.enabled || !syncStatus.value.connected) return
+  clearTimeout(syncPushTimer)
+  syncPushTimer = setTimeout(() => {
+    void api.setSync({ appearance: currentAppearance() }).then(absorbSyncResult)
+  }, 800)
+})
+
+// --- auto-update ---
+// Single toggle - no user-facing interval control (family-standard "Auto-update"). The check
+// cadence is a fixed sensible default owned by the server (server/src/auto-update.ts); the old
+// per-user interval setting is migrated/ignored gracefully server-side.
+const autoUpdateEnabled = ref(false)
+
+async function refreshAutoUpdateSettings() {
+  try {
+    const s = await api.getAutoUpdateSettings()
+    autoUpdateEnabled.value = s.enabled
+  } catch {
+    /* keep last-known value on a failed refresh */
+  }
+}
+onMounted(refreshAutoUpdateSettings)
+
+async function toggleAutoUpdate(enabled: boolean) {
+  try {
+    const s = await api.updateAutoUpdateSettings({ enabled })
+    autoUpdateEnabled.value = s.enabled
+    toast.success(
+      enabled ? t('settings.autoUpdateToastEnabled') : t('settings.autoUpdateToastDisabled'),
+    )
+  } catch {
+    toast.error(t('settings.autoUpdateToastFailed'))
+  }
+}
+
+// --- accounts ---
+const newAccount = reactive({ label: '', auth_type: 'oauth_token' as AuthType, secret: '' })
+const addingError = ref<string | null>(null)
+const authOptions = [
+  { value: 'oauth_token', label: t('settings.authOauthOption') },
+  { value: 'api_key', label: t('settings.authApiKeyOption') },
+]
+
+async function addAccount() {
+  addingError.value = null
+  if (!newAccount.label.trim() || !newAccount.secret.trim()) return
+  try {
+    await api.createAccount({
+      label: newAccount.label.trim(),
+      auth_type: newAccount.auth_type,
+      secret: newAccount.secret.trim(),
+    })
+    newAccount.label = ''
+    newAccount.secret = ''
+    await refreshAccounts()
+  } catch (e) {
+    addingError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+async function removeAccount(id: string) {
+  try {
+    await api.deleteAccount(id)
+  } catch {
+    toast.error(t('settings.toastAccountDeleteFailed'))
+  }
+  await refreshAccounts()
+}
+
+// --- scheduler ---
+const sched = reactive({
+  spacing_seconds: 60,
+  poll_seconds: 5,
+  max_concurrent: 3,
+  tomorrow_time: '09:00',
+})
+watch(
+  scheduler,
+  (s) => {
+    if (s) {
+      sched.spacing_seconds = s.spacing_seconds
+      sched.poll_seconds = s.poll_seconds
+      sched.max_concurrent = s.max_concurrent
+      sched.tomorrow_time = s.tomorrow_time
+    }
+  },
+  { immediate: true },
+)
+
+async function toggleScheduler(enabled: boolean) {
+  try {
+    await api.updateScheduler({ enabled })
+  } catch {
+    toast.error(t('settings.toastSchedulerFailed'))
+  }
+  await refreshScheduler()
+}
+async function saveScheduler() {
+  try {
+    await api.updateScheduler({
+      spacing_seconds: Number(sched.spacing_seconds),
+      poll_seconds: Number(sched.poll_seconds),
+      max_concurrent: Number(sched.max_concurrent),
+      tomorrow_time: sched.tomorrow_time,
+    })
+  } catch {
+    toast.error(t('settings.toastSchedulerFailed'))
+  }
+  await refreshScheduler()
+}
+
+// progressive disclosure state
+const schedAdvancedOpen = ref(false)
+const addAccountOpen = ref(false)
+
+// The panel's footer Save button. Everything auto-saves as it changes; this flushes
+// the one buffered form (scheduler numbers) and confirms the whole panel.
+async function save() {
+  await saveScheduler()
+  toast.success(t('settings.toastSaved'))
+}
+defineExpose({ save })
+</script>
+
+<template>
+  <div class="mx-auto max-w-3xl space-y-6 overflow-y-auto p-6">
+    <SettingsTabs v-model="tab" :tabs="tabs" />
+
+    <!-- General: appearance, updates, auto-update ─────────────────────────── -->
+    <div v-show="tab === 'general'" class="space-y-6">
+    <!-- appearance -->
+    <SettingsGroup :label="$t('settings.appearance')">
+      <!-- theme: moved here from the app header (owner request); system mode finally
+           gets a direct control instead of only being reachable via cloud-sync restore -->
+      <SettingsRow :icon="SunMoon" :label="$t('settings.themeLabel')">
+        <template #control>
+          <div class="flex items-center gap-1">
+            <Button
+              v-for="o in themeOptions"
+              :key="o.value"
+              :variant="themeMode === o.value ? 'secondary' : 'ghost'"
+              size="xs"
+              :aria-pressed="themeMode === o.value"
+              @click="setTheme(o.value)"
+            >
+              {{ o.label }}
+            </Button>
+          </div>
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="MessageCircleQuestion" :label="$t('settings.showTooltipsLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.showTooltipsHint')" />
+        </template>
+        <template #control>
+          <Switch v-model="showTooltips" />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="AppWindow" :label="$t('settings.portableModeLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.portableModeHint')" />
+        </template>
+        <template #control>
+          <Switch :model-value="portableMode" @update:model-value="togglePortableMode" />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="EyeOff" :label="$t('settings.hideTrayIconLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.hideTrayIconHint')" />
+        </template>
+        <template #control>
+          <Switch :model-value="hideTrayIcon" @update:model-value="toggleHideTrayIcon" />
+        </template>
+      </SettingsRow>
+    </SettingsGroup>
+
+    <!-- updates -->
+    <SettingsGroup :label="$t('settings.updates')">
+      <SettingsRow :icon="CloudDownload" :label="$t('settings.currentVersion')">
+        <template #description>
+          {{ updateStatus?.currentVersion ?? '—' }}
+          <span v-if="updateStatus?.currentCommit">· {{ updateStatus.currentCommit.slice(0, 7) }}</span>
+        </template>
+        <template #control>
+          <Button size="sm" variant="outline" :disabled="updateChecking" @click="onCheckForUpdate">
+            <RefreshCw :class="updateChecking ? 'animate-spin' : ''" />
+            {{ updateChecking ? $t('settings.checkingForUpdates') : $t('settings.checkForUpdates') }}
+          </Button>
+        </template>
+      </SettingsRow>
+      <SettingsRow v-if="updateStatus?.updateAvailable && updateStatus?.canApply" :label="$t('settings.updateAvailable')">
+        <template #description>
+          {{ updateStatus.remoteCommit?.slice(0, 7) }}
+        </template>
+        <template #control>
+          <Button size="sm" :disabled="updateApplying" @click="onApplyUpdate">
+            <RefreshCw :class="updateApplying ? 'animate-spin' : ''" />
+            {{ updateApplying ? $t('settings.applyingUpdate') : $t('settings.updateAndRestart') }}
+          </Button>
+        </template>
+      </SettingsRow>
+      <SettingsRow
+        v-else-if="updateStatus?.updateAvailable && !updateStatus?.canApply"
+        :label="$t('settings.updateBlocked')"
+        :description="updateBlockedReason"
+      />
+      <SettingsRow
+        v-else-if="noUpdateSource"
+        :label="$t('settings.noUpdateSource')"
+        :description="$t('settings.noUpdateSourceHint')"
+      />
+      <SettingsRow v-else-if="updateStatus" :label="$t('settings.upToDate')" />
+      <p v-if="applyMessage" class="px-3.5 pb-2.5 text-xs text-muted-foreground">
+        {{ applyMessage }}
+        <span v-if="restartRequired">{{ $t('settings.restartGuidance') }}</span>
+      </p>
+      <p v-if="applyError" class="px-3.5 pb-2.5 text-xs text-destructive">{{ applyError }}</p>
+
+      <!-- the auto-update loop lives with the manual check: one Updates story, one group.
+           Single toggle (family-standard "Auto-update" - no separate interval control; the
+           daemon checks on a sensible fixed cadence internally). Grays out when there is no
+           update source, since it could never fire. -->
+      <SettingsRow :icon="CloudCog" :label="$t('settings.autoUpdate')">
+        <template #info>
+          <InfoHint :text="$t('settings.autoUpdateDescription')" />
+        </template>
+        <template #control>
+          <Switch
+            :model-value="autoUpdateEnabled"
+            :disabled="noUpdateSource"
+            @update:model-value="toggleAutoUpdate"
+          />
+        </template>
+      </SettingsRow>
+    </SettingsGroup>
+
+    <!-- cloud sync -->
+    <SettingsGroup :label="$t('settings.cloudSyncTitle')">
+      <!-- not connected: sign-in CTA -->
+      <div v-if="!syncStatus.connected" class="px-3.5 py-2.5">
+        <Button variant="outline" class="w-full" @click="goSignIn">
+          <Cloud class="text-sky-500" />
+          {{ $t('settings.cloudSyncConnectButton') }}
+          <ExternalLink class="opacity-70" />
+        </Button>
+      </div>
+
+      <!-- connected: master toggle + status -->
+      <template v-else>
+        <SettingsRow :icon="CloudCheck" :label="$t('settings.cloudSyncEnableToggle')">
+          <template #info>
+            <InfoHint :text="$t('settings.cloudSyncHint')" />
+          </template>
+          <template #control>
+            <Switch :model-value="syncStatus.enabled" @update:model-value="onToggleSyncEnable" />
+          </template>
+        </SettingsRow>
+        <SettingsRow v-if="syncStatus.enabled" :label="syncStatus.name || syncStatus.email || ''">
+          <template #icon>
+            <img
+              v-if="syncStatus.picture"
+              :src="syncStatus.picture"
+              alt=""
+              class="size-[18px] shrink-0 rounded-full object-cover"
+            />
+            <User v-else class="size-[18px] shrink-0 text-muted-foreground" />
+          </template>
+          <template #control>
+            <span class="text-[12px] text-muted-foreground">{{ syncedLabel }}</span>
+            <Button variant="ghost" size="sm" :disabled="syncBusy" @click="onSyncNow">
+              <RefreshCw :class="syncBusy ? 'animate-spin' : ''" />
+              {{ syncBusy ? $t('settings.cloudSyncSyncing') : $t('settings.cloudSyncSyncNow') }}
+            </Button>
+          </template>
+        </SettingsRow>
+        <SettingsRow>
+          <template #icon><LogOut class="size-[18px] shrink-0 text-muted-foreground" /></template>
+          <template #label>
+            {{ confirmDisconnect ? $t('settings.cloudSyncConfirmDisconnect') : $t('settings.cloudSyncDisconnect') }}
+          </template>
+          <template #control>
+            <Button
+              :variant="confirmDisconnect ? 'destructive' : 'ghost'"
+              size="sm"
+              :disabled="syncBusy"
+              @click="onDisconnect"
+              @blur="confirmDisconnect = false"
+            >
+              <CloudOff />
+              {{ $t('settings.cloudSyncDisconnect') }}
+            </Button>
+          </template>
+        </SettingsRow>
+      </template>
+      <p v-if="syncError" class="px-3.5 pb-2.5 text-xs text-destructive">{{ syncError }}</p>
+    </SettingsGroup>
+    </div>
+
+    <!-- Scheduler: queue pacing and concurrency ───────────────────────────── -->
+    <div v-show="tab === 'scheduler'" class="space-y-6">
+    <!-- scheduler -->
+    <SettingsGroup :label="$t('settings.scheduler')" :description="$t('settings.schedulerHint')">
+      <SettingsRow :icon="Power" :label="$t('settings.schedulerEnabledLabel')">
+        <template #control>
+          <span>
+            {{ scheduler?.running_count ?? 0 }} {{ $t('settings.running') }} ·
+            {{ scheduler?.queued_count ?? 0 }} {{ $t('settings.queued') }}
+          </span>
+          <Switch :model-value="scheduler?.enabled ?? false" @update:model-value="toggleScheduler" />
+        </template>
+      </SettingsRow>
+      <!-- the composer's "Tomorrow …" quick option reads this time (its tiny gear lands here) -->
+      <SettingsRow :icon="CalendarClock" :label="$t('settings.tomorrowTimeLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.tomorrowTimeHint')" />
+        </template>
+        <template #control>
+          <Input v-model="sched.tomorrow_time" type="time" class="w-28" @change="saveScheduler" />
+        </template>
+      </SettingsRow>
+      <SettingsRow
+        :icon="SlidersHorizontal"
+        :label="$t('settings.advanced')"
+        clickable
+        @click="schedAdvancedOpen = !schedAdvancedOpen"
+      >
+        <template #control>
+          <ChevronDown
+            class="size-4 transition-transform duration-200"
+            :class="schedAdvancedOpen ? 'rotate-180' : ''"
+          />
+        </template>
+      </SettingsRow>
+      <ExpandTransition :open="schedAdvancedOpen">
+        <div class="grid grid-cols-3 gap-3 px-3.5 pb-3.5 pt-2.5">
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.spacingLabel') }}</label>
+            <Input v-model="sched.spacing_seconds" type="number" />
+          </div>
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.pollLabel') }}</label>
+            <Input v-model="sched.poll_seconds" type="number" />
+          </div>
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.maxConcurrentLabel') }}</label>
+            <Input v-model="sched.max_concurrent" type="number" />
+          </div>
+        </div>
+      </ExpandTransition>
+    </SettingsGroup>
+    </div>
+
+    <!-- Accounts: Claude accounts the instances run under ─────────────────── -->
+    <div v-show="tab === 'accounts'" class="space-y-6">
+    <!-- accounts -->
+    <SettingsGroup :label="$t('settings.accounts')" :description="$t('settings.accountsIntro')">
+      <SettingsRow
+        v-for="a in accounts"
+        :key="a.id"
+        :icon="a.auth_type === 'api_key' ? KeyRound : ShieldCheck"
+        :label="a.label"
+      >
+        <template #description>
+          <span class="font-mono text-[11px]">{{ a.secret_masked }}</span>
+        </template>
+        <template #control>
+          <Badge variant="secondary">
+            {{ a.auth_type === 'api_key' ? $t('settings.apiKeyBadge') : $t('settings.oauthBadge') }}
+          </Badge>
+          <Button size="icon-sm" variant="ghost" :title="$t('settings.removeAction')" @click="removeAccount(a.id)">
+            <Trash2 />
+          </Button>
+        </template>
+      </SettingsRow>
+      <p v-if="accounts.length === 0" class="px-3.5 py-2.5 text-xs text-muted-foreground italic">
+        {{ $t('settings.noAccountsYet') }}
+      </p>
+
+      <SettingsRow :icon="Plus" :label="$t('settings.addAccount')" clickable @click="addAccountOpen = !addAccountOpen">
+        <template #control>
+          <ChevronDown
+            class="size-4 transition-transform duration-200"
+            :class="addAccountOpen ? 'rotate-180' : ''"
+          />
+        </template>
+      </SettingsRow>
+      <ExpandTransition :open="addAccountOpen">
+        <div class="space-y-3 px-3.5 pb-3.5 pt-2.5">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.labelField') }}</label>
+              <Input v-model="newAccount.label" :placeholder="$t('settings.labelPlaceholder')" />
+            </div>
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.authTypeField') }}</label>
+              <Select v-model="newAccount.auth_type">
+                <SelectTrigger class="w-full"
+                  ><SelectValue :placeholder="$t('settings.authTypeDefaultPlaceholder')"
+                /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="o in authOptions" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <label class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              {{ $t('settings.secretField') }}
+              <InfoHint :text="$t('settings.plaintextStorageWarning')" />
+            </label>
+            <Input
+              v-model="newAccount.secret"
+              type="password"
+              :placeholder="$t('settings.secretPlaceholder')"
+              class="font-mono text-xs"
+            />
+          </div>
+          <p v-if="addingError" class="text-xs text-destructive">{{ addingError }}</p>
+          <div class="flex justify-end">
+            <Button size="sm" :disabled="!newAccount.label.trim() || !newAccount.secret.trim()" @click="addAccount">
+              <Plus /> {{ $t('settings.addAccount') }}
+            </Button>
+          </div>
+        </div>
+      </ExpandTransition>
+    </SettingsGroup>
+    </div>
+  </div>
+</template>

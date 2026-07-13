@@ -1,0 +1,344 @@
+// server/src/core/process.ts — per-OS Claude process enumeration + `--user-data-dir` parsing
+// (PLAN.md §3/§4/§9 item 3).
+//
+// Mirrors a verified PowerShell prototype (Get-CMRunningProcess, from an earlier internal
+// scratch tool) ported to cross-platform Bun/TypeScript.
+//
+// Cross-platform via Bun.spawn:
+//   win32:        `powershell -NoProfile -Command "Get-CimInstance Win32_Process | ..."`
+//                 (falls back to `wmic process get ProcessId,CommandLine /format:list` if
+//                 PowerShell itself is unavailable — rare, but keeps this dependency-light).
+//   darwin/linux: `ps -eo pid=,command=` (no header row; wide enough to not truncate cmdline).
+//
+// "Main" process = has `--user-data-dir` AND lacks `--type=` (Electron marks child processes
+// — gpu-process, renderer, utility, crashpad-handler, zygote, etc. — with `--type=`).
+// `listClaudeProcesses({ includeChildren: true })` returns everything (main + children) so
+// callers like quitInstance() can kill the whole process tree for a dir; the default
+// (`includeChildren` unset/false) returns only main processes, which is what discovery/open
+// need (one row per running instance).
+//
+// Nothing here throws for expected failure conditions (powershell/wmic/ps missing, spawn
+// failure, unparseable output, permission-denied on some processes) — every path returns an
+// empty array rather than rejecting, since "we can't currently enumerate processes" should
+// degrade to "no known running instances", not crash the caller.
+
+import { normalizePath } from './paths.ts'
+
+// `--user-data-dir` shows up three ways in a reported command line, depending on how the value
+// was quoted when the process was launched — the discovery here must handle all three or a
+// running instance whose profile path contains a space is mis-parsed (and so appears "stopped"
+// or as a bogus external entry). Verified empirically 2026-07:
+//   --user-data-dir=C:\no space\x      unquoted — Bun.spawn/libuv leaves a space-free argv as-is
+//                                       (the manager's own openInstance, common case)
+//   --user-data-dir="C:\a b\x"          value quoted — what the desktop-shortcut .lnk writes
+//   "--user-data-dir=C:\a b\x"          WHOLE token quoted — libuv wraps the entire argv element
+//                                       in quotes when the value contains a space, so the quote
+//                                       lands BEFORE the flag name, not after the '='
+// Three ordered alternatives, most-specific first; capture group 1/2/3 respectively holds the
+// value. `[^"]+` (not `[^"\s]`) in the quoted branches is what keeps spaces inside the path.
+const USER_DATA_DIR_RE =
+  /"--user-data-dir[= ]([^"]+)"|--user-data-dir[= ]"([^"]+)"|--user-data-dir[= ]([^"\s]+)/
+const TYPE_FLAG_RE = /--type=/
+
+/** Extracts the raw (un-normalized) `--user-data-dir` value from a process command line, or
+ *  `null` when the flag is absent. Handles all three quotings above. Exported for unit tests. */
+export function extractUserDataDir(cmdline: string): string | null {
+  const m = cmdline.match(USER_DATA_DIR_RE)
+  if (!m) return null
+  const raw = (m[1] ?? m[2] ?? m[3])?.trim()
+  return raw && raw.length > 0 ? raw : null
+}
+
+/** One discovered Claude Desktop process. */
+export interface CMProcessInfo {
+  pid: number
+  cmdline: string
+  /** Parsed + normalized `--user-data-dir` value, or `null` if the process didn't carry one
+   *  (shouldn't normally happen for anything matched by the main-process filter, but child
+   *  processes included via `includeChildren` may lack it in edge cases). */
+  dir: string | null
+  /** True when this is the main (non-`--type=`) process for its `--user-data-dir`. */
+  isMain: boolean
+  /** Best-effort process start time (ISO string), or `undefined` if unavailable on this
+   *  OS/path (e.g. the `ps`-based unix path does not cheaply expose it). */
+  startTime?: string
+  /** Best-effort resident memory (working-set bytes) for THIS single process, or `undefined`
+   *  when unavailable (unix `ps` path). Callers that want a per-instance total sum this across
+   *  the whole process tree (main + `--type=` children). */
+  memoryBytes?: number
+}
+
+export interface ListClaudeProcessesOptions {
+  /** Include Electron child processes (renderer/gpu/utility/crashpad/... — marked `--type=`)
+   *  in addition to the main process. Default `false` (discovery wants one row per instance;
+   *  quit/kill wants the whole tree). */
+  includeChildren?: boolean
+}
+
+/** Parses a single raw process record into a CMProcessInfo, or `null` if it isn't a Claude
+ *  Desktop process we care about (no `--user-data-dir` at all) or is malformed. */
+function parseProcessRecord(
+  pid: number,
+  cmdline: string,
+  startTime?: string,
+  memoryBytes?: number,
+): CMProcessInfo | null {
+  if (!cmdline?.trim() || !Number.isFinite(pid)) return null
+
+  const rawDir = extractUserDataDir(cmdline)
+  if (rawDir === null) return null // no `--user-data-dir` → not an instance process we track
+
+  const dir = normalizePath(rawDir)
+  const isMain = !TYPE_FLAG_RE.test(cmdline)
+
+  return { pid, cmdline, dir, isMain, startTime, memoryBytes }
+}
+
+// ----------------------------------------------------------------------------
+// Shared spawn helper.
+// ----------------------------------------------------------------------------
+
+/** Runs a command via Bun.spawn and captures stdout as text. Never throws — returns `null`
+ *  on spawn failure, non-zero exit, or timeout so callers can try the next strategy. */
+async function runCaptureStdout(
+  cmd: string[],
+  { timeoutMs = 10_000 }: { timeoutMs?: number } = {},
+): Promise<string | null> {
+  type CaptureProc = Bun.Subprocess<'ignore', 'pipe', 'ignore'>
+  let proc: CaptureProc | null = null
+  try {
+    proc = Bun.spawn(cmd, {
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'ignore',
+    }) as CaptureProc
+  } catch {
+    return null // command not found / spawn rejected outright
+  }
+
+  const activeProc = proc
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs)
+  })
+
+  try {
+    return await Promise.race([
+      (async () => {
+        const [stdout, exitCode] = await Promise.all([
+          new Response(activeProc.stdout).text(),
+          activeProc.exited,
+        ])
+        return exitCode === 0 ? stdout : null
+      })(),
+      timeout,
+    ])
+  } catch {
+    return null
+  } finally {
+    if (timer) clearTimeout(timer)
+    try {
+      activeProc.kill()
+    } catch {
+      // Already exited — ignore.
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Windows: Get-CimInstance Win32_Process (primary), wmic (fallback).
+// ----------------------------------------------------------------------------
+
+interface WinProcRecord {
+  pid: number
+  commandLine: string | null
+  /** Working-set bytes (Win32_Process.WorkingSetSize), or null when absent. */
+  workingSetSize: number | null
+  /** Process start time as a round-trip ISO string (Win32_Process.CreationDate), or null. */
+  creationDate: string | null
+}
+
+/** Primary Windows strategy: `Get-CimInstance Win32_Process` filtered to `Claude.exe`,
+ *  emitted as JSON so parsing is exact (no column-width truncation like `wmic`/`tasklist`,
+ *  and no ambiguity from `Format-List`'s line-wrapping of long command lines).
+ *
+ *  Also projects `WorkingSetSize` (live memory) and `CreationDate` (start time, formatted to a
+ *  round-trip ISO string in PowerShell so JS `Date.parse` reads it identically on PS 5.1 and 7 —
+ *  raw `ConvertTo-Json` serializes a CIM DateTime differently across versions). Both come free
+ *  from the same snapshot this call already makes for running-state, so uptime/memory add no
+ *  extra process scan. */
+async function listWindowsProcessesViaCim(): Promise<WinProcRecord[] | null> {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    'Get-CimInstance -ClassName Win32_Process -Filter "Name=\'Claude.exe\'" | ' +
+      'Select-Object ProcessId, CommandLine, WorkingSetSize, ' +
+      "@{Name='CreationDate';Expression={ if ($_.CreationDate) { $_.CreationDate.ToString('o') } }} | " +
+      'ConvertTo-Json -Compress -Depth 3',
+  ].join('; ')
+
+  const stdout = await runCaptureStdout([
+    'powershell',
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    script,
+  ])
+  if (stdout === null) return null
+
+  const trimmed = stdout.trim()
+  if (!trimmed) return [] // no Claude.exe processes running — valid empty result
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    // ConvertTo-Json emits a single object (not an array) when there's exactly one match.
+    const records = Array.isArray(parsed) ? parsed : [parsed]
+    return records
+      .filter((r): r is Record<string, unknown> => typeof r === 'object' && r !== null)
+      .map((r) => ({
+        pid: typeof r.ProcessId === 'number' ? r.ProcessId : Number(r.ProcessId),
+        commandLine: typeof r.CommandLine === 'string' ? r.CommandLine : null,
+        workingSetSize:
+          typeof r.WorkingSetSize === 'number' && Number.isFinite(r.WorkingSetSize)
+            ? r.WorkingSetSize
+            : null,
+        creationDate: typeof r.CreationDate === 'string' ? r.CreationDate : null,
+      }))
+      .filter((r) => Number.isFinite(r.pid))
+  } catch {
+    return null // malformed JSON — let the caller fall back to wmic
+  }
+}
+
+/** Fallback Windows strategy: `wmic process get ProcessId,CommandLine /format:list`. Used
+ *  only if PowerShell itself is unavailable (rare on modern Windows, but `wmic` is
+ *  deprecated/removed on newer builds too — this is genuinely best-effort). */
+async function listWindowsProcessesViaWmic(): Promise<WinProcRecord[] | null> {
+  const stdout = await runCaptureStdout([
+    'wmic',
+    'process',
+    'where',
+    "name='Claude.exe'",
+    'get',
+    'ProcessId,CommandLine',
+    '/format:list',
+  ])
+  if (stdout === null) return null
+
+  // /format:list emits blocks like:
+  //   CommandLine=...
+  //   ProcessId=1234
+  // separated by blank lines, with \r\n line endings.
+  const records: WinProcRecord[] = []
+  const blocks = stdout.split(/\r?\n\r?\n/)
+  for (const block of blocks) {
+    const lines = block
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+    if (lines.length === 0) continue
+
+    let commandLine: string | null = null
+    let pid: number | null = null
+    for (const line of lines) {
+      const eq = line.indexOf('=')
+      if (eq === -1) continue
+      const key = line.slice(0, eq)
+      const value = line.slice(eq + 1)
+      if (key === 'CommandLine') commandLine = value || null
+      else if (key === 'ProcessId') pid = Number.parseInt(value, 10)
+    }
+
+    if (pid !== null && Number.isFinite(pid)) {
+      // wmic's own CreationDate/WorkingSetSize columns are DMTF-formatted and column-truncated;
+      // this deprecated fallback stays memory/uptime-less (best-effort) rather than mis-parse them.
+      records.push({ pid, commandLine, workingSetSize: null, creationDate: null })
+    }
+  }
+  return records
+}
+
+async function listWindowsProcesses(): Promise<CMProcessInfo[]> {
+  let records = await listWindowsProcessesViaCim()
+  if (records === null) {
+    records = await listWindowsProcessesViaWmic()
+  }
+  if (records === null) return []
+
+  const out: CMProcessInfo[] = []
+  for (const r of records) {
+    if (!r.commandLine) continue
+    const parsed = parseProcessRecord(
+      r.pid,
+      r.commandLine,
+      r.creationDate ?? undefined,
+      r.workingSetSize ?? undefined,
+    )
+    if (parsed) out.push(parsed)
+  }
+  return out
+}
+
+// ----------------------------------------------------------------------------
+// macOS / Linux: `ps -eo pid=,command=`.
+// ----------------------------------------------------------------------------
+
+async function listUnixProcesses(): Promise<CMProcessInfo[]> {
+  // `pid=,command=` suppresses the header row; `command` (not `comm`) gives the full
+  // argv/cmdline rather than just the truncated executable basename. BSD `ps` (macOS) and
+  // procps `ps` (Linux) both support this `-o key=` no-header syntax.
+  const stdout = await runCaptureStdout(['ps', '-eo', 'pid=,command='])
+  if (stdout === null) return []
+
+  const out: CMProcessInfo[] = []
+  const lines = stdout.split(/\r?\n/)
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+
+    const spaceIdx = trimmed.indexOf(' ')
+    if (spaceIdx === -1) continue
+
+    const pidStr = trimmed.slice(0, spaceIdx)
+    const cmdline = trimmed.slice(spaceIdx + 1).trim()
+    const pid = Number.parseInt(pidStr, 10)
+    if (!Number.isFinite(pid)) continue
+
+    // Cheap pre-filter (avoid running the --user-data-dir regex against every process on
+    // the box) before the real parse — anything Claude-related mentions "claude" somewhere.
+    if (!/claude/i.test(cmdline)) continue
+
+    const parsed = parseProcessRecord(pid, cmdline)
+    if (parsed) out.push(parsed)
+  }
+  return out
+}
+
+// ----------------------------------------------------------------------------
+// Public API.
+// ----------------------------------------------------------------------------
+
+/**
+ * Enumerates currently-running Claude Desktop processes across all instances, per-OS.
+ * Filters to processes whose command line carries `--user-data-dir` (i.e. Claude Desktop
+ * instances launched by this app or manually with that flag); by default excludes Electron
+ * child processes (`--type=gpu-process`, `--type=renderer`, `--type=utility`,
+ * `--type=crashpad-handler`, etc.) so callers get one record per running instance.
+ *
+ * Pass `{ includeChildren: true }` to get the full process tree per instance (used by
+ * quitInstance()-style callers that need to kill every process, not just the main one).
+ *
+ * Never throws: enumeration failures (powershell/wmic/ps unavailable, spawn error, timeout,
+ * unparseable output) resolve to an empty array.
+ */
+export async function listClaudeProcesses(
+  options: ListClaudeProcessesOptions = {},
+): Promise<CMProcessInfo[]> {
+  let all: CMProcessInfo[]
+  try {
+    all = process.platform === 'win32' ? await listWindowsProcesses() : await listUnixProcesses()
+  } catch {
+    return []
+  }
+
+  return options.includeChildren ? all : all.filter((p) => p.isMain)
+}
