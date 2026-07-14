@@ -124,7 +124,12 @@ export function burnRatePctPerHour(
   if (!Number.isFinite(hours) || hours * 60 < MIN_SPAN_MIN) return null
 
   const rate = (last.weekAllPct - first.weekAllPct) / hours
-  // Clamp tiny negative noise (a % can tick down a point on the server's own rounding) to zero.
+  // Belt-and-braces. This clamp is currently UNREACHABLE and that is deliberate: the walk above
+  // breaks on ANY decrease, so `window` is monotonically non-decreasing and `rate` cannot be
+  // negative. It stays as a guard on the invariant, not as live logic — if someone later loosens the
+  // reset detection (e.g. to tolerate a 1-point rounding wobble instead of treating it as a reset),
+  // a negative rate becomes reachable, and a negative burn would read as "gaining quota" and hand out
+  // infinite headroom. Cheaper to keep the floor than to re-derive why it mattered.
   return rate < 0 ? 0 : rate
 }
 
