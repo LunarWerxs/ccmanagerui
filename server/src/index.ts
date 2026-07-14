@@ -713,7 +713,12 @@ async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
 }
 
 // --- boot: single-instance guard, port hop, publish runtime pointer ---------
-if (process.env.CCMANAGERUI_PORT_FIXED !== '1') {
+// The auto-update successor (CCMANAGERUI_RELAUNCH=1) is exempt from this guard: its
+// predecessor is still alive and answering /api/health during the ~800ms handoff, so
+// probing here would see "already running" and make the successor exit, leaving ZERO
+// daemons. It instead falls through to the CCMANAGERUI_RELAUNCH port-wait below and
+// takes over the port.
+if (process.env.CCMANAGERUI_PORT_FIXED !== '1' && process.env.CCMANAGERUI_RELAUNCH !== '1') {
   const live = await findLiveInstance()
   if (live) {
     console.log(
