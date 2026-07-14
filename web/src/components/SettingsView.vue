@@ -10,15 +10,20 @@ import {
   CloudOff,
   ExternalLink,
   EyeOff,
+  Gauge,
   KeyRound,
   LogOut,
   MessageCircleQuestion,
+  Monitor,
   Plus,
   Power,
   RefreshCw,
+  Repeat,
   ShieldCheck,
   SlidersHorizontal,
   SunMoon,
+  Terminal,
+  Timer,
   Trash2,
   User,
 } from '@lucide/vue'
@@ -36,11 +41,14 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { USAGE_REFRESH_INTERVALS, useAppSettings } from '@/composables/useAppSettings'
 import { useData } from '@/composables/useData'
+import { useMonitor } from '@/composables/useMonitor'
 import { usePanels } from '@/composables/usePanels'
 import { useUpdates } from '@/composables/useUpdates'
-import type { AuthType, SyncStatus } from '@/lib/api'
+import type { AuthType, MonitorStateName, SyncStatus } from '@/lib/api'
 import * as api from '@/lib/api'
+import type { BadgeVariant } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
 import { useTooltipConfig } from '@/lib/tooltip-config'
 import ExpandTransition from '@/shell/ExpandTransition.vue'
@@ -156,6 +164,24 @@ async function toggleHideTrayIcon(enabled: boolean) {
   } catch {
     toast.error(t('settings.hideTrayIconToastFailed'))
   }
+}
+
+// --- usage: background auto-refresh + which instance tables to show -----------------------------
+// Auto-refresh is ON by default. A check is a ~300ms read of the same quota endpoint the CLI's
+// /usage screen reads, and reading your quota does not consume it, so keeping the numbers warm is
+// effectively free. See server/src/usage-refresh.ts.
+const {
+  autoRefresh: usageAutoRefresh,
+  autoRefreshIntervalMin: usageIntervalMin,
+  showDesktopInstances,
+  showCliInstances,
+  load: loadUsageSettings,
+  update: updateUsageSettings,
+} = useAppSettings()
+onMounted(loadUsageSettings)
+
+async function patchUsageSettings(patch: Partial<api.UsageSettings>) {
+  if (!(await updateUsageSettings(patch))) toast.error(t('settings.usageToastFailed'))
 }
 
 // --- theme (moved here from the app header) + cloud sync -----------------------
@@ -413,10 +439,77 @@ async function saveScheduler() {
 const schedAdvancedOpen = ref(false)
 const addAccountOpen = ref(false)
 
+// --- auto-resume monitor ---
+const {
+  settings: monitorSettings,
+  status: monitorStatus,
+  accounts: monitorAccountOverrides,
+  refreshMonitor,
+  updateMonitor,
+  setMonitorAccount,
+} = useMonitor()
+onMounted(refreshMonitor)
+
+const monitorMaxAttempts = ref(3)
+const monitorResumeBufferMin = ref(10)
+watch(
+  monitorSettings,
+  (s) => {
+    if (s) {
+      monitorMaxAttempts.value = s.maxAttempts
+      monitorResumeBufferMin.value = s.resumeBufferMin
+    }
+  },
+  { immediate: true },
+)
+
+async function toggleMonitorEnabled(enabled: boolean) {
+  const ok = await updateMonitor({ enabled })
+  if (ok) {
+    toast.success(enabled ? t('settings.monitorToastEnabled') : t('settings.monitorToastDisabled'))
+  } else {
+    toast.error(t('settings.monitorToastFailed'))
+  }
+}
+async function saveMonitorSettings() {
+  const ok = await updateMonitor({
+    maxAttempts: Number(monitorMaxAttempts.value),
+    resumeBufferMin: Number(monitorResumeBufferMin.value),
+  })
+  if (!ok) toast.error(t('settings.monitorToastFailed'))
+}
+async function toggleMonitorAccount(accountId: string, enabled: boolean) {
+  const ok = await setMonitorAccount(accountId, enabled)
+  if (!ok) toast.error(t('settings.monitorToastFailed'))
+}
+function monitorAccountEnabled(accountId: string): boolean {
+  return monitorAccountOverrides.value[accountId] ?? true
+}
+
+const MONITOR_STATE_VARIANT: Record<MonitorStateName, BadgeVariant> = {
+  scheduled: 'info',
+  blocked_weekly: 'warning',
+  needs_human: 'destructive',
+  done: 'secondary',
+}
+const MONITOR_STATE_LABEL_KEY: Record<MonitorStateName, string> = {
+  scheduled: 'settings.monitorStateScheduled',
+  blocked_weekly: 'settings.monitorStateBlockedWeekly',
+  needs_human: 'settings.monitorStateNeedsHuman',
+  done: 'settings.monitorStateDone',
+}
+function monitorStateVariant(state: MonitorStateName): BadgeVariant {
+  return MONITOR_STATE_VARIANT[state] ?? 'secondary'
+}
+function monitorStateLabelKey(state: MonitorStateName): string {
+  return MONITOR_STATE_LABEL_KEY[state] ?? 'settings.monitorStateScheduled'
+}
+
 // The panel's footer Save button. Everything auto-saves as it changes; this flushes
-// the one buffered form (scheduler numbers) and confirms the whole panel.
+// the buffered forms (scheduler numbers, monitor numbers) and confirms the whole panel.
 async function save() {
   await saveScheduler()
+  await saveMonitorSettings()
   toast.success(t('settings.toastSaved'))
 }
 defineExpose({ save })
@@ -470,6 +563,66 @@ defineExpose({ save })
         </template>
         <template #control>
           <Switch :model-value="hideTrayIcon" @update:model-value="toggleHideTrayIcon" />
+        </template>
+      </SettingsRow>
+    </SettingsGroup>
+
+    <!-- usage: keep the quota numbers warm, and hide whichever instance table you don't use -->
+    <SettingsGroup :label="$t('settings.usage')">
+      <SettingsRow :icon="Gauge" :label="$t('settings.usageAutoRefreshLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.usageAutoRefreshHint')" />
+        </template>
+        <template #control>
+          <Switch
+            :model-value="usageAutoRefresh"
+            @update:model-value="(v: boolean) => patchUsageSettings({ autoRefresh: v })"
+          />
+        </template>
+      </SettingsRow>
+      <SettingsRow
+        v-if="usageAutoRefresh"
+        :icon="Timer"
+        :label="$t('settings.usageIntervalLabel')"
+      >
+        <template #info>
+          <InfoHint :text="$t('settings.usageIntervalHint')" />
+        </template>
+        <template #control>
+          <div class="flex items-center gap-1">
+            <Button
+              v-for="mins in USAGE_REFRESH_INTERVALS"
+              :key="mins"
+              :variant="usageIntervalMin === mins ? 'secondary' : 'ghost'"
+              size="xs"
+              :aria-pressed="usageIntervalMin === mins"
+              @click="patchUsageSettings({ autoRefreshIntervalMin: mins })"
+            >
+              {{ $t('settings.usageIntervalMinutes', { minutes: mins }) }}
+            </Button>
+          </div>
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="Monitor" :label="$t('settings.showDesktopInstancesLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.showDesktopInstancesHint')" />
+        </template>
+        <template #control>
+          <Switch
+            :model-value="showDesktopInstances"
+            @update:model-value="(v: boolean) => patchUsageSettings({ showDesktopInstances: v })"
+          />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="Terminal" :label="$t('settings.showCliInstancesLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.showCliInstancesHint')" />
+        </template>
+        <template #control>
+          <Switch
+            :model-value="showCliInstances"
+            @update:model-value="(v: boolean) => patchUsageSettings({ showCliInstances: v })"
+          />
         </template>
       </SettingsRow>
     </SettingsGroup>
@@ -647,6 +800,56 @@ defineExpose({ save })
           </div>
         </div>
       </ExpandTransition>
+    </SettingsGroup>
+
+    <!-- auto-resume monitor -->
+    <SettingsGroup :label="$t('settings.monitorTitle')" :description="$t('settings.monitorHint')">
+      <SettingsRow :icon="RefreshCw" :label="$t('settings.monitorEnabledLabel')">
+        <template #control>
+          <Switch
+            :model-value="monitorSettings?.enabled ?? false"
+            @update:model-value="toggleMonitorEnabled"
+          />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="Repeat" :label="$t('settings.monitorMaxAttemptsLabel')">
+        <template #control>
+          <Input v-model="monitorMaxAttempts" type="number" min="1" class="w-20" />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="Timer" :label="$t('settings.monitorBufferLabel')">
+        <template #control>
+          <Input v-model="monitorResumeBufferMin" type="number" min="0" class="w-20" />
+        </template>
+      </SettingsRow>
+
+      <div v-if="monitorStatus.length === 0" class="px-3.5 py-2.5 text-xs italic text-muted-foreground">
+        {{ $t('settings.monitorEmpty') }}
+      </div>
+      <div v-else class="flex flex-col gap-2 px-3.5 py-2.5">
+        <div v-for="row in monitorStatus" :key="row.itemId" class="flex items-center gap-2 text-xs">
+          <Badge :variant="monitorStateVariant(row.state)">{{ $t(monitorStateLabelKey(row.state)) }}</Badge>
+          <span class="min-w-0 flex-1 truncate text-foreground">{{ row.title ?? row.sessionId }}</span>
+          <span v-if="row.message" class="max-w-[14rem] truncate text-muted-foreground">{{ row.message }}</span>
+          <span class="shrink-0 text-muted-foreground">
+            {{ $t('settings.monitorAttempts', { n: row.resumeAttempts }) }}
+          </span>
+        </div>
+      </div>
+
+      <template v-if="accounts.length > 0">
+        <p class="px-3.5 pt-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {{ $t('settings.monitorAccountOverridesLabel') }}
+        </p>
+        <SettingsRow v-for="a in accounts" :key="a.id" :label="a.label">
+          <template #control>
+            <Switch
+              :model-value="monitorAccountEnabled(a.id)"
+              @update:model-value="(v: boolean) => toggleMonitorAccount(a.id, v)"
+            />
+          </template>
+        </SettingsRow>
+      </template>
     </SettingsGroup>
     </div>
 

@@ -6,6 +6,75 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Usage checks now hit the quota endpoint directly instead of spawning `claude`.** The CLI's own
+  `/usage` screen is just a GET against `https://api.anthropic.com/api/oauth/usage`, Bearer-authenticated
+  with an OAuth access token; calling it ourselves (`server/src/usage-api.ts`) skips booting the
+  ~250 MB Bun-compiled `claude` binary entirely. Measured on one machine: the old spawn path took
+  9,353 / 9,262 / 9,218ms per check, the direct GET took 372 / 424 / 169ms, roughly 25 to 50x faster.
+  It is also richer than the text screen: `resets_at` is a real ISO-8601 timestamp (the text screen
+  prints a yearless human string like "Jul 19, 3:59am"), `severity` (normal/warning/critical) is
+  computed server-side instead of guessed from a threshold, and a per-model weekly sub-limit carries
+  its own name via `scope.model.display_name`. Reading usage costs no quota: it is a read, not an
+  inference call. The `claude -p "/usage"` spawn remains as a fallback for the cases the direct path
+  can't serve: no OAuth token in hand, an account configured with an API key instead (the endpoint is
+  OAuth-only), or the server rejecting the token with 401 (expired); the daemon deliberately does not
+  refresh the token itself, since rotating the user's refresh token could break their real login, so an
+  expired token falls back to the CLI's own refresh instead.
+- **CLI instances can be linked to a desktop instance.** `CliInstance.associatedDesktopDir` records
+  that a CLI instance and a desktop instance are the same Anthropic account under two independent
+  logins, so each can serve as the other's usage-check fallback when one token is expired or missing:
+  a desktop instance's chain is its own token, then a linked CLI instance's login, then a dispatch
+  account matching the email; a CLI instance's chain is its own login, then an associated dispatch
+  account, then a linked desktop instance's token. New `link_cli_instance_to_desktop` MCP tool.
+- **Background auto-refresh of usage, on by default.** A staggered sweep keeps every instance's usage
+  number warm without a manual refresh, skipping any instance with no usable credential up front. Each
+  check costs about 300ms and no quota, so polling on a loop is no longer the liability it was when it
+  meant spawning `claude`. Toggle and interval live in Settings → General, alongside separate toggles to
+  show or hide the desktop and CLI instances tables.
+- **Usage responses carry an `advice` verdict.** Every usage check (`check_usage`, `check_my_usage`,
+  `list_usage`, the UI's usage cell) now includes `{ severity, bindingPct, shouldOffload, safeToFanOut,
+  advice }` alongside the raw percentages, so a caller does not have to re-derive "is this bad" from
+  thresholds itself. `shouldOffload: true` means the caller is close to being cut off mid-task.
+- **`check_my_usage` now works from a normal Claude Code session, not only a CLI instance.** It falls
+  back to the default `~/.claude` login when `CLAUDE_CODE_CONFIG_DIR` / `CLAUDE_CONFIG_DIR` is unset,
+  which previously made the self-check error out for the everyday case of the session the user is
+  actually talking to. New `list_usage` MCP tool surveys every managed instance (desktop and CLI) at
+  once, each with its own `advice` verdict, for picking an account with headroom before routing heavy
+  work.
+- **A CLI login is now a usable usage-check source in its own right.** `<CLAUDE_CONFIG_DIR>/.credentials.json`
+  is plain JSON (`claudeAiOauth.accessToken` plus `.scopes`, no DPAPI/safeStorage layer), so a CLI
+  instance that has run `/login` gives a usage-capable token directly, independent of any desktop
+  instance.
+- **CLI instances.** A CLI instance is a `CLAUDE_CONFIG_DIR` associated with an account and logged in
+  once, the command-line counterpart to a desktop instance (which isolates via `--user-data-dir`).
+  The Instances view now manages them alongside desktop instances: create one (the app makes its
+  config dir), open a terminal to use it, a one-click "Log in" helper that opens a terminal for you to
+  run `/login` (the app never performs the login itself), associate it with a dispatch account, rename,
+  and a guarded delete. Persisted as plain JSON under `~/.ccmanagerui`, never a token.
+- **Usage-check subsystem.** Read an account's remaining Claude subscription quota (session 5-hour %,
+  weekly all-models %, and per-model weekly %) by running `claude -p "/usage"` with the account's auth
+  injected. A DESKTOP instance is polled using its OWN decrypted OAuth token (never persisted), so it
+  works with no dispatch account and no CLI login; a registered dispatch account or a logged-in CLI
+  instance also work. The desktop token cache holds two grants (a full CLI grant and a profile-only
+  grant); the usage path deliberately selects the `user:inference`-scoped grant, since the profile
+  grant runs `/usage` but returns no numbers. The probe also sets `CLAUDE_CODE_OAUTH_SCOPES` from
+  that grant: without it `claude` quietly stops treating `/usage` as a command and prints a cost
+  summary with no percentages, which only shows up when the daemon runs outside a Claude Code
+  session (for example the tray, launched from Explorer). Surfaced three ways: a per-row usage cell in the
+  Instances table (the binding weekly % color-coded, with a hover breakdown), a `check_usage` MCP
+  tool, and a `check_my_usage` self-check any agent can call. Checks are on demand (each spawns a real
+  `claude`) and cached with an age; a no-data result shows "—" with a reason rather than silently.
+- **AI self-check guidance.** `docs/AI_USAGE_SELFCHECK.md` plus a README note teach agents that they
+  can read their own quota and that the weekly all-models % is the binding cap to pace by.
+- **Auto-resume monitor (opt-in, off by default).** A session killed mid-work by a 5-hour rate limit
+  can auto-resume once the window clears, gated on the weekly cap not being maxed. Detection reuses the
+  existing structured `rate_limited` run status; a resume is a normal queued `--resume` run scheduled
+  for just after the reset. Safety rails: a per-session resume cap, idempotent scheduling, a global
+  switch plus per-account overrides, and a status chip ("resumes ~HH:MM" / "blocked: weekly maxed" /
+  "needs human"). Settings and `get_monitor` / `set_monitor` MCP tools expose it.
+
 ## [0.2.0] - 2026-07-13
 
 ### Added

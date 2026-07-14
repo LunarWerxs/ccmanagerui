@@ -1,6 +1,7 @@
 import type {
   Account,
   AuthType,
+  CliInstance,
   CMAccount,
   CMActionResult,
   CMDesktopInstall,
@@ -8,6 +9,8 @@ import type {
   EffortLevel,
   InstanceColorKey,
   InstanceIconKey,
+  MonitorSettings,
+  MonitorView,
   PermissionMode,
   PortableModeSettings,
   PortableWindowResult,
@@ -20,11 +23,15 @@ import type {
   TailResult,
   UpdateApplyResult,
   UpdateStatus,
+  UsageCheckResult,
+  UsageSettings,
+  UsageSnapshot,
 } from '@ccmanagerui/server/types'
 
 export type {
   Account,
   AuthType,
+  CliInstance,
   CMAccount,
   CMAccountStatus,
   CMActionResult,
@@ -33,6 +40,10 @@ export type {
   EffortLevel,
   InstanceColorKey,
   InstanceIconKey,
+  MonitorSettings,
+  MonitorStateName,
+  MonitorStatusRow,
+  MonitorView,
   PermissionMode,
   PortableModeSettings,
   PortableWindowResult,
@@ -47,6 +58,14 @@ export type {
   TailResult,
   UpdateApplyResult,
   UpdateStatus,
+  UsageAdvice,
+  UsageCheckResult,
+  UsageLimit,
+  UsageReason,
+  UsageSettings,
+  UsageSeverity,
+  UsageSnapshot,
+  UsageSource,
 } from '@ccmanagerui/server/types'
 // Value re-export: the curated icon/color key sets that drive the instance appearance pickers
 // (single source of truth, also validated server-side). See lib/instance-appearance.ts.
@@ -222,10 +241,12 @@ export const getAutoUpdateSettings = () => j<AutoUpdateSettings>('/api/update/se
 export const updateAutoUpdateSettings = (b: Partial<AutoUpdateSettings>) =>
   j<AutoUpdateSettings>('/api/update/settings', { method: 'POST', body: JSON.stringify(b) })
 
-// --- app settings (portable mode, hide tray icon) ------------------------------------------------
-export const getSettings = () => j<PortableModeSettings>('/api/settings')
-export const updateSettings = (b: Partial<PortableModeSettings>) =>
-  j<PortableModeSettings>('/api/settings', { method: 'POST', body: JSON.stringify(b) })
+// --- app settings (portable mode, hide tray icon, usage auto-refresh + section visibility) -------
+/** Everything /api/settings returns: the window/tray settings plus the usage settings. */
+export type AppSettings = PortableModeSettings & UsageSettings
+export const getSettings = () => j<AppSettings>('/api/settings')
+export const updateSettings = (b: Partial<AppSettings>) =>
+  j<AppSettings>('/api/settings', { method: 'POST', body: JSON.stringify(b) })
 export const openPortableWindow = () =>
   j<PortableWindowResult>('/api/portable-window', { method: 'POST' })
 
@@ -253,3 +274,88 @@ export const setSync = (b: {
 export const syncPull = () => j<SyncResult>('/api/settings/sync/pull', { method: 'POST' })
 /** Force a push of the current local settings now. */
 export const syncPush = () => j<SyncResult>('/api/settings/sync/push', { method: 'POST' })
+
+// --- usage-check subsystem (Feature B) -----------------------------------------
+// Read an account's remaining Claude quota. A check is a ~300ms call to the same quota endpoint the
+// CLI's `/usage` screen reads (it only falls back to spawning `claude` when no OAuth token works),
+// and reading quota does not consume quota — so refreshing freely is fine. Results are cached
+// server-side per key; pass refresh to force a fresh read.
+/** Check a registered dispatch account's usage (by id or label). */
+export const checkAccountUsage = (account: string, refresh = false) =>
+  j<UsageCheckResult>(
+    `/api/usage?account=${encodeURIComponent(account)}${refresh ? '&refresh=1' : ''}`,
+  )
+/** Check usage for a desktop instance (own token → linked CLI instance's login → dispatch account). */
+export const checkDesktopInstanceUsage = (dir: string, refresh = false) =>
+  j<UsageCheckResult>(
+    `/api/instances/${encodeURIComponent(dir)}/usage${refresh ? '?refresh=1' : ''}`,
+  )
+/** The whole server-side usage cache, keyed by `desktop:<dir>` / `acct:<id>` / `cli:<id>` etc. */
+export const getUsageCache = () =>
+  j<{ cache: Record<string, UsageSnapshot>; lastAutoRefreshAt: string | null }>('/api/usage/cache')
+/** Force one background refresh sweep now (the same pass the auto-refresh timer runs). */
+export const refreshAllUsage = () =>
+  j<{ ok: boolean; checked: number }>('/api/usage/refresh', { method: 'POST' })
+
+// --- CLI instances (Feature A) -------------------------------------------------
+export const listCliInstances = () => j<CliInstance[]>('/api/cli-instances')
+export const createCliInstance = (name: string) =>
+  j<CMActionResult>('/api/cli-instances', { method: 'POST', body: JSON.stringify({ name }) })
+export const launchCliInstance = (id: string, opts: { model?: string; effort?: string } = {}) =>
+  j<CMActionResult>(`/api/cli-instances/${encodeURIComponent(id)}/launch`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  })
+/** Open a terminal for the USER to /login this CLI instance (the daemon never logs in itself). */
+export const cliInstanceLogin = (id: string) =>
+  j<CMActionResult>(`/api/cli-instances/${encodeURIComponent(id)}/login`, { method: 'POST' })
+export const renameCliInstance = (id: string, name: string) =>
+  j<CMActionResult>(`/api/cli-instances/${encodeURIComponent(id)}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+export const associateCliInstance = (
+  id: string,
+  accountId: string | null,
+  accountLabel?: string | null,
+) =>
+  j<CMActionResult>(`/api/cli-instances/${encodeURIComponent(id)}/associate`, {
+    method: 'POST',
+    body: JSON.stringify({ accountId, accountLabel }),
+  })
+/**
+ * Link this CLI instance to a DESKTOP instance (pass null to unlink). They are normally the same
+ * Anthropic account with two separate logins, so linking groups them in the UI and lets each act as
+ * the other's usage-check fallback when one's token is expired.
+ */
+export const linkCliInstanceToDesktop = (
+  id: string,
+  desktopDir: string | null,
+  desktopLabel?: string | null,
+) =>
+  j<CMActionResult>(`/api/cli-instances/${encodeURIComponent(id)}/link-desktop`, {
+    method: 'POST',
+    body: JSON.stringify({ desktopDir, desktopLabel }),
+  })
+export const deleteCliInstance = (id: string, confirmName: string) =>
+  j<CMActionResult>(`/api/cli-instances/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ confirmName }),
+  })
+export const checkCliInstanceUsage = (id: string, refresh = false) =>
+  j<UsageCheckResult>(
+    `/api/cli-instances/${encodeURIComponent(id)}/usage${refresh ? '?refresh=1' : ''}`,
+  )
+
+// --- auto-resume monitor (Feature E) -------------------------------------------
+export const getMonitor = () => j<MonitorView>('/api/monitor')
+export const updateMonitor = (b: Partial<MonitorSettings>) =>
+  j<MonitorView>('/api/monitor', { method: 'POST', body: JSON.stringify(b) })
+export const setMonitorAccount = (accountId: string, enabled: boolean) =>
+  j<MonitorView>('/api/monitor/account', {
+    method: 'POST',
+    body: JSON.stringify({ accountId, enabled }),
+  })
+/** Force one monitor pass now (manual "check for resumable stops"). */
+export const runMonitorCheck = () =>
+  j<{ ok: boolean } & MonitorView>('/api/monitor/check', { method: 'POST' })

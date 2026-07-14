@@ -168,3 +168,157 @@ export interface PortableModeSettings {
    *  live so re-enabling it here restores the icon without a restart). */
   hideTrayIcon: boolean
 }
+
+// --- usage-check subsystem (Feature B) --------------------------------------
+// These DTOs live HERE (the pure, web-safe types hub) rather than in server/src/usage.ts, so the
+// Vue app's type-only import path never pulls a Bun-only module. The runtime `usage.ts` imports
+// them back, same discipline as SyncStatus above.
+
+/** Server-computed "how bad is this" for one limit. Only the API path supplies it; the text
+ *  parser cannot (the `/usage` screen renders severity as color, which we never see). */
+export type UsageSeverity = 'normal' | 'warning' | 'critical'
+
+/** One limit line from `/usage`: a percent used and a human reset string. */
+export interface UsageLimit {
+  pct: number
+  /** Human reset string ("Jul 19, 3:59am"), or '' when the window hasn't started. */
+  resets: string
+  /** ISO-8601 reset timestamp. Present on the API path only; the text screen prints no year, so
+   *  the CLI path has to guess one (see parseResetTime). Prefer this when it is here. */
+  resetsAt?: string | null
+  severity?: UsageSeverity
+}
+
+/** Where a snapshot came from. 'api' is the fast direct read; 'cli' is the `claude -p` fallback. */
+export type UsageSource = 'api' | 'cli'
+
+/** A parsed snapshot of one account's quota at a moment in time. */
+export interface UsageSnapshot {
+  /** Account label/email if the caller knew it; the `/usage` text does not name the account. */
+  account: string | null
+  /** The 5-hour rolling session window. */
+  session: UsageLimit | null
+  /** The weekly all-models limit — the BINDING cap for pacing decisions. */
+  weekAll: UsageLimit | null
+  /** A per-model weekly sub-limit (e.g. "Fable"), when present. */
+  weekModel: (UsageLimit & { label: string }) | null
+  capturedAt: string
+  /** Optional for back-compat with snapshots cached before the API path existed. */
+  source?: UsageSource
+}
+
+/**
+ * Why a usage check turned out the way it did — lets the UI explain a "—" instead of showing it
+ * silently. 'ok' = real numbers; the rest are actionable no-data reasons.
+ */
+export type UsageReason =
+  | 'ok'
+  | 'logged_out' // desktop instance isn't signed in
+  | 'no_token' // desktop instance signed in but no usable/decryptable token
+  | 'not_logged_in' // CLI instance has no login and no associated account
+  | 'check_failed' // the probe ran but returned no parseable usage
+  | 'unknown'
+
+/**
+ * The actionable verdict derived from a snapshot — what an agent should DO about these numbers.
+ *
+ * This exists because the raw percentages are not self-interpreting: an AI (or a person) reading
+ * "98%" still has to know that the weekly all-models bucket is the binding cap, that a 0% session
+ * alongside it means nothing, and that the correct response is to write your working context to disk
+ * BEFORE you get cut off mid-task. See usageAdvice() in server/src/usage.ts.
+ */
+export interface UsageAdvice {
+  severity: 'unknown' | UsageSeverity
+  /** The binding weekly all-models %, or null if unknown. */
+  bindingPct: number | null
+  /** True when the agent should save/offload its working context before doing more work. */
+  shouldOffload: boolean
+  /** True when a heavy multi-agent fan-out is a reasonable idea right now. */
+  safeToFanOut: boolean
+  advice: string
+}
+
+/** Response of a usage-check route: the snapshot + whether it came from cache + its cache key. */
+export interface UsageCheckResult {
+  snapshot: UsageSnapshot
+  cached: boolean
+  key: string
+  /** Why the result is what it is (esp. for a no-data snapshot). Optional for back-compat. */
+  reason?: UsageReason
+  /** What to do about these numbers. Attached by the routes so an MCP caller never re-derives it. */
+  advice?: UsageAdvice
+}
+
+// --- CLI instances (Feature A) ----------------------------------------------
+
+/** A CLI instance: a `CLAUDE_CONFIG_DIR` associated with an account, logged in once. */
+export interface CliInstance {
+  id: string
+  name: string
+  configDir: string
+  associatedAccountId: string | null
+  associatedAccountLabel: string | null
+  /**
+   * The DESKTOP instance this CLI login belongs to (an `~/.claude-instances` dir). A desktop app
+   * and a CLI login are two independent auth stores, but in practice they are the SAME Anthropic
+   * account used for two different purposes — so linking them lets the UI group them as one account
+   * and lets each act as the other's usage-check fallback. Null = not linked.
+   */
+  associatedDesktopDir: string | null
+  /** Display label of the linked desktop instance, cached for rendering. */
+  associatedDesktopLabel: string | null
+  loggedIn: boolean
+  lastUsageCheck: UsageSnapshot | null
+  createdAt: number
+}
+
+// --- usage settings ----------------------------------------------------------
+
+/** Auto-refresh + section-visibility settings (persisted in the db `settings` table). */
+export interface UsageSettings {
+  /** Periodically re-check every checkable instance in the background. ON by default: the direct
+   *  API read costs ~300ms and no quota, so there is no reason to make the user click. */
+  autoRefresh: boolean
+  /** Minutes between auto-refresh sweeps. */
+  autoRefreshIntervalMin: number
+  /** Show the desktop-instances table (for people who only use the CLI). */
+  showDesktopInstances: boolean
+  /** Show the CLI-instances table (for people who only use the desktop app). */
+  showCliInstances: boolean
+}
+
+// --- auto-resume monitor (Feature E) ----------------------------------------
+
+export type MonitorStateName = 'scheduled' | 'blocked_weekly' | 'needs_human' | 'done'
+
+export interface MonitorSettings {
+  /** Master switch (OFF by default — it auto-prompts sessions while you sleep). */
+  enabled: boolean
+  /** Resume a session at most this many times before marking it "needs human". */
+  maxAttempts: number
+  /** Minutes of slack added after the detected 5-hour reset before firing the resume. */
+  resumeBufferMin: number
+  /** The locked resume prompt (a code-constant default; advanced override). */
+  resumePrompt: string
+}
+
+/** One tracked rate-limited stop and the state of its (possible) auto-resume. */
+export interface MonitorStatusRow {
+  itemId: string
+  sessionId: string
+  accountId: string | null
+  title: string | null
+  state: MonitorStateName
+  message: string | null
+  resumeAttempts: number
+  resumeItemId: string | null
+  updatedAt: string
+}
+
+/** The whole monitor view for the UI: settings + tracked stops + per-account overrides. */
+export interface MonitorView {
+  settings: MonitorSettings
+  status: MonitorStatusRow[]
+  /** account_id → enabled (absent = follows the global switch). */
+  accounts: Record<string, boolean>
+}

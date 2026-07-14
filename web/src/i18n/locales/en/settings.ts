@@ -24,6 +24,23 @@ export default {
     'Removes the CC Manager UI icon from the notification area. CC Manager UI keeps running in the background - launch the shortcut again to reopen the UI, or come back here to turn the icon back on.',
   hideTrayIconToastFailed: 'Failed to save hide tray icon setting.',
 
+  // usage section
+  usage: 'Usage',
+  usageAutoRefreshLabel: 'Auto-refresh usage',
+  usageAutoRefreshHint:
+    "Keep every instance's quota numbers up to date in the background, so the Instances table is never stale. Checking your quota does not use any of it, and each check takes about a third of a second, so this costs you nothing. Turn it off to only ever check when you click Refresh.",
+  usageIntervalLabel: 'Refresh every',
+  usageIntervalHint:
+    'How often to re-check. Quota moves over hours, not seconds, so there is little reason to go below 15 minutes.',
+  usageIntervalMinutes: '{minutes} min',
+  showDesktopInstancesLabel: 'Show desktop instances',
+  showDesktopInstancesHint:
+    'Show the Claude Desktop instances table. Turn this off if you only use the CLI.',
+  showCliInstancesLabel: 'Show CLI instances',
+  showCliInstancesHint:
+    'Show the CLI instances table. Turn this off if you only use the desktop app.',
+  usageToastFailed: 'Failed to save usage setting.',
+
   // updates section
   updates: 'Updates',
   currentVersion: 'Current version',
@@ -86,6 +103,24 @@ export default {
   maxConcurrentLabel: 'Max concurrent',
   saveSettings: 'Save settings',
   toastSaved: 'Settings saved.',
+
+  // auto-resume monitor section
+  monitorTitle: 'Auto-resume monitor',
+  monitorHint:
+    'Watches sessions that stopped on a rate limit and, once the 5-hour window resets, resumes them automatically. Off by default; it prompts sessions while you are away, so review the settings below before turning it on.',
+  monitorEnabledLabel: 'Enabled',
+  monitorMaxAttemptsLabel: 'Max resume attempts',
+  monitorBufferLabel: 'Resume buffer (min)',
+  monitorEmpty: 'No sessions being monitored.',
+  monitorAttempts: '{n} attempts',
+  monitorStateScheduled: 'Scheduled',
+  monitorStateBlockedWeekly: 'Blocked (weekly limit)',
+  monitorStateNeedsHuman: 'Needs you',
+  monitorStateDone: 'Done',
+  monitorAccountOverridesLabel: 'Per-account overrides',
+  monitorToastEnabled: 'Auto-resume monitor enabled.',
+  monitorToastDisabled: 'Auto-resume monitor disabled.',
+  monitorToastFailed: 'Failed to save auto-resume monitor settings.',
 
   // accounts section
   accounts: 'Accounts',

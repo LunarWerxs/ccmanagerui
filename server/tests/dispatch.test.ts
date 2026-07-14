@@ -107,7 +107,7 @@ test('reattachRuns: a run that finished while the daemon was down is recovered f
   const log = join(RUN_LOG_DIR, `${item.id}.stream.jsonl`)
   writeFileSync(
     log,
-    [
+    `${[
       JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fake' }),
       JSON.stringify({
         type: 'assistant',
@@ -115,7 +115,7 @@ test('reattachRuns: a run that finished while the daemon was down is recovered f
       }),
       JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done' }),
       JSON.stringify({ __dispatch: 'exit', code: 0, at: new Date().toISOString() }),
-    ].join('\n') + '\n',
+    ].join('\n')}\n`,
   )
   writeFileSync(
     join(RUN_LOG_DIR, `${item.id}.status.json`),

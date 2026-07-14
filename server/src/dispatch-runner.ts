@@ -21,6 +21,7 @@
 
 import { Database } from 'bun:sqlite'
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { DEFAULT_OAUTH_SCOPES } from './usage'
 
 // The runner is launched DETACHED via WMI (Win32_Process.Create — see dispatch.ts) so it escapes the
 // Bun daemon's job object; that also means it does NOT inherit the daemon's process env. So it is
@@ -85,8 +86,17 @@ function buildChildEnv(spec: RunSpec): Record<string, string> {
       delete env.ANTHROPIC_API_KEY
       delete env.ANTHROPIC_AUTH_TOKEN
       delete env.CLAUDE_CODE_OAUTH_TOKEN
-      if (acct.auth_type === 'api_key') env.ANTHROPIC_API_KEY = acct.secret
-      else env.CLAUDE_CODE_OAUTH_TOKEN = acct.secret
+      if (acct.auth_type === 'api_key') {
+        env.ANTHROPIC_API_KEY = acct.secret
+      } else {
+        env.CLAUDE_CODE_OAUTH_TOKEN = acct.secret
+        // An injected OAuth token needs its SCOPES beside it or `claude` silently stops handling
+        // SLASH-COMMAND prompts (it runs them as plain text and returns nothing useful — exit 0, no
+        // error). Ordinary prompts work either way, but a queued "/usage"-style prompt would not.
+        // See DEFAULT_OAUTH_SCOPES in ./usage.ts for the full write-up. Set it explicitly so a run
+        // never depends on the daemon's ambient environment (the tray's is empty).
+        env.CLAUDE_CODE_OAUTH_SCOPES = DEFAULT_OAUTH_SCOPES
+      }
     }
   }
   return env

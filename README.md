@@ -68,7 +68,13 @@ The daemon's REST API is also exposed over MCP stdio (`server/src/mcp.ts`, or `b
 }
 ```
 
-Tools cover sessions (list / get / tail), the queue (list / add / update / run / cancel / events), accounts (secrets always masked), the scheduler (get / set), and instances (list / launch / quit) — plus an update check. Mutating tools say `MUTATES:` in their description; there is deliberately no shutdown tool.
+Tools cover sessions (list / get / tail), the queue (list / add / update / run / cancel / events), accounts (secrets always masked), the scheduler (get / set), instances (list / launch / quit), CLI instances (list / create / launch / login helper), usage-check (`check_usage`, `check_my_usage`), and the auto-resume monitor (get / set), plus an update check. Mutating tools say `MUTATES:` in their description; there is deliberately no shutdown tool.
+
+### Usage-check
+
+`check_usage { account?, configDir? }` and `check_my_usage {}` let any MCP-speaking agent read an account's remaining Claude subscription quota without asking a human. Pass `account` (a saved dispatch account id or label) or `configDir` (a `CLAUDE_CONFIG_DIR` that's been `/login`'d once); `check_my_usage` is a shorthand self-check of the calling process's own `CLAUDE_CONFIG_DIR`. Both report the session (5h) %, the weekly (all-models) %, and any per-model weekly %.
+
+**The weekly (all-models) % is the binding cap.** A fresh session % is a red herring when weekly is near 100, and switching the flagship model doesn't dodge the shared weekly bucket. An agent should check its own quota before a heavy multi-agent fan-out and pace accordingly, routing heavy work to whichever account has the lowest weekly %.
 
 ## Config (env)
 

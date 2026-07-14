@@ -30,6 +30,17 @@ import {
   updateAppearance,
 } from './connections'
 import { resolveAccount } from './core/accounts'
+import {
+  associateCliInstance,
+  createCliInstance,
+  deleteCliInstance,
+  getCliInstance,
+  launchCliInstance,
+  linkCliInstanceToDesktop,
+  listCliInstances,
+  renameCliInstance,
+  setCliInstanceUsage,
+} from './core/cli-instances'
 import { detectDesktopInstall } from './core/desktop-install'
 import { setInstanceMeta } from './core/instance-meta'
 import {
@@ -55,7 +66,6 @@ import {
   subscribeRun,
 } from './dispatch'
 import { findFreePort } from './find-free-port.mjs'
-import { skipSingleInstanceGuard } from './single-instance'
 import {
   clearInstanceInfo,
   findLiveInstance,
@@ -64,13 +74,44 @@ import {
   writeInstanceInfo,
 } from './instance'
 import { initFileLogging } from './log-file.mjs'
+import {
+  getMonitorSettings,
+  listMonitorAccounts,
+  monitorStatus,
+  runMonitorOnce,
+  setMonitorForAccount,
+  setMonitorSettings,
+  startMonitor,
+} from './monitor'
 import { openPortableWindow } from './portable-window.mjs'
 import { schedulerState, setSchedulerEnabled } from './scheduler'
 import { searchSessionBodies } from './session-search'
 import { getSession, listSessions } from './sessions'
+import { skipSingleInstanceGuard } from './single-instance'
 import { findTranscript, tailTranscript } from './transcript'
-import type { Account, QueueItem } from './types'
+import type { Account, MonitorView, QueueItem, UsageCheckResult } from './types'
 import { applyUpdate, checkForUpdate } from './updater'
+import {
+  allCachedUsage,
+  checkUsage,
+  getCachedUsage,
+  isNoData,
+  setCachedUsage,
+  usageAdvice,
+} from './usage'
+import {
+  getUsageSettings,
+  lastAutoRefreshAt,
+  setUsageSettings,
+  startUsageRefresh,
+  sweepUsage,
+} from './usage-refresh'
+import {
+  checkUsageForAccount,
+  checkUsageForCliInstance,
+  checkUsageForDesktop,
+  surveyUsage,
+} from './usage-service'
 
 // Persist console output to <CONFIG_DIR>/logs/daemon.log BEFORE anything else can throw, so the
 // crash reason logged just below actually survives the process (the tray runs us with a hidden
@@ -173,15 +214,29 @@ app.post('/api/update/settings', async (c) => {
   return c.json({ enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() })
 })
 
-// --- app settings (portable mode, hide tray icon; see server/src/db.ts) -----------------------
-app.get('/api/settings', (c) =>
-  c.json({ portableMode: portableModeEnabled(), hideTrayIcon: hideTrayIconEnabled() }),
-)
+// --- app settings (portable mode, hide tray icon, usage auto-refresh; see server/src/db.ts) ------
+const appSettings = () => ({
+  portableMode: portableModeEnabled(),
+  hideTrayIcon: hideTrayIconEnabled(),
+  ...getUsageSettings(),
+})
+app.get('/api/settings', (c) => c.json(appSettings()))
 app.post('/api/settings', async (c) => {
   const body = await jsonBody(c)
   if (typeof body.portableMode === 'boolean') setPortableMode(body.portableMode)
   if (typeof body.hideTrayIcon === 'boolean') setHideTrayIcon(body.hideTrayIcon)
-  return c.json({ portableMode: portableModeEnabled(), hideTrayIcon: hideTrayIconEnabled() })
+  // setUsageSettings re-arms the background timer, so flipping autoRefresh takes effect immediately
+  // (no daemon restart).
+  setUsageSettings({
+    autoRefresh: typeof body.autoRefresh === 'boolean' ? body.autoRefresh : undefined,
+    autoRefreshIntervalMin:
+      typeof body.autoRefreshIntervalMin === 'number' ? body.autoRefreshIntervalMin : undefined,
+    showDesktopInstances:
+      typeof body.showDesktopInstances === 'boolean' ? body.showDesktopInstances : undefined,
+    showCliInstances:
+      typeof body.showCliInstances === 'boolean' ? body.showCliInstances : undefined,
+  })
+  return c.json(appSettings())
 })
 
 // --- "Sign in with Connections" + settings-sync (see server/src/connections.ts) ----------------
@@ -645,6 +700,228 @@ app.post('/api/instances', async (c) => {
   return c.json(await createInstance(body.name))
 })
 
+// --- usage-check subsystem (Feature B) --------------------------------------
+// Read an account's remaining Claude quota by spawning `claude -p "/usage"` (usage.ts), auth
+// injected the SAME way dispatch does (usage-service.ts). Each result is cached per key so the UI
+// never stampedes real `claude` processes; `?refresh=1` forces a fresh probe. A no-data snapshot
+// (all-null) is returned honestly — never faked as "0% used".
+
+/** Resolve an `account` query param that may be an account id OR a free-text label. */
+function resolveAccountParam(param: string): { id: string; label: string } | null {
+  const byId = db
+    .query<{ id: string; label: string }, [string]>('select id, label from accounts where id = ?')
+    .get(param)
+  if (byId) return byId
+  return (
+    db
+      .query<{ id: string; label: string }, [string]>(
+        'select id, label from accounts where label = ?',
+      )
+      .get(param) ?? null
+  )
+}
+
+const wantsRefresh = (c: Context): boolean => {
+  const v = c.req.query('refresh')
+  return v === '1' || v === 'true'
+}
+
+app.get('/api/usage', async (c) => {
+  const account = c.req.query('account')
+  const configDir = c.req.query('configDir')
+  const refresh = wantsRefresh(c)
+  if (account) {
+    const resolved = resolveAccountParam(account)
+    if (!resolved) return c.json({ error: `unknown account '${account}'` }, 404)
+    const key = `acct:${resolved.id}`
+    if (!refresh) {
+      const cached = getCachedUsage(key)
+      if (cached)
+        return c.json({
+          snapshot: cached,
+          cached: true,
+          key,
+          reason: 'ok',
+        } satisfies UsageCheckResult)
+    }
+    const snapshot = await checkUsageForAccount(resolved.id)
+    return c.json({
+      snapshot,
+      cached: false,
+      key,
+      reason: isNoData(snapshot) ? 'check_failed' : 'ok',
+      advice: usageAdvice(snapshot),
+    } satisfies UsageCheckResult)
+  }
+  if (configDir) {
+    const key = `dir:${configDir}`
+    if (!refresh) {
+      const cached = getCachedUsage(key)
+      if (cached)
+        return c.json({
+          snapshot: cached,
+          cached: true,
+          key,
+          reason: 'ok',
+          advice: usageAdvice(cached),
+        } satisfies UsageCheckResult)
+    }
+    const snapshot = await checkUsage({ configDir, account: configDir })
+    // Only cache a real reading — a no-data result is the absence of a number, not a number.
+    if (!isNoData(snapshot)) setCachedUsage(key, snapshot)
+    return c.json({
+      snapshot,
+      cached: false,
+      key,
+      reason: isNoData(snapshot) ? 'check_failed' : 'ok',
+      advice: usageAdvice(snapshot),
+    } satisfies UsageCheckResult)
+  }
+  return c.json({ error: 'pass account (id or label) or configDir' }, 400)
+})
+
+// Whole usage cache (bulk-hydrate the Instances table on load without checking anything).
+app.get('/api/usage/cache', (c) =>
+  c.json({ cache: allCachedUsage(), lastAutoRefreshAt: lastAutoRefreshAt() }),
+)
+
+// Every instance's usage in ONE call: the whole-fleet survey. This is the endpoint an AI agent wants
+// ("which of my accounts has headroom?") and what the auto-refresh sweep exposes on demand. Each row
+// carries the advisory verdict too, so a caller never has to re-derive "is 98% bad".
+app.get('/api/usage/survey', async (c) => {
+  const rows = await surveyUsage()
+  return c.json({
+    rows: rows.map((r) => ({ ...r, advice: usageAdvice(r.result.snapshot) })),
+    lastAutoRefreshAt: lastAutoRefreshAt(),
+  })
+})
+
+// Force one background sweep now (the same pass the auto-refresh timer runs).
+app.post('/api/usage/refresh', async (c) => c.json({ ok: true, checked: await sweepUsage() }))
+
+// Desktop instance usage. The credential chain (own safeStorage token → LINKED CLI instance's login
+// → dispatch account matching the email) lives in usage-service.ts so the routes, the MCP tools, and
+// the auto-refresh sweep all resolve it identically.
+app.get('/api/instances/:dir/usage', async (c) => {
+  const dir = decodeURIComponent(c.req.param('dir'))
+  if (!wantsRefresh(c)) {
+    const key = `desktop:${dir}`
+    const cached = getCachedUsage(key)
+    if (cached)
+      return c.json({
+        snapshot: cached,
+        cached: true,
+        key,
+        reason: 'ok',
+      } satisfies UsageCheckResult)
+  }
+  return c.json(await checkUsageForDesktop(dir))
+})
+
+// --- CLI instances (Feature A) ----------------------------------------------
+app.get('/api/cli-instances', (c) => c.json(listCliInstances()))
+app.post('/api/cli-instances', async (c) => {
+  const body = await jsonBody(c)
+  if (typeof body.name !== 'string' || !body.name.trim())
+    return c.json({ error: 'name is required' }, 400)
+  return c.json(createCliInstance(body.name))
+})
+app.post('/api/cli-instances/:id/launch', async (c) => {
+  const body = await jsonBody(c)
+  return c.json(
+    launchCliInstance(c.req.param('id'), {
+      model: typeof body.model === 'string' ? body.model : undefined,
+      effort: typeof body.effort === 'string' ? body.effort : undefined,
+    }),
+  )
+})
+app.post('/api/cli-instances/:id/login', (c) =>
+  c.json(launchCliInstance(c.req.param('id'), { login: true })),
+)
+app.post('/api/cli-instances/:id/rename', async (c) => {
+  const body = await jsonBody(c)
+  if (typeof body.name !== 'string') return c.json({ error: 'name is required' }, 400)
+  return c.json(renameCliInstance(c.req.param('id'), body.name))
+})
+app.post('/api/cli-instances/:id/associate', async (c) => {
+  const body = await jsonBody(c)
+  const accountId = typeof body.accountId === 'string' && body.accountId ? body.accountId : null
+  const accountLabel =
+    typeof body.accountLabel === 'string'
+      ? body.accountLabel
+      : accountId
+        ? (resolveAccountParam(accountId)?.label ?? null)
+        : null
+  return c.json(associateCliInstance(c.req.param('id'), accountId, accountLabel))
+})
+app.delete('/api/cli-instances/:id', async (c) => {
+  const body = await jsonBody(c)
+  const confirmName = typeof body.confirmName === 'string' ? body.confirmName : undefined
+  return c.json(deleteCliInstance(c.req.param('id'), confirmName))
+})
+// Link this CLI instance to a DESKTOP instance (or clear it with desktopDir: null). Same account,
+// two logins — the link is what lets the UI group them and lets each back the other up for usage.
+app.post('/api/cli-instances/:id/link-desktop', async (c) => {
+  const body = await jsonBody(c)
+  const desktopDir = typeof body.desktopDir === 'string' && body.desktopDir ? body.desktopDir : null
+  let desktopLabel = typeof body.desktopLabel === 'string' ? body.desktopLabel : null
+  if (desktopDir && !desktopLabel) {
+    const inst = (await listInstances()).find((i) => i.dir === desktopDir)
+    if (!inst) return c.json({ error: `unknown desktop instance '${desktopDir}'` }, 404)
+    desktopLabel = inst.label ?? inst.name
+  }
+  return c.json(linkCliInstanceToDesktop(c.req.param('id'), desktopDir, desktopLabel))
+})
+
+app.get('/api/cli-instances/:id/usage', async (c) => {
+  const id = c.req.param('id')
+  const inst = getCliInstance(id)
+  if (!inst) return c.json({ error: 'CLI instance not found' }, 404)
+  if (!wantsRefresh(c) && inst.lastUsageCheck)
+    return c.json({
+      snapshot: inst.lastUsageCheck,
+      cached: true,
+      key: `cli:${id}`,
+      reason: 'ok',
+    } satisfies UsageCheckResult)
+  // The credential chain (own login → associated account → LINKED desktop token) lives in
+  // usage-service.ts; mirror the snapshot onto the record so the list view renders it without a check.
+  const result = await checkUsageForCliInstance(id)
+  if (!result) return c.json({ error: 'CLI instance not found' }, 404)
+  setCliInstanceUsage(id, result.snapshot)
+  return c.json(result)
+})
+
+// --- auto-resume monitor (Feature E) ----------------------------------------
+const monitorView = (): MonitorView => ({
+  settings: getMonitorSettings(),
+  status: monitorStatus(),
+  accounts: listMonitorAccounts(),
+})
+app.get('/api/monitor', (c) => c.json(monitorView()))
+app.post('/api/monitor', async (c) => {
+  const body = await jsonBody(c)
+  setMonitorSettings({
+    enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+    maxAttempts: typeof body.maxAttempts === 'number' ? body.maxAttempts : undefined,
+    resumeBufferMin: typeof body.resumeBufferMin === 'number' ? body.resumeBufferMin : undefined,
+    resumePrompt: typeof body.resumePrompt === 'string' ? body.resumePrompt : undefined,
+  })
+  return c.json(monitorView())
+})
+app.post('/api/monitor/account', async (c) => {
+  const body = await jsonBody(c)
+  if (typeof body.accountId !== 'string' || typeof body.enabled !== 'boolean')
+    return c.json({ error: 'accountId and enabled are required' }, 400)
+  setMonitorForAccount(body.accountId, body.enabled)
+  return c.json(monitorView())
+})
+// Force one monitor pass now (manual "check for resumable stops").
+app.post('/api/monitor/check', async (c) => {
+  await runMonitorOnce()
+  return c.json({ ok: true, ...monitorView() })
+})
+
 // --- portable window (opens this daemon's own UI in a chromeless app window) -------------------
 app.post('/api/portable-window', async (c) => {
   // readInstanceInfo() is populated at boot (writeInstanceInfo below) before the server starts
@@ -806,6 +1083,18 @@ setAutoUpdateHooks({
 void reattachRuns()
 
 startAutoUpdate()
+
+// --- auto-resume monitor loop (opt-in; OFF by default; see server/src/monitor.ts) -------------
+// The poll loop always runs; each tick is a no-op unless `monitor_enabled` is set. It watches for
+// dispatch runs that stopped 'rate_limited', gates each on the weekly cap via checkUsage, and
+// schedules a `claude --resume` for just after the 5-hour reset.
+startMonitor()
+
+// --- background usage refresh (ON by default; see server/src/usage-refresh.ts) -----------------
+// A check is now a ~300ms HTTPS GET against the quota endpoint, not a `claude` spawn, and reading
+// your quota does not consume it — so keeping the numbers warm costs essentially nothing. Toggle in
+// Settings → General.
+startUsageRefresh()
 
 export default {
   port: boundPort,

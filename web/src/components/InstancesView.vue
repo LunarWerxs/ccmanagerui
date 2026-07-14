@@ -6,21 +6,26 @@ import {
   Boxes,
   EllipsisVertical,
   FolderOpen,
+  Gauge,
+  LogIn,
   MonitorDown,
   Pencil,
   Play,
   Plus,
   RefreshCw,
   Square,
+  Terminal,
   Trash2,
   TriangleAlert,
 } from '@lucide/vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
+import CliInstancesSection from '@/components/CliInstancesSection.vue'
 import CreateInstanceDialog from '@/components/CreateInstanceDialog.vue'
 import DeleteInstanceDialog from '@/components/DeleteInstanceDialog.vue'
 import EditInstanceDialog from '@/components/EditInstanceDialog.vue'
+import UsageBadge from '@/components/UsageBadge.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -40,9 +45,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { useAppSettings } from '@/composables/useAppSettings'
+import { useCliInstances } from '@/composables/useCliInstances'
 import { useInstances } from '@/composables/useInstances'
 import { useSortable } from '@/composables/useSortable'
-import type { CMDesktopInstall, CMInstance } from '@/lib/api'
+import { useUsage } from '@/composables/useUsage'
+import type { CliInstance, CMDesktopInstall, CMInstance } from '@/lib/api'
 import {
   CLASSIC_DESKTOP_INSTALLER_URL,
   DESKTOP_DOWNLOAD_PAGE_URL,
@@ -57,6 +65,7 @@ import {
   resolveIconKey,
 } from '@/lib/instance-appearance'
 import { useTooltipConfig } from '@/lib/tooltip-config'
+import { bindingWeeklyPct, usageReasonMessageKey } from '@/lib/usage'
 import IconTooltip from '@/shell/IconTooltip.vue'
 
 const {
@@ -79,6 +88,10 @@ const {
 
 const { t } = useI18n()
 const { enabled: tooltipsEnabled } = useTooltipConfig()
+const { snapshotFor, isChecking, checkDesktop, hydrate, reasonFor } = useUsage()
+
+const usageKeyFor = (inst: CMInstance) => `desktop:${inst.dir}`
+const usageFor = (inst: CMInstance) => snapshotFor(usageKeyFor(inst))
 
 const { sortedRows, toggleSort, indicatorFor } = useSortable(
   () => instances.value,
@@ -90,6 +103,13 @@ const { sortedRows, toggleSort, indicatorFor } = useSortable(
     { key: 'pid', accessor: (i: CMInstance) => i.pid ?? undefined },
     { key: 'uptime', accessor: (i: CMInstance) => (i.isRunning ? i.startTime : null) },
     { key: 'memory', accessor: (i: CMInstance) => i.memoryBytes ?? undefined },
+    {
+      key: 'usage',
+      accessor: (i: CMInstance) => {
+        const snap = usageFor(i)
+        return snap ? (bindingWeeklyPct(snap) ?? undefined) : undefined
+      },
+    },
   ],
 )
 
@@ -133,6 +153,70 @@ async function handleRefresh() {
   // fresh: bypass the server's 5-minute detection cache so installing the classic build and
   // hitting Refresh actually clears the warning banner below.
   await Promise.all([refreshInstances(), refreshDesktopInstall(true)])
+}
+
+async function onCheckUsage(inst: CMInstance) {
+  const ok = await checkDesktop(inst.dir)
+  if (!ok) {
+    toast.error(t('instances.toastUsageCheckFailed'))
+    return
+  }
+  // The API call itself can succeed while still coming back with no usable numbers (not
+  // signed in, no usage-capable token, or the probe returned nothing). A manual click should
+  // never go silent, so surface the reason; a real result just updates the cell.
+  const reasonKey = usageReasonMessageKey(reasonFor(usageKeyFor(inst)))
+  if (reasonKey) toast.error(t(reasonKey))
+}
+
+// Which tables to show, and the CLI instances (so "refresh all" covers them too, not just desktop).
+const { showDesktopInstances, showCliInstances, load: loadAppSettings } = useAppSettings()
+const {
+  cliInstances,
+  checkUsage: checkCliUsage,
+  launch: launchCli,
+  login: loginCli,
+} = useCliInstances()
+onMounted(loadAppSettings)
+
+// --- unified per-account view -------------------------------------------------------------------
+// A desktop instance and the CLI instance linked to it are the SAME Anthropic account, signed in
+// twice (Electron safeStorage vs a CLAUDE_CONFIG_DIR). So the desktop row IS the account row: it
+// shows its CLI login inline and can act on it, instead of making you cross-reference two tables to
+// see that "4claude the app" and "4claude the CLI" are one quota.
+//
+// Returns an ARRAY (0 or 1) rather than an object, purely so the template can `v-for` over it and
+// get a properly-typed local binding — Vue has no `v-let`, and this avoids `!` assertions.
+function linkedClis(dir: string): CliInstance[] {
+  return cliInstances.value.filter((c) => c.associatedDesktopDir === dir)
+}
+
+async function onLaunchCli(cli: CliInstance) {
+  const result = await launchCli(cli.id)
+  if (result?.ok) toast.success(t('instances.toastCliLaunched'))
+  else toast.error(result?.message ?? t('instances.toastCliLaunchFailed'))
+}
+async function onLoginCli(cli: CliInstance) {
+  const result = await loginCli(cli.id)
+  if (result?.ok) toast.success(t('instances.toastCliLoginOpened'))
+  else toast.error(result?.message ?? t('instances.toastCliLoginFailed'))
+}
+
+// Check every instance's usage concurrently — desktop AND CLI. Each check is a single ~300ms read of
+// the quota endpoint (not a `claude` spawn), and the endpoint is neither rate-limited nor
+// quota-consuming, so there is no reason to serialize. The user is waiting on this click, so it fans
+// out rather than staggering the way the background sweep does.
+const refreshingAllUsage = ref(false)
+async function onRefreshAllUsage() {
+  if (refreshingAllUsage.value) return
+  refreshingAllUsage.value = true
+  try {
+    await Promise.all([
+      ...(showDesktopInstances.value ? instances.value.map((i) => checkDesktop(i.dir)) : []),
+      ...(showCliInstances.value ? cliInstances.value.map((i) => checkCliUsage(i.id)) : []),
+    ])
+  } finally {
+    refreshingAllUsage.value = false
+  }
 }
 
 async function onOpen(inst: CMInstance) {
@@ -270,6 +354,7 @@ async function refreshDesktopInstall(fresh = false) {
 onMounted(() => {
   startPolling()
   refreshDesktopInstall()
+  hydrate()
 })
 onUnmounted(stopPolling)
 </script>
@@ -280,7 +365,7 @@ onUnmounted(stopPolling)
       <div class="flex items-center gap-2 text-sm font-semibold">
         <Boxes class="size-4" />
         {{ $t('instances.title') }}
-        <span class="text-muted-foreground">({{ instances.length }})</span>
+        <span v-if="showDesktopInstances" class="text-muted-foreground">({{ instances.length }})</span>
       </div>
       <div class="flex flex-wrap items-center gap-1.5">
         <IconTooltip :label="$t('instances.refresh')" :description="$t('instances.refreshHint')">
@@ -294,7 +379,21 @@ onUnmounted(stopPolling)
             <RefreshCw :class="loading ? 'animate-spin' : ''" />
           </Button>
         </IconTooltip>
-        <Button size="sm" @click="openCreateDialog">
+        <IconTooltip
+          :label="$t('instances.refreshAllUsage')"
+          :description="$t('instances.refreshAllUsageHint')"
+        >
+          <Button
+            variant="outline"
+            size="icon"
+            :disabled="refreshingAllUsage || (instances.length === 0 && cliInstances.length === 0)"
+            :aria-label="$t('instances.refreshAllUsage')"
+            @click="onRefreshAllUsage"
+          >
+            <Gauge :class="refreshingAllUsage ? 'animate-pulse' : ''" />
+          </Button>
+        </IconTooltip>
+        <Button v-if="showDesktopInstances" size="sm" @click="openCreateDialog">
           <Plus /> {{ $t('instances.createInstance') }}
         </Button>
       </div>
@@ -330,7 +429,9 @@ onUnmounted(stopPolling)
     </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto scroll-slim">
-      <Table>
+      <!-- Both tables are hideable (Settings → General): plenty of people use only the desktop app,
+           or only the CLI, and shouldn't have to look at an empty table for the other. -->
+      <Table v-if="showDesktopInstances">
         <TableHeader class="sticky top-0 z-10 bg-background">
           <TableRow>
             <TableHead
@@ -378,11 +479,18 @@ onUnmounted(stopPolling)
                 <ArrowDown v-else-if="indicatorFor('memory') === 'desc'" class="size-3" />
               </span>
             </TableHead>
+            <TableHead class="cursor-pointer select-none" @click="toggleSort('usage')">
+              <span class="inline-flex items-center gap-0.5">
+                {{ $t('instances.colUsage') }}
+                <ArrowUp v-if="indicatorFor('usage') === 'asc'" class="size-3" />
+                <ArrowDown v-else-if="indicatorFor('usage') === 'desc'" class="size-3" />
+              </span>
+            </TableHead>
             <TableHead class="text-right">{{ $t('instances.colActions') }}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody v-if="instances.length === 0" class="[&>tr]:transition-colors [&>tr]:duration-200">
-          <TableEmpty v-if="!loading" :colspan="7">
+          <TableEmpty v-if="!loading" :colspan="8">
             <div class="flex flex-col items-center gap-1 text-center">
               <Boxes class="mb-1 size-6 opacity-40" />
               <p class="font-medium text-foreground">{{ $t('instances.empty') }}</p>
@@ -400,6 +508,7 @@ onUnmounted(stopPolling)
             <TableCell><Skeleton class="h-3 w-10" /></TableCell>
             <TableCell><Skeleton class="h-3 w-12" /></TableCell>
             <TableCell><Skeleton class="h-3 w-14" /></TableCell>
+            <TableCell><Skeleton class="h-5 w-14" /></TableCell>
             <TableCell>
               <div class="flex justify-end"><Skeleton class="h-6 w-20" /></div>
             </TableCell>
@@ -450,6 +559,40 @@ onUnmounted(stopPolling)
               <div class="mono max-w-[22rem] truncate text-[0.625rem] text-muted-foreground">
                 {{ inst.dir }}
               </div>
+              <!-- The linked CLI login, shown as part of THIS account rather than in a second table:
+                   same account, second sign-in. v-for over a 0-or-1 array is how we get a typed
+                   local binding without a non-null assertion. -->
+              <div
+                v-for="cli in linkedClis(inst.dir)"
+                :key="cli.id"
+                class="mt-1 flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground"
+              >
+                <Terminal class="size-3 shrink-0" />
+                <span class="truncate font-medium">{{ cli.name }}</span>
+                <span
+                  class="inline-block size-1.5 shrink-0 rounded-full"
+                  :class="cli.loggedIn ? 'bg-success' : 'bg-muted-foreground/40'"
+                  :title="cli.loggedIn ? $t('cliInstances.loggedIn') : $t('cliInstances.loggedOut')"
+                />
+                <Button
+                  v-if="cli.loggedIn"
+                  variant="ghost"
+                  size="xs"
+                  class="h-5 px-1.5 text-[0.6875rem]"
+                  @click="onLaunchCli(cli)"
+                >
+                  {{ $t('instances.launchCli') }}
+                </Button>
+                <Button
+                  v-else
+                  variant="ghost"
+                  size="xs"
+                  class="h-5 px-1.5 text-[0.6875rem]"
+                  @click="onLoginCli(cli)"
+                >
+                  {{ $t('instances.loginCli') }}
+                </Button>
+              </div>
             </TableCell>
             <TableCell>
               <Badge v-if="accountLabel(inst)" :variant="accountBadgeVariant(inst)">
@@ -473,6 +616,14 @@ onUnmounted(stopPolling)
               {{ inst.isRunning ? formatUptime(inst.startTime) : '—' }}
             </TableCell>
             <TableCell class="text-xs text-muted-foreground">{{ formatBytes(inst.memoryBytes) }}</TableCell>
+            <TableCell>
+              <UsageBadge
+                :snapshot="usageFor(inst)"
+                :checking="isChecking(usageKeyFor(inst))"
+                :usage-key="usageKeyFor(inst)"
+                @check="onCheckUsage(inst)"
+              />
+            </TableCell>
             <TableCell>
               <div class="flex items-center justify-end gap-1">
                 <Button
@@ -524,6 +675,22 @@ onUnmounted(stopPolling)
                     <DropdownMenuItem :disabled="isBusy(inst)" @click="onCreateShortcut(inst)">
                       <MonitorDown /> {{ $t('instances.createShortcut') }}
                     </DropdownMenuItem>
+                    <DropdownMenuItem
+                      :disabled="isChecking(usageKeyFor(inst))"
+                      @click="onCheckUsage(inst)"
+                    >
+                      <Gauge /> {{ $t('instances.checkUsage') }}
+                    </DropdownMenuItem>
+                    <!-- The linked CLI's actions, right here on the account's own row -->
+                    <template v-for="cli in linkedClis(inst.dir)" :key="`cli-${cli.id}`">
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem v-if="cli.loggedIn" @click="onLaunchCli(cli)">
+                        <Terminal /> {{ $t('instances.launchCli') }}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem v-else @click="onLoginCli(cli)">
+                        <LogIn /> {{ $t('instances.loginCli') }}
+                      </DropdownMenuItem>
+                    </template>
                     <DropdownMenuSeparator />
                     <!-- Edit (name + icon + color) is pure UI metadata, so it stays enabled even
                          while the instance runs (unlike Delete, which touches the folder) -->
@@ -547,6 +714,8 @@ onUnmounted(stopPolling)
           </TableRow>
         </TransitionGroup>
       </Table>
+
+      <CliInstancesSection v-if="showCliInstances" />
     </div>
 
     <CreateInstanceDialog

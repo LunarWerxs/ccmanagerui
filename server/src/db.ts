@@ -57,6 +57,27 @@ create table if not exists settings (
   key   text primary key,
   value text not null
 );
+
+-- Auto-resume monitor (Feature E): per-session tracking of a rate-limited stop and its scheduled
+-- resume, so the poll loop is idempotent (never double-queues) and bounded (resume_attempts cap).
+create table if not exists monitor_state (
+  item_id        text primary key,        -- the rate_limited queue_item that tripped the monitor
+  session_id     text not null,
+  account_id     text,
+  resume_attempts integer not null default 0,
+  state          text not null,           -- scheduled | blocked_weekly | needs_human | done
+  resume_item_id text,                    -- the queue_item we enqueued to carry the resume
+  message        text,                    -- human status ("resumes ~HH:MM" / "weekly maxed" / …)
+  next_check_at  text,                    -- ISO; re-arm time for a blocked_weekly re-evaluation
+  updated_at     text not null
+);
+
+-- Per-account monitor override. A row with enabled=0 opts that account OUT while the global switch
+-- is on (default, absent row = follow the global switch).
+create table if not exists monitor_accounts (
+  account_id text primary key,
+  enabled    integer not null default 1
+);
 `)
 
 // --- additive migrations ----------------------------------------------------
@@ -80,6 +101,10 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   portable_mode: '0',
   hide_tray_icon: '0',
   connections_sync: '',
+  // Auto-resume monitor (Feature E) — OFF by default (it auto-prompts sessions while you sleep).
+  monitor_enabled: '0',
+  monitor_max_attempts: '3',
+  monitor_resume_buffer_min: '3',
 }
 
 export function getSetting(key: string): string {

@@ -319,6 +319,142 @@ export interface ResolveAccountOptions {
 }
 
 /**
+ * Decrypt an isolated desktop instance's OWN OAuth access token from its safeStorage token cache.
+ *
+ * IN-PROCESS ONLY: the token is handed straight to the immediate caller (to inject into a
+ * `claude -p "/usage"` probe) and is NEVER persisted, cached, logged, or sent to the browser — same
+ * value-blind discipline resolveAccount keeps. Returns null when the instance is logged out, the
+ * cache can't be decrypted, no token is present, or the token has expired; the caller then treats
+ * usage as "not available", never "0%". Never throws.
+ *
+ * This is what lets a usage check work for ANY logged-in desktop instance with NO separate dispatch
+ * account and NO CLI login: the desktop app's `sk-ant-oat…` OAuth token is a valid
+ * CLAUDE_CODE_OAUTH_TOKEN (verified 2026-07-14 — it drives `claude -p "/usage"` directly).
+ */
+export async function resolveInstanceToken(
+  instanceDir: string,
+): Promise<{ token: string; scopes: string } | null> {
+  try {
+    if (!instanceDir?.trim()) return null
+    const configPath = path.join(instanceDir, 'config.json')
+    if (!existsSync(configPath)) return null
+
+    let config: Record<string, unknown> | null = null
+    try {
+      const raw = readFileSync(configPath, 'utf8')
+      if (raw?.trim()) config = JSON.parse(raw) as Record<string, unknown>
+    } catch {
+      return null
+    }
+    if (!config) return null
+
+    const b64 =
+      typeof config['oauth:tokenCacheV2'] === 'string' && config['oauth:tokenCacheV2']
+        ? (config['oauth:tokenCacheV2'] as string)
+        : typeof config['oauth:tokenCache'] === 'string' && config['oauth:tokenCache']
+          ? (config['oauth:tokenCache'] as string)
+          : null
+    if (!b64) return null
+
+    let decrypted: string | null = null
+    try {
+      decrypted = await decryptSafeStorage(b64, instanceDir)
+    } catch {
+      return null
+    }
+    if (!decrypted) return null
+
+    // Pick the grant that can actually read usage: the desktop app keeps TWO grants — a full CLI
+    // grant (scopes include `user:inference`) and a profile-only grant (`user:profile`). They have
+    // independent, rotating expiries, so picking by max-expiresAt (pickBestGrant, used for identity)
+    // often lands on the profile-only grant, whose token runs `claude -p "/usage"` with exit 0 but
+    // returns NO percentage block (identity scope can't fetch usage). So select by SCOPE here:
+    // require `user:inference`, then take the max-expiresAt among those. Verified 2026-07-14 — the
+    // profile grant yields no numbers; the inference grant yields the real weekly/session %.
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(decrypted) as Record<string, unknown>
+    } catch {
+      return null
+    }
+    if (!parsed || typeof parsed !== 'object') return null
+
+    let best: { token: string; expiresAt: number; scopes: string } | null = null
+    for (const [key, rawValue] of Object.entries(parsed)) {
+      if (!/user:inference/.test(key)) continue // only the usage-capable CLI grant
+      if (!rawValue || typeof rawValue !== 'object') continue
+      const v = rawValue as RawGrantValue
+      const token = typeof v.token === 'string' ? v.token : (v.accessToken ?? null)
+      if (typeof token !== 'string' || !token.trim()) continue
+      const exp = typeof v.expiresAt === 'number' ? v.expiresAt : Number(v.expiresAt) || 0
+      // The grant key is "<acctUuid>:<orgUuid>:https://api.anthropic.com:<scopes>" — the scope
+      // list must be passed to `claude` as CLAUDE_CODE_OAUTH_SCOPES or /usage silently degrades
+      // (see DEFAULT_OAUTH_SCOPES in usage.ts).
+      const scopes = key.split('https://api.anthropic.com:')[1]?.trim() ?? ''
+      if (!best || exp > best.expiresAt) best = { token, expiresAt: exp, scopes }
+    }
+    if (!best) return null
+    // Skip an expired token rather than fire a doomed probe (expiresAt is epoch ms).
+    if (best.expiresAt > 0 && best.expiresAt < Date.now()) return null
+    return { token: best.token, scopes: best.scopes }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Read the OAuth access token a CLI login stored in its `CLAUDE_CONFIG_DIR`.
+ *
+ * The CLI side of the world is much simpler than the desktop side: `claude` writes
+ * `<configDir>/.credentials.json` as PLAIN JSON — `{ claudeAiOauth: { accessToken, scopes, expiresAt,
+ * … } }` — with no safeStorage/DPAPI layer to unwrap (verified 2026-07-14). So a CLI instance that
+ * the user has `/login`'d once gives us a usage-capable token for free.
+ *
+ * Same value-blind, IN-PROCESS-ONLY discipline as resolveInstanceToken above: the token goes
+ * straight to the immediate caller and is never persisted, cached, logged, or sent to the browser.
+ * Returns null when the dir was never logged in, the file is unreadable/corrupt, no token is
+ * present, or the token has expired. Never throws.
+ *
+ * We do NOT attempt a refresh with the stored refresh token: rotating it would invalidate the
+ * user's real CLI login out from under them. An expired token simply falls back to the CLI spawn,
+ * which refreshes its own credentials properly.
+ */
+export function resolveCliConfigDirToken(
+  configDir: string,
+): { token: string; scopes: string } | null {
+  try {
+    if (!configDir?.trim()) return null
+    const credPath = path.join(configDir, '.credentials.json')
+    if (!existsSync(credPath)) return null
+    const raw = readFileSync(credPath, 'utf8')
+    if (!raw?.trim()) return null
+    const parsed = JSON.parse(raw) as { claudeAiOauth?: RawGrantValue & { scopes?: unknown } }
+    const oauth = parsed?.claudeAiOauth
+    if (!oauth || typeof oauth !== 'object') return null
+
+    const token = typeof oauth.accessToken === 'string' ? oauth.accessToken : null
+    if (!token?.trim()) return null
+
+    const expiresAt = typeof oauth.expiresAt === 'number' ? oauth.expiresAt : 0
+    if (expiresAt > 0 && expiresAt < Date.now()) return null
+
+    // `scopes` is an array here (the desktop grant key packs them into a string); normalize to the
+    // space-separated form CLAUDE_CODE_OAUTH_SCOPES wants.
+    const scopes = Array.isArray(oauth.scopes)
+      ? oauth.scopes.filter((s): s is string => typeof s === 'string').join(' ')
+      : typeof oauth.scopes === 'string'
+        ? oauth.scopes
+        : ''
+    // A profile-only login cannot read usage (same trap as the desktop profile grant) — refuse it
+    // here rather than fire a probe that returns exit 0 and no numbers.
+    if (!scopes.includes('user:inference')) return null
+    return { token, scopes }
+  } catch {
+    return null
+  }
+}
+
+/**
  * Resolves the real account identity (email/name/plan/rate-limit tier) that an isolated
  * Claude Desktop instance is logged into, with graceful offline/cache fallback. Never throws.
  */
