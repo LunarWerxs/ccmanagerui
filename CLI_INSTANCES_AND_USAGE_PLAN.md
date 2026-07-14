@@ -173,7 +173,13 @@ supersede the standalone script).
 
 - **Q1 (blocking §4):** does `dispatch.ts` account auth injection authenticate a bare `claude -p "/usage"`
   (reuse it → no separate CLI login), or is a `CLAUDE_CONFIG_DIR` login required? Read `dispatch.ts` +
-  `dispatch-runner.ts` + how the `accounts` sqlite auth is injected into the spawn env. **Answer here:** _TBD_
+  `dispatch-runner.ts` + how the `accounts` sqlite auth is injected into the spawn env. **✅ ANSWERED
+  2026-07-14:** `dispatch-runner.ts` → `buildChildEnv()` reads `select auth_type, secret from accounts
+  where id=?`, clears inherited `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`CLAUDE_CODE_OAUTH_TOKEN`, then
+  sets `ANTHROPIC_API_KEY` (api_key) or `CLAUDE_CODE_OAUTH_TOKEN` (oauth) from the secret. So auth is
+  **ENV-VAR injected, not `CLAUDE_CONFIG_DIR`** → `checkUsage` reuses this exact pattern: spawn
+  `claude -p "/usage"` with `CLAUDE_CODE_OAUTH_TOKEN=<secret>`, and ANY account in the `accounts` table is
+  pollable with NO separate CLI login. `CLAUDE_CONFIG_DIR` stays the fallback for unregistered accounts.
 - **Q2:** unified Instances view (desktop+CLI grouped per account) vs a separate CLI tab? Owner leans
   unified ("per account, its associated CLI/desktop"). Confirm with a quick mock before building the view.
 - **Q3:** usage snapshot caching TTL + whether to auto-poll in the UI (cost: one `/usage` call per account
@@ -183,8 +189,8 @@ supersede the standalone script).
 
 ## 8. Implementation checklist (work top-down; 🔵 = main-loop integration · 🟢 = delegable)
 
-1. [ ] 🔵 **Spike Q1** — trace `dispatch.ts` auth injection; write the answer into §7-Q1. Decides §4 wiring.
-2. [ ] 🟢 **`server/src/usage.ts` + `parseUsageOutput` + unit test** (fixture from §5). Self-contained, no auth. FIRST BRICK.
+1. [x] 🔵 **Spike Q1** — traced; answer in §7-Q1 (auth = env-var token injection, reusable). ✅ 2026-07-14.
+2. [x] 🟢 **`server/src/usage.ts` + `parseUsageOutput` + unit test** — pure parser + `bindingWeeklyPct`/`isNoData`, 4/4 tests green (`server/tests/usage.test.ts`). ✅ 2026-07-14.
 3. [ ] 🔵 **`checkUsage()`** spawn+capture, per Q1's answer (reuse dispatch auth OR `CLAUDE_CONFIG_DIR`). Windows-safe spawn (no Git Bash).
 4. [ ] 🔵 **MCP `check_usage` tool** in `mcp.ts` → `usage.ts`. Verify via `bun run mcp` + a manual tool call.
 5. [ ] 🟢 **`core/cli-instances.ts`** model + list/create/isLoggedIn/launch/associate/delete + JSON persistence.
@@ -202,4 +208,11 @@ supersede the standalone script).
 - **2026-07-14 (Fable, account @ ~97.5% weekly):** Plan authored. Repo explored (state captured in §2).
   No implementation code written yet. **Next:** checklist item 1 (Q1 spike), then item 2 (usage.ts + parser
   + fixture test) as the first committable brick.
+- **2026-07-14 (Fable) — brick 1 landed:** Q1 spiked (§7-Q1: dispatch auth is env-var token injection,
+  reusable — no CLI login needed for registered accounts). `server/src/usage.ts` written (pure
+  `parseUsageOutput` + `bindingWeeklyPct` + `isNoData`) with `server/tests/usage.test.ts` (4/4 green).
+  Committed. **YOU ARE HERE → next: checklist item 3** — `checkUsage()` spawn+capture: spawn the
+  `claude` binary directly (args array, NOT via Git Bash — MSYS mangles `/usage`), inject
+  `CLAUDE_CODE_OAUTH_TOKEN` per §7-Q1, reuse the repo's existing claude-binary resolution
+  (see `dispatch.ts`/`detached-spawn.mjs` for how it finds + spawns `claude`). Then item 4 (MCP `check_usage`).
 - _next session: append your progress here, then commit._
