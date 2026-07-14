@@ -1,0 +1,223 @@
+// server/tests/usage-tokens.test.ts — token counting + weighting (server/src/usage-tokens.ts).
+//
+// Fixture is a small hand-written JSONL transcript (no secrets, no real session data).
+
+import { describe, expect, test } from 'bun:test'
+import { sumTranscriptTokens, tokensPerPercent, weighTurn } from '../src/usage-tokens'
+
+describe('weighTurn', () => {
+  // weight = input*1 + cache_creation*1.25 + cache_read*0.1 + output*5, then * model multiplier.
+  test('sonnet (unrecognized/default multiplier 1): exact arithmetic', () => {
+    const usage = {
+      input_tokens: 100,
+      cache_creation_input_tokens: 40,
+      cache_read_input_tokens: 1000,
+      output_tokens: 20,
+    }
+    const raw = 100 * 1 + 40 * 1.25 + 1000 * 0.1 + 20 * 5
+    expect(raw).toBe(350)
+    expect(weighTurn(usage, 'claude-sonnet-4-20260101')).toBe(350)
+  })
+
+  test('opus: multiplier 5', () => {
+    const usage = {
+      input_tokens: 100,
+      cache_creation_input_tokens: 40,
+      cache_read_input_tokens: 1000,
+      output_tokens: 20,
+    }
+    expect(weighTurn(usage, 'claude-opus-4-20260101')).toBe(350 * 5)
+  })
+
+  test('fable: also multiplier 5', () => {
+    const usage = { input_tokens: 10, output_tokens: 0 }
+    expect(weighTurn(usage, 'fable-5-mythos')).toBe(10 * 5)
+  })
+
+  test('haiku: multiplier 0.27', () => {
+    const usage = { input_tokens: 10, output_tokens: 0 }
+    expect(weighTurn(usage, 'claude-haiku-4-20260101')).toBeCloseTo(10 * 0.27, 10)
+  })
+
+  test('unknown model name: multiplier 1 (safe middle)', () => {
+    const usage = { input_tokens: 10, output_tokens: 0 }
+    expect(weighTurn(usage, 'some-mystery-model')).toBe(10)
+  })
+
+  test('case-insensitive model matching', () => {
+    const usage = { input_tokens: 10, output_tokens: 0 }
+    expect(weighTurn(usage, 'CLAUDE-OPUS-4')).toBe(50)
+    expect(weighTurn(usage, 'Claude-Haiku-4')).toBeCloseTo(2.7, 10)
+    expect(weighTurn(usage, 'FABLE')).toBe(50)
+  })
+
+  test('missing/undefined counts are treated as zero', () => {
+    expect(weighTurn({}, 'sonnet')).toBe(0)
+  })
+})
+
+describe('sumTranscriptTokens', () => {
+  const sinceMs = Date.parse('2026-07-14T00:00:00.000Z')
+
+  // (a) inside the window, assistant, sonnet-ish model
+  const inWindow = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-07-14T01:00:00.000Z',
+    message: {
+      model: 'claude-sonnet-4',
+      usage: {
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+    },
+  })
+  // (b) before sinceMs — must be excluded
+  const beforeWindow = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-07-13T23:00:00.000Z',
+    message: {
+      model: 'claude-sonnet-4',
+      usage: { input_tokens: 9999, output_tokens: 9999 },
+    },
+  })
+  // (c) a user turn carrying a usage echo — must be excluded (double-count guard)
+  const userWithUsage = JSON.stringify({
+    type: 'user',
+    timestamp: '2026-07-14T01:30:00.000Z',
+    message: {
+      model: 'claude-sonnet-4',
+      usage: { input_tokens: 5000, output_tokens: 5000 },
+    },
+  })
+  // (d) malformed/garbage line — must be skipped, not throw
+  const garbage = '{not valid json at all'
+  // (e) a line with no usage at all
+  const noUsage = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-07-14T01:45:00.000Z',
+    message: { model: 'claude-sonnet-4' },
+  })
+  // (f) a queue-operation line
+  const queueOp = JSON.stringify({ type: 'queue-operation', op: 'dequeue' })
+  // second in-window turn, opus, cache-heavy (to make raw vs weighted diverge clearly)
+  const opusCacheHeavy = JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-07-14T02:00:00.000Z',
+    message: {
+      model: 'claude-opus-4',
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_read_input_tokens: 100000,
+        cache_creation_input_tokens: 0,
+      },
+    },
+  })
+
+  const jsonl = [
+    inWindow,
+    beforeWindow,
+    userWithUsage,
+    garbage,
+    noUsage,
+    queueOp,
+    opusCacheHeavy,
+    '', // trailing blank line (as real transcripts have)
+  ].join('\n')
+
+  test('counts only in-window assistant turns with a usage block', () => {
+    const spend = sumTranscriptTokens(jsonl, sinceMs)
+    expect(spend.turns).toBe(2) // inWindow + opusCacheHeavy only
+  })
+
+  test('excludes the before-window turn', () => {
+    const spend = sumTranscriptTokens(jsonl, sinceMs)
+    // If it were included, input would be >= 9999.
+    expect(spend.input).toBeLessThan(9999)
+  })
+
+  test('raw is the plain sum of the four counts; weighted differs for a cache-heavy turn', () => {
+    const spend = sumTranscriptTokens(jsonl, sinceMs)
+
+    const expectedInput = 100 + 10
+    const expectedOutput = 10 + 5
+    const expectedCacheRead = 0 + 100000
+    const expectedCacheCreation = 0
+
+    expect(spend.input).toBe(expectedInput)
+    expect(spend.output).toBe(expectedOutput)
+    expect(spend.cacheRead).toBe(expectedCacheRead)
+    expect(spend.cacheCreation).toBe(expectedCacheCreation)
+
+    const expectedRaw = expectedInput + expectedOutput + expectedCacheRead + expectedCacheCreation
+    expect(spend.raw).toBe(expectedRaw)
+
+    // weighted: turn1 (sonnet, x1) = 100*1 + 10*5 = 150
+    // turn2 (opus, x5) = (10*1 + 5*5 + 100000*0.1) * 5 = (10 + 25 + 10000) * 5 = 50175
+    const expectedWeighted = (100 * 1 + 10 * 5) * 1 + (10 * 1 + 5 * 5 + 100000 * 0.1) * 5
+    expect(spend.weighted).toBe(expectedWeighted)
+
+    // raw sum is dominated by the giant cache-read count; weighted discounts it 10x. They must differ.
+    expect(spend.weighted).not.toBe(spend.raw)
+    expect(spend.raw).toBeGreaterThan(spend.weighted) // cache-read-heavy raw sum dwarfs its weighted cost
+  })
+
+  test('byModel breaks weighted/output/turns down per model', () => {
+    const spend = sumTranscriptTokens(jsonl, sinceMs)
+    expect(Object.keys(spend.byModel).sort()).toEqual(['claude-opus-4', 'claude-sonnet-4'])
+    expect(spend.byModel['claude-sonnet-4']).toEqual({
+      weighted: 100 * 1 + 10 * 5,
+      output: 10,
+      turns: 1,
+    })
+    expect(spend.byModel['claude-opus-4']).toEqual({
+      weighted: (10 * 1 + 5 * 5 + 100000 * 0.1) * 5,
+      output: 5,
+      turns: 1,
+    })
+  })
+
+  test('malformed line, no-usage line, and queue-operation are silently skipped (no throw)', () => {
+    expect(() => sumTranscriptTokens(jsonl, sinceMs)).not.toThrow()
+  })
+
+  test('empty text yields an all-zero spend', () => {
+    const spend = sumTranscriptTokens('', sinceMs)
+    expect(spend.turns).toBe(0)
+    expect(spend.raw).toBe(0)
+    expect(spend.weighted).toBe(0)
+    expect(spend.byModel).toEqual({})
+  })
+})
+
+describe('tokensPerPercent', () => {
+  test('null when tokensPerHour is null', () => {
+    expect(tokensPerPercent(null, 1)).toBeNull()
+  })
+
+  test('null when burnPctPerHour is null', () => {
+    expect(tokensPerPercent(1000, null)).toBeNull()
+  })
+
+  test('null when burnPctPerHour is zero', () => {
+    expect(tokensPerPercent(1000, 0)).toBeNull()
+  })
+
+  test('null when burnPctPerHour is negative', () => {
+    expect(tokensPerPercent(1000, -1)).toBeNull()
+  })
+
+  test('null when tokensPerHour is zero', () => {
+    expect(tokensPerPercent(0, 1)).toBeNull()
+  })
+
+  test('null when tokensPerHour is negative', () => {
+    expect(tokensPerPercent(-5, 1)).toBeNull()
+  })
+
+  test('happy path: plain division', () => {
+    expect(tokensPerPercent(10000, 2)).toBe(5000)
+  })
+})

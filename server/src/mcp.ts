@@ -29,17 +29,44 @@ export function daemonBase(): string {
   return readInstanceInfo()?.url ?? `http://127.0.0.1:${PORT}`
 }
 
+/** The daemon isn't listening. Distinct from a real API error, so a fallback can fire on THIS and
+ *  only this — a 500 from a running daemon must still surface as a failure, not be silently retried
+ *  in-process against different code. */
+class DaemonUnreachable extends Error {}
+
 async function api(pathname: string, init?: RequestInit): Promise<unknown> {
   let res: Response
   try {
     res = await fetch(`${daemonBase()}${pathname}`, init)
   } catch (e) {
-    throw new Error(
-      `couldn't reach the CC Manager UI daemon at ${daemonBase()} — start it with \`bun run start\`. (${e instanceof Error ? e.message : String(e)})`,
+    throw new DaemonUnreachable(
+      `couldn't reach the CC Manager UI daemon at ${daemonBase()}. Start it with \`bun run start\`. (${e instanceof Error ? e.message : String(e)})`,
     )
   }
   if (!res.ok) throw new Error(`CC Manager UI ${res.status}: ${await res.text()}`)
   return res.json()
+}
+
+/**
+ * Run a tool against the daemon, and if the daemon simply isn't running, do the work IN-PROCESS.
+ *
+ * WHY only some tools get this: the usage tools need nothing the daemon uniquely owns. The OAuth
+ * tokens are files on disk, the quota endpoint is a plain HTTPS GET, and the transcripts are local
+ * JSONL. So an agent can answer "how much quota do I have left?" with the app closed. The queue and
+ * dispatch tools are the opposite: they mutate shared sqlite state and supervise real processes, so
+ * a second, uncoordinated executor would be a correctness bug. Those keep failing loudly.
+ *
+ * The imports inside each fallback are DYNAMIC on purpose: they pull in bun:sqlite, and loading that
+ * eagerly would open the database on every MCP start, including the (normal) case where the daemon
+ * owns it and we never touch it.
+ */
+async function apiOrLocal(pathname: string, local: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return await api(pathname)
+  } catch (e) {
+    if (e instanceof DaemonUnreachable) return await local()
+    throw e
+  }
 }
 
 // JSON Schema helper (the engine advertises each tool's `inputSchema` verbatim in tools/list).
@@ -267,7 +294,19 @@ export const TOOLS: McpEngineTool[] = [
       // default ~/.claude. Falling back to that is what makes this work for the everyday case (the
       // session the user is actually talking to) instead of erroring out on it.
       const configDir = process.env.CLAUDE_CONFIG_DIR || defaultClaudeConfigDir()
-      return api(`/api/usage${qs({ configDir, refresh: '1' })}`)
+      // Works with the app CLOSED: a self-check needs only the config dir's own token + one HTTPS GET.
+      return apiOrLocal(`/api/usage${qs({ configDir, refresh: '1' })}`, async () => {
+        const { checkUsage, usageAdvice, isNoData } = await import('./usage')
+        const snapshot = await checkUsage({ configDir, account: configDir })
+        return {
+          snapshot,
+          cached: false,
+          key: `dir:${configDir}`,
+          reason: isNoData(snapshot) ? 'check_failed' : 'ok',
+          advice: usageAdvice(snapshot),
+          daemon: 'offline (answered locally)',
+        }
+      })
     },
   },
   {
@@ -275,7 +314,63 @@ export const TOOLS: McpEngineTool[] = [
     description:
       "Survey the quota of EVERY managed instance (desktop + CLI) in one call, each with its `advice` verdict. Use this to answer 'which of my accounts has headroom?' before routing heavy work, or to find the account that is about to hit its weekly cap. Checks are concurrent and cost no quota.",
     inputSchema: S(),
-    run: () => api('/api/usage/survey'),
+    run: () =>
+      apiOrLocal('/api/usage/survey', async () => {
+        const { surveyUsage } = await import('./usage-service')
+        const { usageAdvice } = await import('./usage')
+        const rows = await surveyUsage()
+        return {
+          rows: rows.map((r) => ({ ...r, advice: usageAdvice(r.result.snapshot) })),
+          daemon: 'offline (answered locally)',
+        }
+      }),
+  },
+  {
+    name: 'usage_budget',
+    description:
+      "QUANTIFY the quota: turn a vague '98% used' into numbers you can actually plan with. Returns (a) `forecast` — the burn rate in %/HOUR, the hours of headroom left at that rate, and `exhaustsBeforeReset`, THE field that decides things: if false, the cap will NOT bite before it resets and you can work freely no matter how alarming the % looks; if true, you have `headroomHours` before you are cut off. And (b) `budget` — an estimated TOKEN headroom, derived by measuring (tokens counted from your Claude Code transcripts) / (percent burned), because Anthropic publishes no token or dollar quota. ALWAYS read `budget.caveat` and `budget.confidence`: the token figure only counts Claude Code on THIS machine, so if the account is also used from the desktop app or elsewhere it is an OPTIMISTIC UPPER BOUND. Use this before committing to a long task or a big fan-out. Pass `dir` (a desktop instance dir from list_instances) or `account`; add `configDir` to count a specific CLI config dir's transcripts.",
+    inputSchema: S({
+      dir: { type: 'string', description: 'Desktop instance dir (from list_instances).' },
+      account: { type: 'string', description: 'A saved dispatch account id or label.' },
+      configDir: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          "Claude config dirs whose transcripts count as this account's spend. Defaults to the plain ~/.claude login.",
+      },
+    }),
+    run: (a) => {
+      const params = new URLSearchParams()
+      if (a.dir != null) params.set('dir', str(a.dir))
+      if (a.account != null) params.set('account', str(a.account))
+      const dirs = (Array.isArray(a.configDir) ? a.configDir : []).map(str)
+      for (const d of dirs) params.append('configDir', d)
+      if (!params.has('dir') && !params.has('account'))
+        throw new Error('pass `dir` (a desktop instance) or `account` (id or label)')
+      return apiOrLocal(`/api/usage/budget?${params.toString()}`, async () => {
+        // Offline path: only the `dir` form works. The `account` form resolves a dispatch account out
+        // of the daemon's sqlite, and racing the daemon for that DB is not worth the complexity.
+        if (!a.dir)
+          throw new Error(
+            'the CC Manager UI daemon is not running; usage_budget can answer offline for `dir` (a desktop instance) but not for `account`. Start the app, or pass `dir`.',
+          )
+        const { checkUsageForDesktop } = await import('./usage-service')
+        const { buildUsageBudget, budgetSummary } = await import('./usage-budget')
+        const { usageAdvice } = await import('./usage')
+        const result = await checkUsageForDesktop(str(a.dir))
+        const budget = buildUsageBudget(result.snapshot, result.key, {
+          configDirs: dirs.length ? dirs : undefined,
+        })
+        return {
+          snapshot: result.snapshot,
+          reason: result.reason,
+          advice: usageAdvice(result.snapshot),
+          budget,
+          summary: budgetSummary(budget, result.snapshot.weekAll?.pct ?? null),
+          daemon: 'offline (answered locally)',
+        }
+      })
+    },
   },
 
   // --- CLI instances (Feature A) ------------------------------------------------

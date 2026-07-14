@@ -30,6 +30,7 @@ import {
   type UsageAuth,
   usageAdvice,
 } from './usage'
+import { recordUsageSample } from './usage-history'
 
 /** The credential + label for a dispatch account, or null if the id is unknown. */
 export function accountAuth(accountId: string): { auth: UsageAuth; label: string } | null {
@@ -90,6 +91,9 @@ export async function checkUsageForDesktop(dir: string): Promise<UsageCheckResul
 
   const finish = (snapshot: UsageSnapshot): UsageCheckResult => {
     setCachedUsage(key, snapshot)
+    // Every real reading feeds the time series. This is what lets a later call differentiate the
+    // percentage into a burn rate (see usage-history.ts) — without it, "98%" stays uninterpretable.
+    recordUsageSample(key, snapshot)
     return { snapshot, cached: false, key, reason: 'ok', advice: usageAdvice(snapshot) }
   }
 
@@ -144,6 +148,9 @@ export async function checkUsageForCliInstance(id: string): Promise<UsageCheckRe
 
   const finish = (snapshot: UsageSnapshot): UsageCheckResult => {
     setCachedUsage(key, snapshot)
+    // Every real reading feeds the time series. This is what lets a later call differentiate the
+    // percentage into a burn rate (see usage-history.ts) — without it, "98%" stays uninterpretable.
+    recordUsageSample(key, snapshot)
     return { snapshot, cached: false, key, reason: 'ok', advice: usageAdvice(snapshot) }
   }
 

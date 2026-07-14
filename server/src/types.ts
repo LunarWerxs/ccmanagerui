@@ -238,6 +238,93 @@ export interface UsageAdvice {
   advice: string
 }
 
+// --- quantifying the percentage ---------------------------------------------
+// The usage endpoint reports a percentage and NOTHING else (limit_dollars / used_dollars /
+// remaining_dollars are all null on a subscription; there are no token counts). A bare "98%" cannot
+// tell an agent whether it can afford a task. These three DTOs turn it into something budgetable:
+// a rate (UsageForecast), a countable spend (TokenSpend), and the two combined (UsageBudget).
+
+/** One historical reading, kept so the % can be differentiated into a rate. */
+export interface UsageSample {
+  at: string
+  sessionPct: number | null
+  weekAllPct: number
+  weekResetsAt: string | null
+}
+
+/** The percentage, differentiated. See server/src/usage-history.ts. */
+export interface UsageForecast {
+  /** How fast the weekly cap is being consumed, in percent per hour. 0 = idle. Null = unmeasurable. */
+  burnPctPerHour: number | null
+  remainingPct: number | null
+  /** Hours until the cap is hit at the current burn. Null when idle (never) or unmeasurable. */
+  headroomHours: number | null
+  /** ISO instant the cap is projected to be hit. Null when idle or unmeasurable. */
+  exhaustsAt: string | null
+  hoursToReset: number | null
+  /**
+   * THE FIELD THAT DECIDES THINGS. False = the cap will not bite before it resets, so work freely no
+   * matter how alarming the % looks. True = you will be cut off in `headroomHours`. Null = unknown.
+   */
+  exhaustsBeforeReset: boolean | null
+  /** How many readings the forecast is based on (more = more trustworthy). */
+  samples: number
+}
+
+/** Tokens actually spent, counted from the transcripts. See server/src/usage-tokens.ts. */
+export interface TokenSpend {
+  input: number
+  output: number
+  cacheRead: number
+  cacheCreation: number
+  /** Plain sum of the four. Reported for transparency, but do NOT budget with it: a cached prefix is
+   *  re-read on every turn, so this mostly measures (context size x turns), not cost. */
+  raw: number
+  /**
+   * The unit to budget in: base-input-token EQUIVALENTS, i.e. the four counts converted to one scale
+   * by their price ratios (cache read x0.1, cache write x1.25, output x5) and by the model's own
+   * price (Opus ~5x Sonnet, Haiku ~0.27x). This is proportional to what actually burns quota.
+   */
+  weighted: number
+  /** Assistant turns counted. */
+  turns: number
+  byModel: Record<string, { weighted: number; output: number; turns: number }>
+}
+
+/** How much to trust a token-derived number. */
+export type BudgetConfidence = 'good' | 'rough' | 'none'
+
+/**
+ * The answer to "how much can I actually spend?", in tokens rather than percent.
+ *
+ * `tokensPerPercent` is MEASURED, not given: tokens/hour (from transcripts) divided by percent/hour
+ * (from the usage history). Anthropic never tells us the real quota, so we infer its size from how
+ * fast our own measurable spend moves the needle.
+ */
+export interface UsageBudget {
+  forecast: UsageForecast
+  /** Spend in the lookback window used to derive the rate. */
+  spend: TokenSpend
+  lookbackHours: number
+  /** Weighted (cost-equivalent) tokens per hour over the lookback. */
+  weightedPerHour: number | null
+  /** Empirically-derived size of 1% of the weekly quota, in weighted tokens. */
+  weightedPerPercent: number | null
+  /** Estimated weighted tokens left before the weekly cap. */
+  remainingWeighted: number | null
+  /**
+   * THE PRACTICAL QUANTITY. Roughly how many more assistant turns fit in the remaining quota, at the
+   * average cost of your recent turns. An agent can reason about turns; it cannot easily predict its
+   * own raw token totals. Null when there's nothing to derive it from.
+   */
+  remainingTurns: number | null
+  /** Average weighted cost of one recent assistant turn (what remainingTurns divides by). */
+  weightedPerTurn: number | null
+  confidence: BudgetConfidence
+  /** Why the confidence is what it is, and what would make it wrong. Always populated. */
+  caveat: string
+}
+
 /** Response of a usage-check route: the snapshot + whether it came from cache + its cache key. */
 export interface UsageCheckResult {
   snapshot: UsageSnapshot

@@ -99,6 +99,7 @@ import {
   setCachedUsage,
   usageAdvice,
 } from './usage'
+import { budgetSummary, buildUsageBudget } from './usage-budget'
 import {
   getUsageSettings,
   lastAutoRefreshAt,
@@ -798,6 +799,40 @@ app.get('/api/usage/survey', async (c) => {
 
 // Force one background sweep now (the same pass the auto-refresh timer runs).
 app.post('/api/usage/refresh', async (c) => c.json({ ok: true, checked: await sweepUsage() }))
+
+// The BUDGET: the percentage turned into quantities an agent can actually plan with — a burn rate, a
+// deadline, and an estimated token headroom derived from real transcript spend. See usage-budget.ts.
+// `configDir` (repeatable) names which Claude config dirs' transcripts count toward this account's
+// spend; it defaults to the plain ~/.claude login.
+app.get('/api/usage/budget', async (c) => {
+  const dir = c.req.query('dir')
+  const account = c.req.query('account')
+  const configDirs = c.req.queries('configDir')
+
+  const result = dir
+    ? await checkUsageForDesktop(dir)
+    : account
+      ? await (async () => {
+          const resolved = resolveAccountParam(account)
+          if (!resolved) return null
+          const snapshot = await checkUsageForAccount(resolved.id)
+          return { snapshot, cached: false, key: `acct:${resolved.id}`, reason: 'ok' as const }
+        })()
+      : null
+  if (!result)
+    return c.json({ error: 'pass dir (a desktop instance) or account (id or label)' }, 400)
+
+  const budget = buildUsageBudget(result.snapshot, result.key, {
+    configDirs: configDirs?.length ? configDirs : undefined,
+  })
+  return c.json({
+    snapshot: result.snapshot,
+    reason: result.reason,
+    advice: usageAdvice(result.snapshot),
+    budget,
+    summary: budgetSummary(budget, result.snapshot.weekAll?.pct ?? null),
+  })
+})
 
 // Desktop instance usage. The credential chain (own safeStorage token → LINKED CLI instance's login
 // → dispatch account matching the email) lives in usage-service.ts so the routes, the MCP tools, and
