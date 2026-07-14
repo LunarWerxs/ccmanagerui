@@ -55,6 +55,7 @@ import {
   subscribeRun,
 } from './dispatch'
 import { findFreePort } from './find-free-port.mjs'
+import { skipSingleInstanceGuard } from './single-instance'
 import {
   clearInstanceInfo,
   findLiveInstance,
@@ -713,12 +714,10 @@ async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
 }
 
 // --- boot: single-instance guard, port hop, publish runtime pointer ---------
-// The auto-update successor (CCMANAGERUI_RELAUNCH=1) is exempt from this guard: its
-// predecessor is still alive and answering /api/health during the ~800ms handoff, so
-// probing here would see "already running" and make the successor exit, leaving ZERO
-// daemons. It instead falls through to the CCMANAGERUI_RELAUNCH port-wait below and
-// takes over the port.
-if (process.env.CCMANAGERUI_PORT_FIXED !== '1' && process.env.CCMANAGERUI_RELAUNCH !== '1') {
+// The dev launcher (CCMANAGERUI_PORT_FIXED) and the auto-update successor
+// (CCMANAGERUI_RELAUNCH) are exempt; see skipSingleInstanceGuard for why, and
+// single-instance.test.ts for the regression guard on the relaunch exemption.
+if (!skipSingleInstanceGuard()) {
   const live = await findLiveInstance()
   if (live) {
     console.log(
