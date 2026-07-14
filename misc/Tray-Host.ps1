@@ -7,166 +7,6 @@
 # port, start/build commands, icon, health check, etc.), dot-sources this file, then
 # calls Start-TrayHost for a normal run or Invoke-TrayHostSelfTest for a headless
 # self-check. All app-specific behavior comes from that config; the engine stays generic.
-#
-# Runs under Windows PowerShell 5.1 (powershell.exe, via the .vbs launchers) — so NO
-# PowerShell-7-only syntax anywhere (no ternary `? :`, no `??`, no `?.`, no `&&`/`||`).
-#
-# Responsiveness: "Rebuild & Restart" and "Restart" run their slow work (build, stop,
-# port wait / graceful shutdown, readiness poll) on a BACKGROUND runspace, and a
-# WinForms timer marshals the result back to the UI thread, so the tray never freezes
-# (no "Not Responding"). Daemon control is STATELESS — it locates the live instance via
-# the runtime pointer + /api/health and acts on the bound port (or, for token apps, asks
-# the daemon to shut itself down) — so the exact same helper functions run identically
-# on the UI thread AND inside the worker runspace, surviving repeated restarts, with
-# zero dependence on a shared Process handle.
-#
-# -------------------------------------------------------------------------------------
-# $TrayConfig CONTRACT — the hashtable the adapter builds and passes to Start-TrayHost /
-# Invoke-TrayHostSelfTest. Every key is documented here; the engine reads ONLY these keys.
-# Keys marked (adapter-computed) are values the adapter derives from its own $PSScriptRoot /
-# env overrides / preferred port before building the config.
-# -------------------------------------------------------------------------------------
-#   DisplayName            [string]  User-facing name for NotifyIcon.Text and every balloon /
-#                                    MessageBox title (e.g. 'CC Manager UI', or 'RēDesign' with
-#                                    its macron U+0113). May contain non-ASCII — do not assume
-#                                    ASCII app names.
-#   ServiceName            [string]  Expected /api/health body.service value (case-sensitive
-#                                    `-eq`), the anti-collision check that stops the tray
-#                                    mistaking another app's server on the same port for its
-#                                    own. $null for an app that only validates body.ok
-#                                    (DevWebUI's health payload carries no service field).
-#   IconFile               [string]  Icon filename inside misc/ (e.g. 'Reimagine.ico').
-#   Port                   [int]     Preferred port (the adapter passes its own -Port through).
-#                                    NOT a guarantee — if busy the daemon hops to the next free
-#                                    port and records where it landed in runtime.json.
-#   UrlHost                [string]  Host for the preferred-port fallback URL: '127.0.0.1'
-#                                    (ReDesign/RepoYeti) or 'localhost' (DevWebUI/CCManagerUI).
-#                                    Optional; defaults to '127.0.0.1'.
-#   InfoFile               [string]  (adapter-computed) Absolute path to runtime.json (from the
-#                                    app's <APP>_HOME env override, else ~/.<app>).
-#   DaemonLogPath          [string]  (adapter-computed) Log path surfaced in the watchdog crash
-#                                    balloons so the user knows where to look. $null if the app
-#                                    has no daemon log.
-#   StartCommand           [string]  The cmd.exe /c payload that launches the daemon, EXACTLY as
-#                                    the app's current script has it, e.g.
-#                                    'bun run src\index.ts serve' (ReDesign),
-#                                    'bun run src\index.ts start --port {PORT}' (RepoYeti — the
-#                                    {PORT} token is substituted with the effective port),
-#                                    'bun server/src/index.ts' (DevWebUI / CCManagerUI). Launched
-#                                    via cmd.exe /c specifically because bun on Windows is a
-#                                    bun.cmd/bun.ps1 shim with no bare bun.exe, and Win32
-#                                    CreateProcess (UseShellExecute=$false) skips PATHEXT
-#                                    resolution — so FileName="bun" throws silently. cmd.exe /c
-#                                    DOES resolve the shim, and taskkill /T later reaps the whole
-#                                    cmd->bun tree. The literal '{PORT}' (if present) is replaced
-#                                    with the effective port.
-#   StartEnv               [hashtable] Extra child env vars set on the ProcessStartInfo, e.g.
-#                                    @{ DEVWEBUI_PORT = '{PORT}' }. The engine ALWAYS also sets
-#                                    PORT from the effective port UNLESS PortEnvVar overrides the
-#                                    name. Any '{PORT}' / '{TOKEN}' token in a value is
-#                                    substituted (TOKEN only meaningful when ShutdownTokenEnvVar
-#                                    is set). Optional; defaults to empty.
-#   PortEnvVar             [string]  Name of the env var the daemon reads as its PREFERRED port.
-#                                    Defaults to 'PORT'. DevWebUI uses 'DEVWEBUI_PORT'. Set to
-#                                    $null to NOT export any port env var (RepoYeti pins the port
-#                                    via its --port flag in StartCommand instead).
-#   EntryFile              [string]  (adapter-computed, RELATIVE to app root) Daemon entry path
-#                                    the SelfTest checks for existence, e.g. 'src\index.ts' or
-#                                    'server\src\index.ts'.
-#   FirstRun               [scriptblock] Optional scriptblock(appRoot) with the app's
-#                                    install/build-if-missing bootstrap (deps install + web
-#                                    build), run BLOCKING once at cold start after the tray icon
-#                                    is already visible. $null to skip. Receives the app root as
-#                                    its single argument; may call Get-Command bun etc. freely.
-#   RebuildCommand         [string OR scriptblock] The build command "Rebuild & Restart" runs.
-#                                    A plain string (DevWebUI/CCManagerUI 'bun run build',
-#                                    RepoYeti 'bun run --cwd web build:fast'), OR a
-#                                    scriptblock(appRoot, scriptDir) RESOLVER returning a string
-#                                    or $null (ReDesign resolves misc\Rebuild.bat first, then an
-#                                    'npm run build' fallback). Resolved fresh each rebuild AND
-#                                    re-resolved inside the worker. $null for no rebuild support.
-#   RebuildLogName         [string]  Rebuild-log filename written into misc/ (e.g.
-#                                    'DevWebUI-Rebuild.log'). Surfaced in the build-failed
-#                                    balloon.
-#   IsDevTree              [bool]    (adapter-computed) Whether the "Rebuild & Restart" item is
-#                                    offered. The engine gates the menu item at menu-ADD time AND
-#                                    re-checks inside Start-Job-Async AND inside the worker (the
-#                                    original dual/triple gate — preserved). Apps with no
-#                                    dev/distribution split pass $true (always show).
-#   SentinelFile           [string]  (adapter-computed) shutdown.request path, or $null. When
-#                                    set, the engine CLEARS it at startup (so a stale one from a
-#                                    hard-killed prior run can't trigger an instant quit) and
-#                                    POLLS it on the 500ms watch timer to trigger Quit (a web-UI
-#                                    "Shut Down" / `<app> stop` drops the file; without this the
-#                                    watchdog would just resurrect the daemon the user stopped).
-#                                    CCManagerUI has none.
-#   ShutdownTokenEnvVar    [string]  Env var carrying the per-session shutdown-token GUID to the
-#                                    daemon (DevWebUI 'DEVWEBUI_TRAY_SHUTDOWN_TOKEN', CCManagerUI
-#                                    'CCMANAGERUI_SHUTDOWN_TOKEN'), or $null for the force-kill
-#                                    apps (ReDesign/RepoYeti). When set, the engine mints a GUID
-#                                    at startup, passes it via this env var at spawn, and can POST
-#                                    /api/shutdown with the token headers below for a graceful
-#                                    stop (force-killing the port only as a fallback).
-#   ShutdownHeaderPrefix   [string]  Header-name prefix for the token shutdown POST, e.g.
-#                                    'x-devwebui' → 'x-devwebui-shutdown-token' /
-#                                    'x-devwebui-shutdown-source'. $null when ShutdownTokenEnvVar
-#                                    is $null.
-#   OnStrayDaemon          [string]  'attach' or 'warn' — behavior when THIS host wins the mutex
-#                                    but a daemon is ALREADY answering. 'attach' (RepoYeti /
-#                                    DevWebUI / CCManagerUI): adopt the live URL and keep hosting
-#                                    the tray, do NOT launch a second daemon, and do NOT force
-#                                    it down at Quit (startedByUs stays false). 'warn' (ReDesign):
-#                                    a listening port without OUR tray means a headless orphan —
-#                                    MessageBox telling the user to stop that process, release the
-#                                    mutex, and exit without hosting.
-#   SelfTestMarker         [string]  The self-test output marker, e.g. 'CCMANAGERUI_TRAY_SELFTEST'
-#                                    — the engine prints '<marker>_OK' / '<marker>_FAIL: ...'
-#                                    EXACTLY as each app does today, with the same exit codes.
-#   MenuOpenLabel          [string]  Exact current 'Open <App>' menu label (e.g. 'Open RepoYeti',
-#                                    'Open CC Manager UI').
-#   MutexName              [string]  (adapter-computed for ReDesign) Exact mutex string. Fixed
-#                                    global names for three apps ('RepoYetiTrayHost',
-#                                    'DevWebUITrayHost', 'CCManagerUITrayHost'); ReDesign's
-#                                    adapter computes its hashed per-checkout
-#                                    'Local\redesign.tray.<sha16>' itself so a second checkout on
-#                                    the same machine gets its own tray host.
-#   RuntimeCheckCommand    [string]  Command name the SelfTest requires on PATH (Get-Command),
-#                                    e.g. 'bun'. Defaults to 'bun'.
-#   CrashLoopMax           [int]     Optional override; engine default 4.
-#   CrashLoopWindowSec     [int]     Optional override; engine default 120.
-#   RestartRetries         [int]     Optional. Extra restart attempts inside the worker after the
-#                                    first Start fails to bind (ReDesign does ONE retry: pass 1;
-#                                    the others do none: default 0). Preserves each app's current
-#                                    restart policy instead of picking one for everyone.
-#   UsePortFreeWait        [bool]    Optional. When $true (ReDesign) the worker waits for the
-#                                    listen socket to actually release after a force-kill before
-#                                    relaunching (Windows can hold it briefly). Default $false —
-#                                    the token/graceful apps and RepoYeti rely on their Stop
-#                                    helper's own settle poll instead. Only meaningful for the
-#                                    force-kill (non-token) apps.
-#   StartupWaitSec         [int]     Optional. Seconds the cold-start path waits for the daemon to
-#                                    bind before opening the browser. Default 15.
-#   WorkerWaitSec          [int]     Optional. Seconds the worker's readiness poll waits.
-#                                    Default 12.
-#   WatchdogRequiresOwnership [bool] Optional; attach apps only. When $true (default), the
-#                                    auto-restart watchdog only revives a daemon THIS tray
-#                                    started (startedByUs) — an attached instance owned by
-#                                    another session is left alone. CCManagerUI sets $false:
-#                                    its OLD watchdog revived unconditionally.
-#   NoScanRootHint         [string]  Optional. RepoYeti-only: extra MessageBox body shown when the
-#                                    cold-start daemon starts but never serves (its most-likely
-#                                    cause is no scan root configured), with the exact remediation
-#                                    command. $null for apps without this domain-specific hint.
-# -------------------------------------------------------------------------------------
-#
-# Exports:
-#   Start-TrayHost($Config)            — runs the full host lifecycle (mutex, icon, daemon,
-#                                        worker, watchdog, watch-timer, message loop).
-#   Invoke-TrayHostSelfTest($Config)   — implements -SelfTest: RuntimeCheckCommand on PATH,
-#                                        EntryFile existence, icon load + small-frame byte parse +
-#                                        a real NotifyIcon construct/dispose, then the exact
-#                                        marker output + exit codes. Fully headless (no browser,
-#                                        no mutex, no message loop) — safe for CI.
 # =====================================================================================
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -280,11 +120,11 @@ function Start-TrayHost($Config) {
   # Attach apps only (OnStrayDaemon='attach'): does the auto-restart watchdog require THIS tray to
   # own the daemon (startedByUs) before it will revive a crashed one? Default $true preserves the
   # DevWebUI-derived behavior (an attached instance owned by another session is left alone — no
-  # revive, no balloon). CCManagerUI's OLD watchdog had no such gate — it unconditionally relaunched
+  # revive, no balloon). a sibling app's OLD watchdog had no such gate — it unconditionally relaunched
   # on any health-check failure — so its adapter sets this $false to keep that parity.
   $watchdogRequiresOwnership = Get-TrayConfigValue $Config 'WatchdogRequiresOwnership' $true
 
-  # Shutdown protocol flavor: token+HTTP (DevWebUI/CCManagerUI) vs force-kill (ReDesign/RepoYeti).
+  # Shutdown protocol flavor: token+HTTP (DevWebUI/a sibling app) vs force-kill (ReDesign/RepoYeti).
   $tokenEnvVar   = $Config.ShutdownTokenEnvVar       # $null ⇒ no graceful token shutdown
   $headerPrefix  = $Config.ShutdownHeaderPrefix
   $useToken      = [bool]$tokenEnvVar
@@ -624,7 +464,7 @@ function Start-TrayHost($Config) {
       Release-TrayMutex
       return
     }
-    # 'attach' (RepoYeti/DevWebUI/CCManagerUI): adopt the live URL, host a tray for it, and don't
+    # 'attach' (RepoYeti/DevWebUI/a sibling app): adopt the live URL, host a tray for it, and don't
     # spin up a second daemon. startedByUs stays $false so Quit/watchdog leave it alone.
     $script:url = $existing
   }
@@ -913,7 +753,7 @@ function Start-TrayHost($Config) {
     if ($script:ps) { try { $script:ps.Stop(); $script:ps.Dispose() } catch {} }
     # Stop the live daemon. Force-kill apps (ReDesign/RepoYeti) ALWAYS sweep the port at Quit —
     # matching their originals' unconditional Stop-Server/Stop-RepoYeti call (they own the daemon
-    # on the winner path). Token apps (DevWebUI/CCManagerUI) only stop a daemon THEY started, so an
+    # on the winner path). Token apps (DevWebUI/a sibling app) only stop a daemon THEY started, so an
     # attached instance owned by another session is left running. The graceful POST above already
     # ran for token apps (bounded to 3s so Quit can't hang) — pass skipGraceful so this
     # belt-and-braces call goes straight to the port-kill instead of re-running a second,
@@ -964,7 +804,7 @@ function Start-TrayHost($Config) {
     if ($tray.Visible -eq $wantHidden) { $tray.Visible = -not $wantHidden }
 
     # Attach apps: only supervise a daemon we started — UNLESS the app opts out via
-    # WatchdogRequiresOwnership=$false (CCManagerUI: OLD revived regardless of ownership).
+    # WatchdogRequiresOwnership=$false (a sibling app: OLD revived regardless of ownership).
     if ($useToken -and -not $script:startedByUs -and $watchdogRequiresOwnership) { return }
 
     $u = Get-LiveUrl

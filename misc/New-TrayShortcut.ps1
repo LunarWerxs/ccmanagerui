@@ -2,8 +2,6 @@
 # Create a Start-menu / desktop shortcut that launches the app's tray host hidden
 # (via Tray-Launch.vbs), using the app's icon and description. Idempotent: re-running
 # just refreshes the shortcut in place.
-#
-# Runs under Windows PowerShell 5.1 (powershell.exe) — no PS7-only syntax.
 # =====================================================================================
 
 function New-TrayShortcut {

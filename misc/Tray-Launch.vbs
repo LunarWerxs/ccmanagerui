@@ -2,16 +2,6 @@
 ' Boot the app's tray host with no visible window. Auto-discovers the sibling
 ' "*-Tray.ps1" adapter in this folder and launches it hidden via PowerShell; the
 ' adapter's own param() default supplies the port, so no arguments are passed here.
-'
-' AUTO-DISCOVER, zero per-app content by design: no hard-coded adapter name or PORT
-' const lives in this file. It scans misc/ for the one file whose lowercased name ends
-' in "-tray.ps1" (matches "<App>-Tray.ps1"). That rule excludes the engine
-' "Tray-Host.ps1" (ends "-host.ps1") and the shortcut scripts "Create-Shortcut.ps1" /
-' "New-TrayShortcut.ps1" (end "-shortcut.ps1"), so exactly the adapter is selected. If
-' zero or more than one "-tray.ps1" file is present, we abort with a clear message
-' rather than launch the wrong thing.
-'
-' Runs under classic Windows Script Host (wscript/cscript) — NO .NET, no PowerShell syntax.
 ' =====================================================================================
 
 Dim sh, fso, scriptDir, root, adapter
@@ -41,7 +31,7 @@ Next
 
 If matchCount = 0 Then
   MsgBox "Tray launcher: no '*-Tray.ps1' adapter found in " & scriptDir & vbCrLf & _
-         "Re-run node sync.mjs from lunarwerx-ui, or restore the app's <App>-Tray.ps1.", _
+         "Restore the app's *-Tray.ps1 adapter script.", _
          vbCritical, "LunarWerx tray launcher"
   WScript.Quit 1
 End If

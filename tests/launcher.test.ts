@@ -142,7 +142,10 @@ describe.skipIf(!win)('tray launcher', () => {
     // same invariant as the tray engine check above, extended to the two shared
     // launch-chain files.
     const vbs = readFileSync(VBS, 'utf8')
-    expect(vbs).toContain('AUTO-DISCOVER')
+    // Robust marker (mirrors DevWebUI's launcher test): the shared launcher auto-discovers the
+    // sibling adapter via WScript.Shell. Matched case-insensitively because the kit's public-comment
+    // cleanup reworded the old exact-case "AUTO-DISCOVER" header to "Auto-discover".
+    expect(vbs).toMatch(/WScript\.Shell|discover/i)
 
     const shortcutEngine = readFileSync(SHORTCUT_ENGINE, 'utf8')
     expect(shortcutEngine).toContain('function New-TrayShortcut')
