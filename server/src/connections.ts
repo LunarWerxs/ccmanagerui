@@ -31,6 +31,7 @@
 import type { ConnectClient, ConnectStore, TokenSet } from '@cnct/connect'
 import type { LockerClient } from '@cnct/locker'
 import { getSetting, setSetting } from './db'
+import { unseal, wrapTokenStore } from './dpapi-seal.mjs'
 import type { SyncStatus } from './types'
 
 /** CC Manager UI's own public "Sign in with Connections" OAuth client (PKCE — no secret).
@@ -117,7 +118,9 @@ async function connect(): Promise<ConnectClient> {
     issuer: OAUTH.issuer,
     scopes: OAUTH.scopes,
     redirectUri: 'http://127.0.0.1/oauth/callback',
-    store: stateStore,
+    // Wrap the store so the persisted TokenSet (the durable refresh token) is DPAPI-sealed at
+    // rest on Windows; the transient PKCE record and non-Windows hosts pass through unchanged.
+    store: wrapTokenStore(stateStore, TOKEN_KEY),
     // Late-bound so a test harness's globalThis.fetch stub is honored even though the
     // client is memoized across calls (the SDK captures `fetch` at construction). Cast:
     // the SDK only CALLS it; Bun's `typeof fetch` also declares a `preconnect` member.
@@ -145,8 +148,10 @@ export function initConnections(): void {
 export function hasConnection(): boolean {
   const raw = state.sdk?.[TOKEN_KEY]
   if (!raw) return false
+  const plain = unseal(raw) // DPAPI-sealed at rest → decrypt; legacy plaintext passes through
+  if (!plain) return false
   try {
-    const tokens = JSON.parse(raw) as TokenSet
+    const tokens = JSON.parse(plain) as TokenSet
     return Boolean(tokens.refreshToken || tokens.accessToken)
   } catch {
     return false
