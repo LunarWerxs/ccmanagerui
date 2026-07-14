@@ -2,6 +2,11 @@
 //
 // buildUsageBudget() reads history off disk, so only the pure budgetSummary() is exercised here;
 // UsageBudget objects are constructed by hand instead of going through the disk-backed builder.
+//
+// budgetSummary keys off `burnPctPerHourUpper` (never `burnPctPerHour`) to decide whether there is a
+// burn signal to report at all, and every "will I hit the cap" phrase is worded against the pessimistic
+// upper bound — see server/src/usage-history.ts for why a point estimate of 0 must never read as
+// "definitely safe".
 
 import { describe, expect, test } from 'bun:test'
 import type { TokenSpend, UsageBudget, UsageForecast } from '../src/types'
@@ -20,6 +25,7 @@ const EMPTY_SPEND: TokenSpend = {
 
 const NULL_FORECAST: UsageForecast = {
   burnPctPerHour: null,
+  burnPctPerHourUpper: null,
   remainingPct: null,
   headroomHours: null,
   exhaustsAt: null,
@@ -48,6 +54,7 @@ describe('budgetSummary', () => {
       forecast: {
         ...NULL_FORECAST,
         burnPctPerHour: 2,
+        burnPctPerHourUpper: 2.5,
         remainingPct: 50,
         headroomHours: 25,
         exhaustsAt: '2026-07-15T03:00:00.000Z',
@@ -58,17 +65,18 @@ describe('budgetSummary', () => {
     })
     const summary = budgetSummary(budget, 50)
     expect(summary).toContain('Weekly (all models): 50% used.')
-    expect(summary).toContain('Burning 2.00%/hour.')
-    expect(summary).toContain('will NOT hit the cap')
-    expect(summary).toContain('Work freely')
-    expect(summary).toContain('in 5.0h')
+    expect(summary).toContain('Burning ~2.00%/hour (at most 2.50%/hour).')
+    expect(summary).toContain(
+      'Even at the worst rate consistent with the readings you will NOT hit the cap before it resets in 5.0h. Work freely.',
+    )
   })
 
-  test('says it WILL hit the cap and gives the headroom hours when exhaustsBeforeReset is true', () => {
+  test('says it WILL hit the cap (worst case) and gives the headroom hours when exhaustsBeforeReset is true', () => {
     const budget = mkBudget({
       forecast: {
         ...NULL_FORECAST,
         burnPctPerHour: 5,
+        burnPctPerHourUpper: 6,
         remainingPct: 15,
         headroomHours: 3,
         exhaustsAt: '2026-07-14T05:00:00.000Z',
@@ -79,10 +87,10 @@ describe('budgetSummary', () => {
     })
     const summary = budgetSummary(budget, 85)
     expect(summary).toContain('Weekly (all models): 85% used.')
-    expect(summary).toContain('Burning 5.00%/hour.')
-    expect(summary).toContain('You WILL hit the cap in ~3.0h')
-    expect(summary).toContain('before it resets in 10.0h')
-    expect(summary).toContain('Plan around it.')
+    expect(summary).toContain('Burning ~5.00%/hour (at most 6.00%/hour).')
+    expect(summary).toContain(
+      'Worst case you hit the cap in ~3.0h, before it resets in 10.0h. Plan around it.',
+    )
     expect(summary).not.toContain('Work freely')
   })
 
@@ -105,18 +113,47 @@ describe('budgetSummary', () => {
     expect(summary).not.toContain('more assistant turns')
   })
 
-  test('the idle (burn === 0) case reads "not burning", not "work freely"', () => {
+  test('point-burn of 0 reads "below what these readings can resolve", not "not burning"', () => {
     const budget = mkBudget({
       forecast: {
         ...NULL_FORECAST,
         burnPctPerHour: 0,
+        burnPctPerHourUpper: 0.5,
         remainingPct: 70,
+        headroomHours: 140,
+        hoursToReset: 5, // imminent reset -> genuinely safe despite the slow/unresolved burn
         exhaustsBeforeReset: false,
         samples: 3,
       },
     })
     const summary = budgetSummary(budget, 30)
-    expect(summary).toContain('Not burning quota right now; the cap is not approaching.')
+    expect(summary).toContain('Burn is below what these readings can resolve (under 0.50%/hour).')
+    expect(summary).not.toContain('Not burning quota right now')
+  })
+
+  // REGRESSION: this is the wording-level guard for the false-"work freely" bug. A point estimate of
+  // 0 must NOT be rendered as a blanket "safe" message — when the upper-bound math says the cap is
+  // reachable before the reset, the summary must say so, even though burnPctPerHour reads 0.
+  test('REGRESSION: point-burn 0 near the cap still renders "Plan around it", never "Work freely"', () => {
+    const budget = mkBudget({
+      forecast: {
+        ...NULL_FORECAST,
+        burnPctPerHour: 0,
+        burnPctPerHourUpper: 0.5,
+        remainingPct: 2,
+        headroomHours: 4,
+        exhaustsAt: '2026-07-14T06:00:00.000Z',
+        hoursToReset: 100,
+        exhaustsBeforeReset: true,
+        samples: 8,
+      },
+    })
+    const summary = budgetSummary(budget, 98)
+    expect(summary).toContain('Weekly (all models): 98% used.')
+    expect(summary).toContain('Burn is below what these readings can resolve (under 0.50%/hour).')
+    expect(summary).toContain(
+      'Worst case you hit the cap in ~4.0h, before it resets in 100.0h. Plan around it.',
+    )
     expect(summary).not.toContain('Work freely')
   })
 

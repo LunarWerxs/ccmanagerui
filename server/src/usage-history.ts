@@ -27,8 +27,19 @@ const HISTORY_PATH = join(DATA_DIR, 'usage-history.json')
  *  few hundred KB of JSON. */
 const MAX_SAMPLES_PER_KEY = 500
 
-/** Ignore a burn rate measured over less than this: two samples minutes apart produce wild slopes. */
-const MIN_SPAN_MIN = 20
+/**
+ * Ignore a burn rate measured over less than this.
+ *
+ * THE PERCENTAGE IS AN INTEGER, and that is the whole reason this floor is as high as it is. If you
+ * burn 0.8%/hour, the reported number does not move for over an hour. Measured across a 20-minute
+ * span you would see delta = 0 and conclude "not burning" — which at 98% used is a FALSE GREEN LIGHT,
+ * the single most expensive way this feature could be wrong.
+ *
+ * A span of h hours can only resolve rates down to (1 / h) %/hour. At 45 minutes that is ~1.3%/hour
+ * of uncertainty, which is the coarsest that is still worth reporting. Below it we say "unknown"
+ * rather than "zero". See burnRateBounds for how the residual uncertainty is then handled.
+ */
+const MIN_SPAN_MIN = 45
 
 /** How far back to look when measuring the current burn. Long enough to smooth out a single heavy
  *  agent, short enough to still reflect what you are doing NOW rather than yesterday. */
@@ -95,11 +106,11 @@ export function usageSamples(key: string): UsageSample[] {
  * Returns null only when there genuinely isn't enough signal: fewer than 2 samples, or a span shorter
  * than MIN_SPAN_MIN.
  */
-export function burnRatePctPerHour(
+export function burnRateBounds(
   samples: UsageSample[],
   now = new Date(),
   lookbackHours = DEFAULT_LOOKBACK_HOURS,
-): number | null {
+): { point: number; upper: number; spanHours: number } | null {
   if (samples.length < 2) return null
   const cutoff = now.getTime() - lookbackHours * 3600_000
 
@@ -123,14 +134,35 @@ export function burnRatePctPerHour(
   const hours = (Date.parse(last.at) - Date.parse(first.at)) / 3600_000
   if (!Number.isFinite(hours) || hours * 60 < MIN_SPAN_MIN) return null
 
-  const rate = (last.weekAllPct - first.weekAllPct) / hours
-  // Belt-and-braces. This clamp is currently UNREACHABLE and that is deliberate: the walk above
-  // breaks on ANY decrease, so `window` is monotonically non-decreasing and `rate` cannot be
-  // negative. It stays as a guard on the invariant, not as live logic — if someone later loosens the
-  // reset detection (e.g. to tolerate a 1-point rounding wobble instead of treating it as a reset),
-  // a negative rate becomes reachable, and a negative burn would read as "gaining quota" and hand out
-  // infinite headroom. Cheaper to keep the floor than to re-derive why it mattered.
-  return rate < 0 ? 0 : rate
+  const delta = last.weekAllPct - first.weekAllPct
+
+  // The point estimate. Floored at 0: the walk above breaks on any decrease, so this cannot go
+  // negative today, but a negative burn would read as "gaining quota" and hand out infinite headroom,
+  // so the floor stays as a guard on that invariant.
+  const point = Math.max(0, delta / hours)
+
+  // THE UPPER BOUND, and the reason this function returns a range at all.
+  //
+  // `weekAllPct` is an INTEGER. A reading of 98 means the truth is somewhere in [98, 99). So a
+  // measured delta of d could really be as much as d + 1 (you crossed almost a whole extra point
+  // without the display ticking). In particular d = 0 does NOT mean "not burning" — it means
+  // "burning slower than this span can resolve", which over 45 minutes is anything under ~1.3%/hour.
+  //
+  // Treating that as zero is how you tell someone at 98% to "work freely" minutes before they are
+  // cut off. So every decision downstream is made against `upper`, never `point`.
+  const upper = (delta + 1) / hours
+
+  return { point, upper, spanHours: hours }
+}
+
+/** The point-estimate burn rate in %/hour, or null when unmeasurable. Prefer burnRateBounds when
+ *  making a DECISION — a point estimate of 0 is not the same as "not burning" (see above). */
+export function burnRatePctPerHour(
+  samples: UsageSample[],
+  now = new Date(),
+  lookbackHours = DEFAULT_LOOKBACK_HOURS,
+): number | null {
+  return burnRateBounds(samples, now, lookbackHours)?.point ?? null
 }
 
 /**
@@ -139,6 +171,13 @@ export function burnRatePctPerHour(
  * The field that matters is `exhaustsBeforeReset`. Everything else is supporting detail:
  *   false -> the cap will not bite; work normally regardless of how scary the % looks.
  *   true  -> you have `headroomHours` before you are cut off. Plan around it.
+ *
+ * ASYMMETRY IS DELIBERATE. Every derived figure is computed from the burn rate's UPPER bound, not
+ * its point estimate, so `headroomHours` is the WORST case and `exhaustsBeforeReset` errs toward
+ * true. The two ways to be wrong are not equal: a needless warning costs a moment's caution, while a
+ * false "work freely" gets an agent killed mid-task holding unsaved context, which is the exact
+ * disaster this whole subsystem exists to prevent. When the integer percentage cannot resolve the
+ * truth, we take the pessimistic end of the range.
  */
 export function forecastUsage(
   snap: UsageSnapshot,
@@ -147,13 +186,25 @@ export function forecastUsage(
 ): UsageForecast {
   const pct = snap.weekAll?.pct ?? null
   const resetsAt = snap.weekAll?.resetsAt ?? null
-  const burn = burnRatePctPerHour(samples, now)
-  const hoursToReset = resetsAt
-    ? Math.max(0, (Date.parse(resetsAt) - now.getTime()) / 3600_000)
-    : null
+  const bounds = burnRateBounds(samples, now)
+
+  // A reset time in the PAST means the snapshot is stale (the window has rolled over but this reading
+  // predates it). Report it as UNKNOWN, not as "0 hours to reset".
+  //
+  // This matters more than it looks. `exhaustsBeforeReset` is `headroomHours < hoursToReset`, so
+  // clamping a past reset to 0 would make that comparison false for ANY positive headroom — handing
+  // back "you will not hit the cap, work freely" off a stale reading at 98% used. That is the same
+  // false green light the upper-bound machinery above exists to prevent, arriving through a side door.
+  // Null propagates to a null verdict, which callers must treat as "I don't know", never as "fine".
+  const rawHoursToReset = resetsAt ? (Date.parse(resetsAt) - now.getTime()) / 3600_000 : null
+  const hoursToReset =
+    rawHoursToReset !== null && Number.isFinite(rawHoursToReset) && rawHoursToReset > 0
+      ? rawHoursToReset
+      : null
 
   const base: UsageForecast = {
-    burnPctPerHour: burn,
+    burnPctPerHour: bounds?.point ?? null,
+    burnPctPerHourUpper: bounds?.upper ?? null,
     remainingPct: pct === null ? null : Math.max(0, 100 - pct),
     headroomHours: null,
     exhaustsAt: null,
@@ -161,16 +212,13 @@ export function forecastUsage(
     exhaustsBeforeReset: null,
     samples: samples.length,
   }
-  if (pct === null || burn === null) return base
+  if (pct === null || bounds === null) return base
 
   const remaining = Math.max(0, 100 - pct)
-  if (burn <= 0) {
-    // Not burning: you will never hit the cap at this rate. Infinite headroom is honestly reported
-    // as "no exhaustion" rather than a made-up number.
-    return { ...base, headroomHours: null, exhaustsAt: null, exhaustsBeforeReset: false }
-  }
-
-  const headroomHours = remaining / burn
+  // `upper` is always > 0 (it is (delta + 1) / hours with hours > 0), so headroom is always finite.
+  // There is deliberately no "burn is zero, you will never run out" branch any more: a measured zero
+  // only means "slower than this span can resolve", and at 98% used that distinction is everything.
+  const headroomHours = remaining / bounds.upper
   const exhaustsAt = new Date(now.getTime() + headroomHours * 3600_000).toISOString()
   return {
     ...base,

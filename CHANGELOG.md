@@ -8,6 +8,24 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
+- **A quota percentage is now quantified into something you can plan with.** "98% used" is not a
+  decision: 98% with a reset in 20 minutes is fine, while 98% with a reset in four days at 1%/hour
+  means being cut off mid-task in about two hours. Same number, opposite action. Anthropic publishes
+  no quota size (`limit_dollars` / `used_dollars` / `remaining_dollars` are all null on a
+  subscription, and there are no token counts anywhere in the response), so the numbers are derived
+  instead. `server/src/usage-history.ts` keeps the readings the background sweep already takes and
+  differentiates them into a burn rate, an hours-of-headroom figure, and `exhaustsBeforeReset`, the
+  one field that actually decides anything. `server/src/usage-tokens.ts` counts what was really spent
+  from the Claude Code transcripts (which do carry exact per-turn token counts and the model), and
+  `server/src/usage-budget.ts` divides one by the other to MEASURE the size of one percent in tokens,
+  reported as "~N more assistant turns" because an agent can reason about turns but cannot predict its
+  own raw token totals. New `usage_budget` MCP tool and `GET /api/usage/budget`.
+- **The usage MCP tools now work with the app closed.** `check_my_usage`, `list_usage` and
+  `usage_budget` need nothing the daemon uniquely owns (the OAuth tokens are files on disk, the quota
+  endpoint is a plain HTTPS GET, the transcripts are local JSONL), so when the daemon is not running
+  they execute in-process instead of failing. The queue and dispatch tools deliberately do not get
+  this: they mutate shared sqlite state and supervise real processes, where a second uncoordinated
+  executor would be a correctness bug, so they still fail loudly and say why.
 - **Usage checks now hit the quota endpoint directly instead of spawning `claude`.** The CLI's own
   `/usage` screen is just a GET against `https://api.anthropic.com/api/oauth/usage`, Bearer-authenticated
   with an OAuth access token; calling it ourselves (`server/src/usage-api.ts`) skips booting the
@@ -105,6 +123,28 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Fixed
 
+- **A burn rate of "zero" no longer means "work freely".** The reported percentage is an INTEGER, so a
+  burn of 0.8%/hour does not tick the number for over an hour. The first cut of the forecast measured
+  that flat stretch, concluded the burn was zero, and reported "you will never hit the cap" while
+  sitting at 98% used. That is a false green light, the single most expensive way the feature can be
+  wrong, since an agent keeps working and is cut off mid-task holding unsaved context. The burn rate is
+  now a RANGE: a measured delta of `d` could truly be as much as `d + 1` given integer rounding, so the
+  upper bound is `(d + 1) / hours`, which is always above zero. Every derived figure (`headroomHours`,
+  `exhaustsAt`, `exhaustsBeforeReset`, and the token budget's denominator) is computed from that upper
+  bound, making the forecast deliberately pessimistic. The asymmetry is the point: a needless warning
+  costs a moment of caution, a false green light costs the whole task. The measurement floor also rose
+  from a 20-minute to a 45-minute span, below which an integer percentage simply cannot resolve a slow
+  burn and the answer is honestly reported as unknown rather than as zero.
+- **Rebuild.bat could leave a STALE daemon serving old code while reporting success.** It found the
+  daemon solely by the port recorded in `~/.<app>/runtime.json`; with that pointer missing it printed
+  "App does not appear to be running", killed nothing, and relaunched the shortcut, which no-ops
+  against the tray's single-instance mutex. Nothing then checked the outcome, so the build was fresh on
+  disk while the process serving it was hours old (found in the wild at 10h39m). The pointer is now
+  only a hint: `misc/Restart-Daemon.ps1` probes every bun/node listener's `/api/health` and stops only
+  processes that identify themselves as this app (`service` === package.json `name`, the same contract
+  the single-instance guard uses), which both finds an orphan the pointer forgot and cannot kill a
+  sibling app. `misc/Wait-Daemon.ps1` then asserts the daemon now answering actually started AFTER the
+  restart, because "the daemon is up" proves nothing when the stale one was up the whole time.
 - **Mutating API routes no longer 500 on an odd request body.** A body that is valid JSON but not an
   object (a bare `null`, a number, or a string) used to crash the handler with a 500; every mutating
   route now runs the body through a shared object guard and degrades gracefully. Creating a new

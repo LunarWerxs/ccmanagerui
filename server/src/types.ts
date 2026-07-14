@@ -254,12 +254,17 @@ export interface UsageSample {
 
 /** The percentage, differentiated. See server/src/usage-history.ts. */
 export interface UsageForecast {
-  /** How fast the weekly cap is being consumed, in percent per hour. 0 = idle. Null = unmeasurable. */
+  /** Point-estimate burn, in percent per hour. Null = unmeasurable. NOTE: a value of 0 does NOT mean
+   *  "idle" — the source percentage is an integer, so 0 means "slower than this span can resolve".
+   *  Do not make decisions on this; use burnPctPerHourUpper. */
   burnPctPerHour: number | null
+  /** The quantization-safe UPPER bound on the burn. Every derived figure below is computed from THIS,
+   *  so the forecast errs pessimistic: a needless warning is cheap, a false "work freely" is not. */
+  burnPctPerHourUpper: number | null
   remainingPct: number | null
-  /** Hours until the cap is hit at the current burn. Null when idle (never) or unmeasurable. */
+  /** Hours until the cap is hit, in the WORST case consistent with the readings. Null = unmeasurable. */
   headroomHours: number | null
-  /** ISO instant the cap is projected to be hit. Null when idle or unmeasurable. */
+  /** ISO instant the cap is projected to be hit (worst case). Null = unmeasurable. */
   exhaustsAt: string | null
   hoursToReset: number | null
   /**

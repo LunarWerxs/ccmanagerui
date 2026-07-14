@@ -20,7 +20,63 @@ is a direct read of the same endpoint the CLI's own `/usage` screen uses, no
   one shot, each with its own `advice` verdict. Use it to answer "which of
   my accounts has headroom?" before routing heavy work, or to find the one
   about to hit its weekly cap.
-- All three are reads. None of them consume quota.
+- Call `usage_budget { dir }` when you need a **quantity** rather than a
+  percentage: how fast the cap is being eaten, how long you have, and roughly
+  how many more assistant turns fit. See "quantifying it" below.
+- All of these are reads. None of them consume quota. They also work with the
+  CC Manager UI app **closed**: the tokens are files on disk, the quota endpoint
+  is one HTTPS GET, and the transcripts are local, so the MCP server answers
+  in-process when the daemon is not running. (The queue and dispatch tools do
+  need the daemon, and will say so.)
+
+## Quantifying it: a percentage alone cannot be acted on
+
+`98% used` is not a decision. **98% with a reset in 20 minutes is fine. 98% with
+a reset in four days, while burning 1%/hour, means you are cut off mid-task in
+about two hours.** Same number, opposite action. Only the rate separates them.
+
+Anthropic publishes no quota size (the endpoint's `limit_dollars`, `used_dollars`
+and `remaining_dollars` are all null on a subscription, and there are no token
+counts), so `usage_budget` derives what it can:
+
+```
+forecast: {
+  burnPctPerHour:      number | null,  // point estimate. SEE THE WARNING BELOW.
+  burnPctPerHourUpper: number | null,  // the honest upper bound. Decisions use THIS.
+  headroomHours:       number | null,  // worst case, from the upper bound
+  hoursToReset:        number | null,
+  exhaustsBeforeReset: boolean | null, // <-- THE FIELD THAT DECIDES
+}
+budget: {
+  remainingTurns:  number | null,  // ~how many more assistant turns fit
+  confidence:      'good' | 'rough' | 'none',
+  caveat:          string,         // ALWAYS read this
+}
+```
+
+**`exhaustsBeforeReset` is the field to branch on.** False means the cap will not
+bite before it resets, so work freely no matter how alarming the percentage looks.
+True means you have `headroomHours` before you are cut off.
+
+### Do NOT read `burnPctPerHour === 0` as "not burning"
+
+The reported percentage is an **integer**. If you burn 0.8%/hour it will not tick
+for over an hour, so a short window measures a delta of zero. Zero here means
+"slower than these readings can resolve", *never* "idle". Treating it as idle is
+how you tell someone at 98% to work freely minutes before they are cut off.
+
+Every derived figure is therefore computed from `burnPctPerHourUpper`, the
+quantization-safe upper bound, so `headroomHours` is the worst case and
+`exhaustsBeforeReset` errs toward true. That asymmetry is deliberate: a needless
+warning costs a moment of caution, a false green light costs the whole task.
+
+### `remainingTurns` is an UPPER bound, so treat it as one
+
+It is derived by measuring `(tokens you spent) / (percent you burned)`, counting
+Claude Code transcripts **on this machine only**. If the same account is also used
+from the Claude Desktop app, the web UI, or another machine, that usage burns the
+same quota but is invisible here, and the estimate comes out **optimistically
+high**. `confidence` and `caveat` say so. Believe the caveat.
 
 ## The `advice` verdict: when `shouldOffload` is true, save your work NOW
 

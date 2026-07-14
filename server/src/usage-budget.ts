@@ -17,7 +17,7 @@
 // whole subsystem exists to prevent. So the caveat travels with the number, always.
 
 import type { BudgetConfidence, UsageBudget, UsageSnapshot } from './types'
-import { burnRatePctPerHour, forecastUsage, usageSamples } from './usage-history'
+import { burnRateBounds, forecastUsage, usageSamples } from './usage-history'
 import { tokensPerPercent, tokensSince } from './usage-tokens'
 
 /** Match the burn-rate lookback, so tokens/hour and percent/hour describe the SAME window. Comparing
@@ -55,8 +55,13 @@ export function buildUsageBudget(
   // turn, so a raw sum measures context size, not cost. See usage-tokens.ts.
   const weightedPerHour = spend.weighted > 0 ? spend.weighted / LOOKBACK_HOURS : null
 
-  const burn = burnRatePctPerHour(samples, now, LOOKBACK_HOURS)
-  const tpp = tokensPerPercent(weightedPerHour, burn)
+  // Divide by the burn rate's UPPER bound, not the point estimate. Two reasons, both important:
+  //  1. The point estimate can legitimately be 0 (the % is an integer and hasn't ticked yet), and
+  //     dividing by it yields an infinite token budget — the single most dangerous possible answer.
+  //  2. A larger denominator means a SMALLER tokensPerPercent, so the remaining budget comes out
+  //     conservative. Consistent with the forecast, which is pessimistic for the same reason.
+  const bounds = burnRateBounds(samples, now, LOOKBACK_HOURS)
+  const tpp = tokensPerPercent(weightedPerHour, bounds?.upper ?? null)
   const remainingPct = forecast.remainingPct
   const remainingWeighted =
     tpp !== null && remainingPct !== null ? Math.round(tpp * remainingPct) : null
@@ -75,13 +80,10 @@ export function buildUsageBudget(
     if (samples.length < 2) {
       caveat =
         'No token budget yet: usage has only been sampled ' +
-        `${samples.length} time(s). The background refresh samples every 15 minutes; a rate needs at least two readings ~20 minutes apart. Percentages below are still exact.`
-    } else if (burn === null) {
+        `${samples.length} time(s). The background refresh samples every 15 minutes; a rate needs at least two readings ~45 minutes apart (the reported % is an integer, so a shorter window cannot resolve a slow burn). Percentages below are still exact.`
+    } else if (bounds === null) {
       caveat =
-        'No token budget yet: the readings so far are too close together (or span a quota reset) to measure a burn rate. Percentages below are still exact.'
-    } else if (burn <= 0) {
-      caveat =
-        'Not burning quota right now, so there is nothing to divide by and no token budget can be derived. That also means the cap is not approaching: work freely.'
+        'No token budget yet: the readings so far span under 45 minutes (or cross a quota reset), which is too short to resolve a burn rate from an integer percentage. Percentages below are still exact.'
     } else {
       caveat =
         'No Claude Code transcripts were written in the last ' +
@@ -121,19 +123,23 @@ export function budgetSummary(budget: UsageBudget, pct: number | null): string {
   if (pct !== null) parts.push(`Weekly (all models): ${pct}% used.`)
 
   const f = budget.forecast
-  if (f.burnPctPerHour !== null && f.burnPctPerHour > 0) {
-    parts.push(`Burning ${f.burnPctPerHour.toFixed(2)}%/hour.`)
+  if (f.burnPctPerHourUpper !== null) {
+    // Report the point estimate, but qualify it: the source % is an integer, so a measured 0 only
+    // means "under the resolution of this window", never "idle".
+    parts.push(
+      f.burnPctPerHour !== null && f.burnPctPerHour > 0
+        ? `Burning ~${f.burnPctPerHour.toFixed(2)}%/hour (at most ${f.burnPctPerHourUpper.toFixed(2)}%/hour).`
+        : `Burn is below what these readings can resolve (under ${f.burnPctPerHourUpper.toFixed(2)}%/hour).`,
+    )
     if (f.exhaustsBeforeReset === false) {
       parts.push(
-        `At this rate you will NOT hit the cap before it resets${f.hoursToReset !== null ? ` in ${f.hoursToReset.toFixed(1)}h` : ''}. Work freely.`,
+        `Even at the worst rate consistent with the readings you will NOT hit the cap before it resets${f.hoursToReset !== null ? ` in ${f.hoursToReset.toFixed(1)}h` : ''}. Work freely.`,
       )
     } else if (f.exhaustsBeforeReset === true && f.headroomHours !== null) {
       parts.push(
-        `You WILL hit the cap in ~${f.headroomHours.toFixed(1)}h, before it resets${f.hoursToReset !== null ? ` in ${f.hoursToReset.toFixed(1)}h` : ''}. Plan around it.`,
+        `Worst case you hit the cap in ~${f.headroomHours.toFixed(1)}h, before it resets${f.hoursToReset !== null ? ` in ${f.hoursToReset.toFixed(1)}h` : ''}. Plan around it.`,
       )
     }
-  } else if (f.burnPctPerHour === 0) {
-    parts.push('Not burning quota right now; the cap is not approaching.')
   }
 
   if (budget.remainingTurns !== null) {
