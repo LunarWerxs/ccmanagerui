@@ -17,6 +17,7 @@ import {
   Terminal,
   Trash2,
   TriangleAlert,
+  Unlink,
 } from '@lucide/vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -175,6 +176,7 @@ const {
   checkUsage: checkCliUsage,
   launch: launchCli,
   login: loginCli,
+  linkDesktop: linkCliDesktop,
 } = useCliInstances()
 onMounted(loadAppSettings)
 
@@ -199,6 +201,12 @@ async function onLoginCli(cli: CliInstance) {
   const result = await loginCli(cli.id)
   if (result?.ok) toast.success(t('instances.toastCliLoginOpened'))
   else toast.error(result?.message ?? t('instances.toastCliLoginFailed'))
+}
+/** Send a linked CLI instance back down to the CLI table (where rename/delete/associate live). */
+async function onUnlinkCli(cli: CliInstance) {
+  const result = await linkCliDesktop(cli.id, null)
+  if (result?.ok) toast.success(t('instances.toastCliUnlinked'))
+  else toast.error(result?.message ?? t('instances.toastCliUnlinkFailed'))
 }
 
 // Check every instance's usage concurrently — desktop AND CLI. Each check is a single ~300ms read of
@@ -681,7 +689,8 @@ onUnmounted(stopPolling)
                     >
                       <Gauge /> {{ $t('instances.checkUsage') }}
                     </DropdownMenuItem>
-                    <!-- The linked CLI's actions, right here on the account's own row -->
+                    <!-- The linked CLI's actions, right here on the account's own row. Unlink sends
+                         it back to the CLI table, which is where rename/delete/associate live. -->
                     <template v-for="cli in linkedClis(inst.dir)" :key="`cli-${cli.id}`">
                       <DropdownMenuSeparator />
                       <DropdownMenuItem v-if="cli.loggedIn" @click="onLaunchCli(cli)">
@@ -689,6 +698,9 @@ onUnmounted(stopPolling)
                       </DropdownMenuItem>
                       <DropdownMenuItem v-else @click="onLoginCli(cli)">
                         <LogIn /> {{ $t('instances.loginCli') }}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem @click="onUnlinkCli(cli)">
+                        <Unlink /> {{ $t('instances.unlinkCli') }}
                       </DropdownMenuItem>
                     </template>
                     <DropdownMenuSeparator />

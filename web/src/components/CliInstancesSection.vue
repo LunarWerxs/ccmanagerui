@@ -1,8 +1,13 @@
 <script setup lang="ts">
-// CLI Instances: a second, clearly-separate table below the desktop Instances table.
-// A "CLI instance" is an isolated CLAUDE_CONFIG_DIR the daemon can spawn a real `claude`
-// process against (as opposed to a Claude Desktop profile). Deliberately not merged into a
-// unified per-account view: desktop and CLI instances have different lifecycles/actions.
+// CLI Instances: the table of CLI logins that DON'T belong to a desktop instance yet.
+// A "CLI instance" is an isolated CLAUDE_CONFIG_DIR the daemon can run a real `claude` against (as
+// opposed to a Claude Desktop profile).
+//
+// This table used to list every CLI instance. It no longer does: once one is LINKED to a desktop
+// instance it is the same Anthropic account signed in twice, so it moves UP onto that account's row
+// in InstancesView and disappears from here. Listing it in both places was the half-measure that
+// made the "unified per-account view" not actually unified. Full lifecycle (create / rename /
+// associate / delete) still lives here; the account row carries launch / sign-in / unlink.
 import {
   ArrowDown,
   ArrowUp,
@@ -79,13 +84,27 @@ const { t } = useI18n()
 const usageKey = (inst: CliInstance) => `cli:${inst.id}`
 const usageFor = (inst: CliInstance) => snapshotFor(usageKey(inst))
 
+/**
+ * ONLY the UNLINKED CLI instances live in this table.
+ *
+ * A CLI instance that has been linked to a desktop instance is the same Anthropic account signed in
+ * twice, so it belongs to that account, not to a separate list. It is rendered on its desktop
+ * instance's row up in InstancesView (that row IS the account) and is deliberately NOT repeated
+ * here — showing it in both places is duplication, not a unified view. "Unlink" on the account row
+ * sends it back down here.
+ */
+const unlinkedCliInstances = computed(() =>
+  cliInstances.value.filter((c) => !c.associatedDesktopDir),
+)
+/** How many moved up onto a desktop instance's row (so the header can explain the shortfall). */
+const linkedCount = computed(() => cliInstances.value.length - unlinkedCliInstances.value.length)
+
 const { sortedRows, toggleSort, indicatorFor } = useSortable(
-  () => cliInstances.value,
+  () => unlinkedCliInstances.value,
   [
     { key: 'loggedIn', accessor: (i: CliInstance) => i.loggedIn },
     { key: 'name', accessor: (i: CliInstance) => i.name },
     { key: 'account', accessor: (i: CliInstance) => i.associatedAccountLabel ?? null },
-    { key: 'desktop', accessor: (i: CliInstance) => i.associatedDesktopLabel ?? null },
     { key: 'configDir', accessor: (i: CliInstance) => i.configDir },
     {
       key: 'usage',
@@ -291,7 +310,12 @@ onUnmounted(stopPolling)
       <div class="flex items-center gap-2 text-sm font-semibold">
         <Terminal class="size-4" />
         {{ $t('cliInstances.title') }}
-        <span class="text-muted-foreground">({{ cliInstances.length }})</span>
+        <span class="text-muted-foreground">({{ unlinkedCliInstances.length }})</span>
+        <!-- Linked ones aren't missing, they've moved up onto their account's row. Say so, or their
+             absence from this count reads as a bug. -->
+        <span v-if="linkedCount > 0" class="text-xs font-normal text-muted-foreground">
+          {{ $t('cliInstances.linkedElsewhere', { count: linkedCount }) }}
+        </span>
       </div>
       <div class="flex flex-wrap items-center gap-1.5">
         <Button
@@ -333,13 +357,6 @@ onUnmounted(stopPolling)
                 <ArrowDown v-else-if="indicatorFor('account') === 'desc'" class="size-3" />
               </span>
             </TableHead>
-            <TableHead class="cursor-pointer select-none" @click="toggleSort('desktop')">
-              <span class="inline-flex items-center gap-0.5">
-                {{ $t('cliInstances.colDesktop') }}
-                <ArrowUp v-if="indicatorFor('desktop') === 'asc'" class="size-3" />
-                <ArrowDown v-else-if="indicatorFor('desktop') === 'desc'" class="size-3" />
-              </span>
-            </TableHead>
             <TableHead class="cursor-pointer select-none" @click="toggleSort('configDir')">
               <span class="inline-flex items-center gap-0.5">
                 {{ $t('cliInstances.colConfigDir') }}
@@ -357,18 +374,21 @@ onUnmounted(stopPolling)
             <TableHead class="text-right">{{ $t('cliInstances.colActions') }}</TableHead>
           </TableRow>
         </TableHeader>
-        <TableBody v-if="cliInstances.length === 0">
-          <TableEmpty v-if="!loading" :colspan="7">
+        <TableBody v-if="unlinkedCliInstances.length === 0">
+          <TableEmpty v-if="!loading" :colspan="6">
             <div class="flex flex-col items-center gap-1 text-center">
               <Terminal class="mb-1 size-6 opacity-40" />
-              <p class="font-medium text-foreground">{{ $t('cliInstances.empty') }}</p>
-              <p class="text-xs text-muted-foreground">{{ $t('cliInstances.emptyHint') }}</p>
+              <p class="font-medium text-foreground">
+                {{ linkedCount > 0 ? $t('cliInstances.allLinked') : $t('cliInstances.empty') }}
+              </p>
+              <p class="text-xs text-muted-foreground">
+                {{ linkedCount > 0 ? $t('cliInstances.allLinkedHint') : $t('cliInstances.emptyHint') }}
+              </p>
             </div>
           </TableEmpty>
           <TableRow v-for="i in 2" v-else :key="i">
             <TableCell><Skeleton class="size-2 rounded-full" /></TableCell>
             <TableCell><Skeleton class="h-4 w-28" /></TableCell>
-            <TableCell><Skeleton class="h-5 w-20" /></TableCell>
             <TableCell><Skeleton class="h-5 w-20" /></TableCell>
             <TableCell><Skeleton class="h-3 w-32" /></TableCell>
             <TableCell><Skeleton class="h-5 w-14" /></TableCell>
@@ -392,12 +412,6 @@ onUnmounted(stopPolling)
                 {{ inst.associatedAccountLabel }}
               </Badge>
               <span v-else class="text-xs text-muted-foreground">{{ $t('cliInstances.noAccount') }}</span>
-            </TableCell>
-            <TableCell>
-              <Badge v-if="inst.associatedDesktopLabel" variant="outline" class="gap-1">
-                <Monitor class="size-3" />{{ inst.associatedDesktopLabel }}
-              </Badge>
-              <span v-else class="text-xs text-muted-foreground">{{ $t('cliInstances.noDesktop') }}</span>
             </TableCell>
             <TableCell class="mono max-w-[16rem] truncate text-[0.625rem] text-muted-foreground">
               {{ inst.configDir }}
