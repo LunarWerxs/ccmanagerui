@@ -169,6 +169,60 @@ supersede the standalone script).
 
 ---
 
+## 6A. Feature D — Usage in the Instances table (owner ask 2026-07-14)
+
+Surface each account's live quota in the Instances table, reusing `checkUsage` (§4). Owner UI
+**preference** (implement as stated, don't "improve"): a CONDENSED cell — full detail won't fit — with a
+HOVER overlay for the breakdown.
+
+- **Cell (condensed):** the BINDING number = weekly all-models % (`bindingWeeklyPct`), color-coded
+  (green <70 · amber 70–90 · red >90), e.g. `97% wk`, with a small staleness dot when the snapshot is old.
+- **Hover popover (kit `Popover`/`Tooltip` — reuse, never hand-roll):** the full breakdown — Session (5h)
+  % + reset · Week (all models) % + reset · Week (Fable/model) % + reset · "checked <relative time>".
+- **Refresh model:** on-demand, NOT auto-poll (each check spawns a real `claude -p "/usage"` per account).
+  Mirror the existing "Resolve accounts" pattern — a per-row "Check usage" action + a toolbar "Refresh all
+  usage" (SPACED, sequential; don't stampede). Cache the last `UsageSnapshot` per account (persist alongside
+  the account/cli-instance JSON with `lastUsageCheck`); show its age; manual refresh re-checks.
+- **No-data honesty:** `isNoData` snapshots render "—"/"unknown", never "0%".
+- Routes already planned: `GET /api/instances/:id/usage` (desktop) + `GET /api/cli-instances/:id/usage` (§3/§4).
+
+## 6B. Feature E — Auto-resume monitor (rate-limit watchdog) (owner ask 2026-07-14)
+
+A toggle so a mid-work session killed by a **5-HOUR** rate limit auto-resumes once the window clears — sleep
+through a limit, wake to finished work. **GATED on the weekly cap not being maxed.**
+
+**Resume = a dispatched `claude --resume <session-id>` run carrying a LOCKED prompt** (default
+`DEFAULT_RESUME_PROMPT = "resume"`, a code constant users don't casually edit), scheduled for just after the
+5-hour reset via the existing queue + `scheduler.ts` (concurrency/spacing already solved). Reuse dispatch;
+build no new spawner.
+
+**Detection — two surfaces, primary is the reliable one (owner said transcript-tail; UPGRADE to structured):**
+- **Primary — dispatched runs (structured, reliable):** when the app's OWN dispatch exits on a rate limit,
+  record it in `run_events` as `rate-limited` + `resumable`. Structured signal, not log-scraping.
+- **Secondary — interactive/desktop sessions (best-effort):** scan a transcript's TAIL for the rate-limit
+  signature (the last message is the limit notice). Fuzzier; gate behind the same Q4 signature.
+
+**The 5-hour-vs-weekly guardrail (the crux):** on a detected rate-limited stop, `checkUsage` the account —
+- Resume ONLY if `weekAll.pct < 100` (else resuming just slams the weekly wall; skip, optionally re-arm for
+  the weekly reset).
+- Schedule the resume for `session.resets` (the 5-hour reset from `/usage`) + a small buffer.
+- Weekly IS maxed → do not resume; surface "blocked: weekly maxed, resets <time>".
+
+**Safety rails (auto-prompting while the user sleeps — must be tight):**
+- Resume a session AT MOST N times (default ~3) via a `resume_attempts` counter; past N → stop + mark
+  "needs human" (no infinite resume loop on a genuinely stuck task).
+- Idempotent — never double-queue a resume for a session that already has one pending.
+- Only sessions MID-WORK at the limit (not user-ended/completed) — part of Q4 detection.
+- Respect scheduler spacing so monitored sessions don't stampede at the reset instant.
+- Toggle scope: GLOBAL switch + optional PER-ACCOUNT override. **Off by default.**
+
+**Where it lives:** `server/src/monitor.ts` (or extend `scheduler.ts`): a poll loop — find resumable stops →
+usage gate → schedule resume → track attempts. Config + state in the existing sqlite (a `monitor` settings
+row + `resume_attempts`); reuse, no new store.
+
+**UI:** an "Auto-resume monitor" switch in Settings (global) + a per-account switch in the Instances table;
+a status chip on affected rows ("waiting → resumes ~HH:MM" / "blocked: weekly maxed" / "needs human"). i18n.
+
 ## 7. Open questions / spikes (resolve as you reach them)
 
 - **Q1 (blocking §4):** does `dispatch.ts` account auth injection authenticate a bare `claude -p "/usage"`
@@ -184,6 +238,15 @@ supersede the standalone script).
   unified ("per account, its associated CLI/desktop"). Confirm with a quick mock before building the view.
 - **Q3:** usage snapshot caching TTL + whether to auto-poll in the UI (cost: one `/usage` call per account
   per poll). Suggest on-demand + manual refresh first; no background poll.
+- **Q4 (blocking §6B detection):** the EXACT rate-limit signature. Capture a REAL rate-limited dispatch
+  (the stream-json error type/message) AND a real interactive rate-limit transcript tail; record both here.
+  Never hardcode the wording from memory — it drifts. Must also distinguish a 5-hour-window limit from a
+  weekly limit if the message differs. **Answer:** _TBD_
+- **Q5 (§6B resume):** confirm the resume invocation — `claude --resume <session-id> -p "<prompt>"` (vs
+  `--continue`) — works for BOTH dispatched and interactive/desktop sessions, and authenticates via the same
+  env-token path as dispatch (§7-Q1). **Answer:** _TBD_
+- **Q6 (§6A):** usage-refresh cadence in the table — confirm on-demand + manual refresh + cached snapshot
+  (with age) is acceptable; no background poll (each check spawns a `claude` process). **Leaning:** yes.
 
 ---
 
@@ -201,6 +264,20 @@ supersede the standalone script).
 10. [ ] 🔵 **Feature C docs** — README MCP section + `AI_USAGE_SELFCHECK.md`.
 11. [ ] 🔵 **Verify** — `bun run check`, typecheck, `bun test`, run daemon, click-through; regression-check Queue/Sessions/Desktop instances. Commit.
 
+### Feature D — usage in the Instances table (§6A)
+
+12. [ ] 🟢 **Usage cell + hover popover** — condensed `bindingWeeklyPct` cell (color-coded) + kit `Popover` breakdown; per-row "Check usage" + toolbar "Refresh all" (spaced); cache `lastUsageCheck` + show age; `isNoData`→"—". Depends on brick 3/4 (`checkUsage`).
+
+### Feature E — auto-resume monitor (§6B)
+
+13. [ ] 🔵 **Q4 spike** — capture a real rate-limited dispatch + interactive transcript; record the exact signature in §7-Q4 (5h vs weekly if distinguishable).
+14. [ ] 🔵 **Q5 spike** — confirm the `claude --resume` invocation + its auth for dispatched AND desktop sessions.
+15. [ ] 🟢 **Rate-limit detection** — mark dispatched runs `rate-limited`/`resumable` in `run_events` (primary); transcript-tail scan (secondary), both keyed on Q4's signature; flag only MID-WORK stops.
+16. [ ] 🔵 **`server/src/monitor.ts`** — poll loop: find resumable stops → `checkUsage` gate (`weekAll<100`) → schedule `claude --resume` at the 5h reset via the scheduler; `resume_attempts` cap; idempotent (no double-queue).
+17. [ ] 🟢 **Monitor config + state** — sqlite `monitor` settings (global + per-account), `DEFAULT_RESUME_PROMPT` code constant (optional advanced override), `resume_attempts` counter.
+18. [ ] 🟢 **Monitor UI** — Settings global switch + per-account switch in Instances + status chip ("resumes ~HH:MM" / "blocked: weekly maxed" / "needs human"). i18n.
+19. [ ] 🔵 **Verify D+E** — runtime evidence: force a rate-limited run (or fixture) → detection → gated schedule → resume fires after the 5h reset AND is blocked when weekly maxed; usage cell + hover render. Commit.
+
 ---
 
 ## 9. Progress log — ⬇️ YOU ARE HERE ⬇️ (update every increment)
@@ -215,4 +292,10 @@ supersede the standalone script).
   `claude` binary directly (args array, NOT via Git Bash — MSYS mangles `/usage`), inject
   `CLAUDE_CODE_OAUTH_TOKEN` per §7-Q1, reuse the repo's existing claude-binary resolution
   (see `dispatch.ts`/`detached-spawn.mjs` for how it finds + spawns `claude`). Then item 4 (MCP `check_usage`).
+- **2026-07-14 (Fable) — Features D + E designed & added (owner ask).** Feature D (usage in Instances
+  table: condensed cell + hover popover) = §6A + checklist item 12. Feature E (auto-resume monitor:
+  5h-limit-killed sessions auto-resume via a locked `claude --resume` prompt, gated on `weekAll<100`) = §6B +
+  items 13–19 + spikes Q4–Q6. Design upgrade noted: detect rate-limits from STRUCTURED `run_events`
+  (dispatched runs) first, transcript-tail scan only as best-effort secondary. No code beyond brick 1 yet.
+  **YOU ARE HERE unchanged → next code = checklist item 3 (`checkUsage()`);** Features D/E build on it.
 - _next session: append your progress here, then commit._
