@@ -1,6 +1,6 @@
 /* CC Manager UI brand accent: cosmic magenta-purple (~320°). Overrides the neutral
    --primary/--ring from base.css (light + dark). Hue sits clearly apart from CloudMonitor
-   sky-cyan (220), DevWebUI indigo (277), Reimagine violet (303), and RepoYeti green (~150).
+   sky-cyan (220), DevWebUI indigo (277), RēDesign violet (303), and RepoYeti green (~150).
    Part of the shared kit; do not edit the in-app copy. */
 :root {
   --primary: oklch(0.55 0.19 320);
