@@ -92,6 +92,32 @@ test("clearInstanceInfo removes the pointer", () => {
   expect(ptr.readInstanceInfo()).toBeNull();
 });
 
+test("clearInstanceInfo leaves ANOTHER process's pointer alone", () => {
+  // The 2026-07-14 stale-daemon incident: a second daemon boots, loses the single-instance race,
+  // and its exit handler deletes the RUNNING daemon's pointer — leaving the survivor invisible to
+  // every launcher and restart script. Deletion is owner-only, so a foreign pid must survive.
+  const configDir = tempDir();
+  const ptr = createInstancePointer({ configDir });
+  ptr.writeInstanceInfo(7000);
+  const foreign = { ...ptr.readInstanceInfo(), pid: process.pid + 1 };
+  writeFileSync(join(configDir, "runtime.json"), JSON.stringify(foreign));
+
+  ptr.clearInstanceInfo();
+
+  expect(ptr.readInstanceInfo()).not.toBeNull();
+  expect(ptr.readInstanceInfo()?.pid).toBe(process.pid + 1);
+});
+
+test("clearInstanceInfo removes a legacy pointer that records no pid", () => {
+  // Ownership is unprovable without a pid, so the old unconditional behavior is the fallback:
+  // better to clear a pointer we can't attribute than to leave one nobody will ever remove.
+  const configDir = tempDir();
+  const ptr = createInstancePointer({ configDir });
+  writeFileSync(join(configDir, "runtime.json"), JSON.stringify({ port: 7000 }));
+  ptr.clearInstanceInfo();
+  expect(ptr.readInstanceInfo()).toBeNull();
+});
+
 test("readInstanceInfo returns null for a missing or corrupt pointer", () => {
   const configDir = tempDir();
   const ptr = createInstancePointer({ configDir });

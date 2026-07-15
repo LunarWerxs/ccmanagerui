@@ -84,9 +84,24 @@ export function createInstancePointer({ configDir, serviceName, host = "127.0.0.
     }
   }
 
-  /** Remove the pointer (on a clean shutdown). Stale files are tolerated by readers. */
+  /**
+   * Remove the pointer on a clean shutdown — but ONLY if it still describes THIS process.
+   *
+   * The pointer is a singleton file; the daemons are not. A second daemon that boots, loses the
+   * single-instance race, and exits runs its cleanup handler on the way out — and without this
+   * guard that handler deletes the pointer belonging to the daemon that is still running. The
+   * survivor is then invisible: launchers can't find it, and the restart scripts can't stop it.
+   * That is the documented cause of the 2026-07-14 incident where a daemon served 10h39m-old code
+   * while every rebuild reported success.
+   *
+   * Comparing `pid` makes deletion an owner-only operation. Erring toward keeping the file is the
+   * cheap direction: readers already re-probe /api/health (findLiveInstance), so a stale pointer
+   * reads as "not running", whereas a deleted live one strands a daemon nobody can see.
+   */
   function clearInstanceInfo() {
     try {
+      const info = readInstanceInfo();
+      if (info?.pid && info.pid !== process.pid) return; // someone else's daemon — not ours to forget
       rmSync(runtimeFile, { force: true });
     } catch {
       /* best-effort */
