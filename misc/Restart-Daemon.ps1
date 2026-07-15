@@ -1,32 +1,50 @@
-# misc/Restart-Daemon.ps1 — find this app's running daemon and stop it, however it was started.
+# misc/Restart-Daemon.ps1 — kill this app's daemon, no exceptions, then relaunch it.
 #
-# WHY THIS EXISTS (learned the hard way, 2026-07-14):
-# The old restart logic trusted ONE thing: the port recorded in `~/.<app>/runtime.json`. If that
-# file was missing or stale it printed "App does not appear to be running", killed nothing, and
-# relaunched the shortcut -- which no-ops against the tray's single-instance mutex. The result is
-# the worst possible failure mode: `Rebuild.bat` reports success, the build IS fresh on disk, and
-# the daemon serving it is hours old. You rebuild over and over and nothing changes.
+# CONTRACT (owner directive, 2026-07-15): a rebuild must NEVER leave you on old code.
+# If something of OURS is running, it dies. There is no "left alone", no advisory note,
+# no polite skip. The ONLY thing this script won't kill is a process that isn't ours --
+# and "is it ours" is now a question with a hard answer instead of a guess.
 #
-# That is exactly what happened: a daemon ran for 10h39m on stale code while every rebuild
-# "succeeded". runtime.json had been lost (a second daemon exiting calls clearInstanceInfo(), which
-# deletes the pointer belonging to the survivor), and there was no tray supervising it either.
+# WHY THE OLD VERSION FAILED (2026-07-15):
+# It probed every bun/node listener's /api/health and treated a body with no `service`
+# field as "unidentified -> leave it alone". Three Connections Vite DEV SERVERS (ports
+# 4180/4204/4273) answer /api/health with 200 OK and an index.html body, because Vite
+# serves the SPA fallback for every unknown path. They therefore looked exactly like "a
+# daemon that won't say who it is", and the script printed a note asking us to add a
+# `service` field to an app (redesign) that has had one all along.
 #
-# THE FIX: do not trust the pointer file as the only source of truth. The daemon already tells us
-# who it is -- `GET /api/health` returns `{ service: "<app>" }`, which is the very contract the
-# single-instance guard relies on. So: collect candidate ports (the pointer, PLUS every port a
-# bun/node process is actually listening on), probe each one, and stop only the processes that
-# IDENTIFY THEMSELVES as this app. That is both more robust (finds an orphan the pointer forgot)
-# and safer (it can never kill a sibling app, because the identity has to match).
+# Wait-Daemon.ps1 had the mirror-image bug, and it was the worse of the two: it ACCEPTED
+# an unidentified responder as this app (`if (-not $svc -or $svc -eq $AppName)`), latched
+# onto one of those Vite servers, read that stranger's start time, and announced
+# "STALE DAEMON: you are still being served the OLD code" -- about a daemon that had in
+# fact just restarted perfectly. A false alarm isn't harmless: it sends you hunting a bug
+# that doesn't exist, and it teaches you to ignore the alarm on the day it's real.
 #
-# App-agnostic on purpose: everything is derived from package.json `name`, so the same file works in
-# ccmanagerui / redesign / repoyeti / devwebui.
+# THE IDENTITY RULE (fixes both directions):
+# A listener is OURS only if /api/health returns Content-Type `application/json` AND a
+# body with `ok: true` AND `service` equal to this app's package.json `name`. Absence of
+# identity is never identity; HTML is never identity. That one rule makes the sweep both
+# ruthless (anything that IS us dies, including an orphan the pointer forgot) and safe (a
+# Vite dev server, a sibling app, or any unrelated node process can never match).
+#
+# WHY WE ONLY KILL PROCESSES OLDER THAN THIS RUN:
+# The tray host runs an auto-restart watchdog. Killing the daemon is expected to bring a
+# NEW one back within seconds, and that new one is the whole point -- so the kill targets
+# are restricted to processes that started BEFORE this script did. A daemon younger than
+# our start stamp is the fresh build arriving, not a survivor. This is also what makes the
+# verify loop terminate instead of fighting the watchdog forever.
+#
+# App-agnostic on purpose: everything derives from package.json `name`, so the same file
+# works in ccmanagerui / redesign / repoyeti / devwebui. Keep the four copies identical.
 
 [CmdletBinding()]
 param(
   # Repo root. Defaults to the parent of misc/, i.e. the app root.
   [string]$Root = (Split-Path -Parent $PSScriptRoot),
   # Stop the daemon but don't relaunch the app afterwards.
-  [switch]$NoLaunch
+  [switch]$NoLaunch,
+  # How long to keep killing before admitting defeat.
+  [int]$KillTimeoutSeconds = 15
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -39,90 +57,149 @@ if (-not (Test-Path $pkgPath)) {
 $name = (Get-Content $pkgPath -Raw | ConvertFrom-Json).name
 $runtimeFile = Join-Path $env:USERPROFILE ".$name\runtime.json"
 
-# Record WHEN this restart began. Wait-Daemon.ps1 reads it to assert that the daemon now answering is
-# YOUNGER than this moment, i.e. that it really is a new process and not the old one that never died.
-# Without this, "the daemon is up" proves nothing: the stale daemon was up the whole time too.
-Set-Content -Path (Join-Path $env:TEMP "$name-restart.stamp") -Value (Get-Date).ToString('o') -Encoding ASCII
+# Everything alive before this instant is a kill target; anything that appears after it is
+# the replacement. Wait-Daemon.ps1 reads the same stamp to prove the daemon now answering
+# is younger than the restart, i.e. that it really is a new process.
+$restartStart = Get-Date
+Set-Content -Path (Join-Path $env:TEMP "$name-restart.stamp") -Value $restartStart.ToString('o') -Encoding ASCII
 
-# --- 1. Candidate ports ------------------------------------------------------------------------
-# The pointer is a hint, not the truth. Union it with every port a bun/node process is listening on,
-# so an orphaned daemon the pointer forgot is still found.
-$candidates = New-Object System.Collections.Generic.List[int]
-$pointerPort = $null
-if (Test-Path $runtimeFile) {
+# --- Identity ------------------------------------------------------------------------------------
+# The single source of truth for "is this us". Deliberately strict: a JSON content-type, ok:true,
+# and an exact service match. Anything less returns $null and is treated as somebody else's port.
+function Get-HealthService {
+  param([int]$Port)
   try {
-    $pointerPort = (Get-Content $runtimeFile -Raw | ConvertFrom-Json).port
-    if ($pointerPort) { $candidates.Add([int]$pointerPort) }
-  } catch { }
+    $res = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+  } catch { return $null }
+  # Vite's SPA fallback answers 200 text/html for /api/health. Reject on content-type before we
+  # ever look at the body -- that is the check whose absence caused the 2026-07-15 false alarm.
+  if (($res.Headers['Content-Type'] -join ',') -notmatch 'application/json') { return $null }
+  try { $body = $res.Content | ConvertFrom-Json -ErrorAction Stop } catch { return $null }
+  if ($body.ok -ne $true -or -not $body.service) { return $null }
+  return [string]$body.service
 }
 
-foreach ($conn in (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue)) {
-  $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-  # A dead OwningProcess is a zombie socket (a killed daemon's port not yet reaped by Windows).
-  # It cannot be killed and it does not answer health, so it is skipped naturally below.
-  if ($proc -and $proc.ProcessName -in @('bun', 'node')) { $candidates.Add([int]$conn.LocalPort) }
+# Was this process alive before we started? Unreadable start time => assume yes and kill it: the
+# directive is "never serve old code", so an unprovable process is treated as the old one.
+function Test-PredatesRestart {
+  param([int]$ProcessId)
+  $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+  if (-not $proc) { return $false }
+  try { return ($proc.StartTime -lt $restartStart) } catch { return $true }
 }
 
-$ports = $candidates | Sort-Object -Unique
-if (-not $ports) {
-  Write-Host "  No bun/node listeners found - the app does not appear to be running."
-}
+# Every process that identifies as this app AND predates this run. Recomputed each pass so the
+# loop below is a real verification, not a fire-and-hope.
+function Get-StaleTargets {
+  param([int]$PointerPort)
 
-# --- 2. Probe each candidate and stop only OUR daemon -------------------------------------------
-# `/api/health` -> { ok: true, service: "<name>" }. Matching on `service` is what makes this safe:
-# a sibling LunarWerx app listening on a nearby port answers with a DIFFERENT name and is left alone.
-#
-# Not every app in the family stamps `service` on its health body. When it is ABSENT we must not
-# guess (killing an unidentified bun/node listener could take out an unrelated dev server), so we
-# fall back to the old, narrow rule: trust it only if it is the exact port the pointer file names.
-# That keeps such an app no worse off than before, while apps that DO identify themselves get the
-# orphan-finding upgrade.
-$stopped = @()
-$unidentified = @()
-foreach ($port in $ports) {
-  $health = $null
-  try { $health = Invoke-RestMethod "http://127.0.0.1:$port/api/health" -TimeoutSec 2 } catch { continue }
-  if (-not $health) { continue }
-
-  $isOurs = $false
-  if ($health.PSObject.Properties.Name -contains 'service' -and $health.service) {
-    $isOurs = ($health.service -eq $name)
-  } elseif ($pointerPort -and [int]$pointerPort -eq [int]$port) {
-    $isOurs = $true   # no identity on the wire; the pointer is all we have
-  } else {
-    $unidentified += $port
+  $probe = New-Object System.Collections.Generic.List[int]
+  # The pointer's port is probed unconditionally: it's the one port we have a recorded claim on,
+  # even if the daemon somehow isn't running under a bun/node image.
+  if ($PointerPort) { $probe.Add($PointerPort) }
+  # The bun/node prefilter keeps the sweep cheap (a 2s probe per listening port would crawl).
+  foreach ($conn in (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue)) {
+    $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+    # A dead OwningProcess is a zombie socket (a killed daemon's port not yet reaped); it answers
+    # nothing and can't be killed, so it drops out naturally.
+    if ($proc -and $proc.ProcessName -in @('bun', 'node')) { $probe.Add([int]$conn.LocalPort) }
   }
-  if (-not $isOurs) { continue }
 
-  $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-  foreach ($procId in ($conns | Select-Object -ExpandProperty OwningProcess -Unique)) {
+  $targets = @{}
+  foreach ($port in ($probe | Sort-Object -Unique)) {
+    if ((Get-HealthService -Port $port) -ne $name) { continue }
+    $owners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty OwningProcess -Unique
+    foreach ($procId in $owners) {
+      if (-not (Test-PredatesRestart -ProcessId $procId)) { continue }  # the fresh one, leave it
+      $targets[[int]$procId] = "serving '$name' on port $port"
+    }
+  }
+  return $targets
+}
+
+# A daemon that has HUNG (won't answer /api/health) can't be found by identity, so the recorded
+# pointer is the only handle on it. Guarded against PID reuse: the process must still be a
+# bun/node image AND its start time must line up with the startedAt the daemon recorded.
+function Get-HungPointerTarget {
+  param($Info)
+  if (-not $Info -or -not $Info.pid) { return $null }
+  $proc = Get-Process -Id ([int]$Info.pid) -ErrorAction SilentlyContinue
+  if (-not $proc -or $proc.ProcessName -notin @('bun', 'node')) { return $null }
+  if (-not (Test-PredatesRestart -ProcessId $proc.Id)) { return $null }
+  if ($Info.startedAt) {
+    try {
+      $recorded = [DateTimeOffset]::FromUnixTimeMilliseconds([long]$Info.startedAt).LocalDateTime
+      # The daemon writes startedAt within a second or two of booting. A recycled PID now owned by
+      # an unrelated bun/node run won't land anywhere near it.
+      if ([math]::Abs(($proc.StartTime - $recorded).TotalSeconds) -gt 120) { return $null }
+    } catch { }
+  }
+  return $proc.Id
+}
+
+# --- Stop ----------------------------------------------------------------------------------------
+$info = $null
+if (Test-Path $runtimeFile) {
+  try { $info = Get-Content $runtimeFile -Raw | ConvertFrom-Json } catch { }
+}
+$pointerPort = if ($info.port) { [int]$info.port } else { 0 }
+
+$killed = @{}
+$deadline = (Get-Date).AddSeconds($KillTimeoutSeconds)
+$survivors = @{}
+
+while ($true) {
+  $targets = Get-StaleTargets -PointerPort $pointerPort
+  $hungPid = Get-HungPointerTarget -Info $info
+  if ($hungPid -and -not $targets.ContainsKey([int]$hungPid)) {
+    $targets[[int]$hungPid] = "recorded in runtime.json but not answering /api/health (hung)"
+  }
+
+  if ($targets.Count -eq 0) { break }   # nothing of ours from before this run is left: verified.
+
+  if ((Get-Date) -gt $deadline) { $survivors = $targets; break }
+
+  foreach ($procId in $targets.Keys) {
     # /T so the daemon's children (a dispatch runner, a spawned claude) go with it.
     taskkill /PID $procId /T /F *> $null
-    $stopped += [pscustomobject]@{ Port = $port; Pid = $procId }
+    if (-not $killed.ContainsKey($procId)) {
+      $killed[$procId] = $targets[$procId]
+      Write-Host ("  Killed pid {0} - {1}." -f $procId, $targets[$procId])
+    }
   }
+  Start-Sleep -Milliseconds 400   # let Windows reap them, then re-verify on the next pass
 }
 
-if ($unidentified.Count -gt 0 -and $stopped.Count -eq 0) {
-  Write-Host ("  Note: port(s) {0} answer /api/health but do not say WHICH app they are," -f ($unidentified -join ', ')) -ForegroundColor Yellow
-  Write-Host "        so they were left alone. Add `service: '$name'` to this app's /api/health body" -ForegroundColor Yellow
-  Write-Host "        to make an orphaned daemon findable here." -ForegroundColor Yellow
-}
-
-if ($stopped.Count -gt 0) {
-  foreach ($s in $stopped) {
-    $orphanNote = if ($pointerPort -and [int]$pointerPort -eq [int]$s.Port) { '' } else { '  (the pointer file did NOT know about this one)' }
-    Write-Host ("  Stopped {0} on port {1} (pid {2}).{3}" -f $name, $s.Port, $s.Pid, $orphanNote)
+if ($survivors.Count -gt 0) {
+  Write-Host ""
+  Write-Host "  ! COULD NOT KILL the old '$name' daemon within $KillTimeoutSeconds seconds:" -ForegroundColor Red
+  foreach ($procId in $survivors.Keys) {
+    Write-Host ("    pid {0} - {1}" -f $procId, $survivors[$procId]) -ForegroundColor Red
   }
-} elseif ($ports) {
-  Write-Host "  No running '$name' daemon found (nothing answered /api/health as '$name')."
+  Write-Host "    It is still serving the OLD code. Kill it by hand, then re-run." -ForegroundColor Red
+  exit 1
 }
 
-# A pointer that survives the daemon is a landmine for the NEXT restart, so clear it.
-if (Test-Path $runtimeFile) { Remove-Item $runtimeFile -Force -ErrorAction SilentlyContinue }
+if ($killed.Count -eq 0) {
+  Write-Host "  Nothing of '$name' was running (verified via /api/health identity, not a guess)."
+}
 
-# --- 3. Relaunch --------------------------------------------------------------------------------
+# A pointer that outlives its daemon is a landmine for the NEXT restart, so clear it -- but only if
+# it still describes a process that's gone. A daemon revived by the tray watchdog during the kill
+# loop has already rewritten this file, and deleting ITS pointer would strand the launcher.
+if (Test-Path $runtimeFile) {
+  $current = $null
+  try { $current = Get-Content $runtimeFile -Raw | ConvertFrom-Json } catch { }
+  $ownerAlive = $current.pid -and (Get-Process -Id ([int]$current.pid) -ErrorAction SilentlyContinue)
+  if (-not $ownerAlive) { Remove-Item $runtimeFile -Force -ErrorAction SilentlyContinue }
+}
+
+# --- Relaunch ------------------------------------------------------------------------------------
 if ($NoLaunch) { exit 0 }
 
+# The tray's watchdog may already have revived the daemon (that's the fresh build, and it's fine):
+# launching the shortcut then loses the single-instance mutex and exits harmlessly.
 $lnk = Get-ChildItem -LiteralPath $Root -Filter *.lnk -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($lnk) {
   Start-Process -FilePath $lnk.FullName
@@ -130,3 +207,4 @@ if ($lnk) {
 } else {
   Write-Host "  No .lnk shortcut in the repo root - launch the app manually."
 }
+exit 0

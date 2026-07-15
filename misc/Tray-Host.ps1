@@ -157,7 +157,9 @@ function Start-TrayHost($Config) {
     # Is OUR daemon answering here? /api/health is unauthenticated; when $service is non-empty
     # we also require body.service -eq $service (case-sensitive) — the anti-collision check that
     # stops the tray mistaking another app's server on the same port for its own. When $service
-    # is empty we validate only body.ok (DevWebUI's health payload carries no service field).
+    # is empty we validate only body.ok, which is a WEAK check every adapter should now avoid:
+    # anything answering that port passes it (a Vite dev server returns 200 + its SPA fallback for
+    # /api/health). Every app in the family stamps `service` and names it here as of 2026-07-15.
     function Test-Daemon($u, $service) {
       if (-not $u) { return $false }
       try {
