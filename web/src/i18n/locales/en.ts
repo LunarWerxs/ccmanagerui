@@ -7,7 +7,19 @@ import composer from './en/composer'
 import instances from './en/instances'
 import queue from './en/queue'
 import run from './en/run'
+import scheduler from './en/scheduler'
 import sessions from './en/sessions'
 import settings from './en/settings'
 
-export default { app, builder, cliInstances, composer, instances, queue, run, sessions, settings }
+export default {
+  app,
+  builder,
+  cliInstances,
+  composer,
+  instances,
+  queue,
+  run,
+  scheduler,
+  sessions,
+  settings,
+}

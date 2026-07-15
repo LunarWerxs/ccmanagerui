@@ -12,6 +12,7 @@ import {
   Play,
   Plus,
   Power,
+  PowerOff,
   Trash2,
   UserCircle2,
 } from '@lucide/vue'
@@ -28,6 +29,7 @@ import { useData } from '@/composables/useData'
 import type { QueueItem } from '@/lib/api'
 import * as api from '@/lib/api'
 import { baseName, formatRunAt } from '@/lib/format'
+import IconTooltip from '@/shell/IconTooltip.vue'
 import InfoHint from '@/shell/InfoHint.vue'
 
 const { t } = useI18n()
@@ -103,14 +105,20 @@ async function remove(item: QueueItem) {
         <InfoHint :text="$t('queue.whatIsQueue')" />
       </div>
       <div class="flex items-center gap-2">
-        <!-- ambient reminder that queued items will auto-dispatch; the toggle itself lives in
-             Settings → Scheduler (the header pill it replaces was removed as redundant) -->
-        <span
-          v-if="scheduler?.enabled"
-          class="inline-flex items-center gap-1 rounded-md border border-success/30 bg-success/10 px-2 py-0.5 text-xs text-success"
+        <!-- scheduler state at a glance: an icon (not a text pill), state + meaning on hover.
+             The actual toggle lives in Settings → Scheduler. -->
+        <IconTooltip
+          :label="scheduler?.enabled ? $t('queue.schedulerOnLabel') : $t('queue.schedulerOffLabel')"
+          :description="scheduler?.enabled ? $t('queue.schedulerOnHint') : $t('queue.schedulerOffHint')"
         >
-          <Power class="size-3" /> {{ $t('queue.schedulerOn') }}
-        </span>
+          <span
+            class="inline-flex size-6 items-center justify-center rounded-md"
+            :class="scheduler?.enabled ? 'text-success' : 'text-muted-foreground'"
+          >
+            <Power v-if="scheduler?.enabled" class="size-3.5" />
+            <PowerOff v-else class="size-3.5" />
+          </span>
+        </IconTooltip>
         <!-- manual drain: run everything already due, skipping busy sessions -->
         <Button
           v-if="dueCount > 0"
@@ -121,11 +129,8 @@ async function remove(item: QueueItem) {
         >
           <FastForward /> {{ $t('queue.runDue', { n: dueCount }) }}
         </Button>
-        <!-- queue a resume of an existing session (builder opens in resume mode) -->
-        <Button size="sm" variant="outline" @click="openBuilder({ new_chat: false })">
-          <Play /> {{ $t('queue.queueResume') }}
-        </Button>
-        <!-- expanding icon button, same pattern as the header's New run (DevWebUI TopBar) -->
+        <!-- expanding icon button; opens the builder (defaults to resume mode). A separate
+             "Queue resume" button used to sit here but opened this same dialog identically. -->
         <Button
           size="sm"
           class="group/newrun gap-0 overflow-hidden transition-all"

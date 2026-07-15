@@ -1,0 +1,109 @@
+<script setup lang="ts">
+// A persistent "is anything happening?" indicator for the header. Answers, at a glance and
+// without opening the queue drawer: is the scheduler on, is a run executing right now, and
+// when does the next scheduled item fire. Built for peace-of-mind ("I'm going to bed — will
+// this actually run?"). Reads the same polled data the queue uses; a 1s local tick keeps the
+// countdown live between polls.
+import { Loader2, PowerOff } from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useData } from '@/composables/useData'
+import IconTooltip from '@/shell/IconTooltip.vue'
+
+const { t } = useI18n()
+const { queue, scheduler } = useData()
+
+// Local clock so the "next in 4m 12s" text ticks every second, not only on the 2s queue poll.
+const now = ref(Date.now())
+let timer: number | undefined
+onMounted(() => {
+  timer = window.setInterval(() => {
+    now.value = Date.now()
+  }, 1000)
+})
+onBeforeUnmount(() => window.clearInterval(timer))
+
+const enabled = computed(() => !!scheduler.value?.enabled)
+const runningCount = computed(() => queue.value.filter((q) => q.status === 'running').length)
+
+const queued = computed(() => queue.value.filter((q) => q.status === 'queued'))
+// A queued item is "due" when it has no not_before or its not_before has passed.
+const dueNow = computed(
+  () => queued.value.filter((q) => !q.not_before || Date.parse(q.not_before) <= now.value).length,
+)
+// Soonest future not_before across queued items (ms), or null when nothing is scheduled ahead.
+const nextAtMs = computed<number | null>(() => {
+  const future = queued.value
+    .map((q) => (q.not_before ? Date.parse(q.not_before) : NaN))
+    .filter((ms) => Number.isFinite(ms) && ms > now.value)
+  return future.length ? Math.min(...future) : null
+})
+
+/** "5s" · "4m 12s" · "2h 05m" · "1d 3h" — compact, coarsens as it grows. */
+function humanizeUntil(ms: number): string {
+  const s = Math.max(0, Math.round((ms - now.value) / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
+  const d = Math.floor(h / 24)
+  return `${d}d ${h % 24}h`
+}
+
+// One of: off · running · dispatching (due items waiting for the next poll) · countdown · idle
+type State = 'off' | 'running' | 'dispatching' | 'countdown' | 'idle'
+const state = computed<State>(() => {
+  if (!enabled.value) return 'off'
+  if (runningCount.value > 0) return 'running'
+  if (dueNow.value > 0) return 'dispatching'
+  if (nextAtMs.value !== null) return 'countdown'
+  return 'idle'
+})
+
+const label = computed(() => {
+  switch (state.value) {
+    case 'off':
+      return t('scheduler.off')
+    case 'running':
+      return t('scheduler.running', { n: runningCount.value })
+    case 'dispatching':
+      return t('scheduler.dispatching', { n: dueNow.value })
+    case 'countdown':
+      return t('scheduler.nextIn', { time: humanizeUntil(nextAtMs.value as number) })
+    default:
+      return t('scheduler.idle')
+  }
+})
+
+const tooltip = computed(() =>
+  enabled.value ? t('scheduler.onTooltip') : t('scheduler.offTooltip'),
+)
+
+// green when actively working, dim-green when on-but-idle, amber when off so it draws the eye.
+const tone = computed(() => {
+  if (state.value === 'off') return 'text-warning'
+  if (state.value === 'idle') return 'text-success/70'
+  return 'text-success'
+})
+</script>
+
+<template>
+  <IconTooltip :label="label" :description="tooltip">
+    <span class="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs font-medium" :class="tone">
+      <Loader2 v-if="state === 'running'" class="size-3.5 animate-spin" />
+      <span
+        v-else-if="state !== 'off'"
+        class="relative flex size-2"
+      >
+        <span
+          v-if="state === 'dispatching' || state === 'countdown'"
+          class="absolute inline-flex size-full animate-ping rounded-full bg-success opacity-60"
+        />
+        <span class="relative inline-flex size-2 rounded-full bg-current" />
+      </span>
+      <PowerOff v-else class="size-3.5" />
+      <span class="hidden tabular-nums sm:inline">{{ label }}</span>
+    </span>
+  </IconTooltip>
+</template>

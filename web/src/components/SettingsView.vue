@@ -18,7 +18,6 @@ import {
   Plus,
   Power,
   RefreshCw,
-  Repeat,
   ShieldCheck,
   SlidersHorizontal,
   SunMoon,
@@ -27,7 +26,7 @@ import {
   Trash2,
   User,
 } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'
@@ -55,30 +54,32 @@ import ExpandTransition from '@/shell/ExpandTransition.vue'
 import InfoHint from '@/shell/InfoHint.vue'
 import SettingsGroup from '@/shell/SettingsGroup.vue'
 import SettingsRow from '@/shell/SettingsRow.vue'
-import SettingsTabs from '@/shell/SettingsTabs.vue'
 
 const { t } = useI18n()
 
-// The view groups its sections under three tabs so the everyday knobs come first.
-// Sections stay mounted behind v-show (SettingsTabs rule): the onMounted loaders
-// below hydrate every tab's data in one go.
-type TabId = 'general' | 'scheduler' | 'accounts'
-const tab = ref<TabId>('general')
-const tabs: { id: TabId; label: string }[] = [
-  { id: 'general', label: t('settings.tabGeneral') },
-  { id: 'scheduler', label: t('settings.tabScheduler') },
-  { id: 'accounts', label: t('settings.tabAccounts') },
-]
+// Settings is one scrolling page (the old General/Scheduler/Accounts tabs were merged —
+// owner request: Accounts didn't warrant a tab, and Scheduler folded into the rest). A
+// deep link (e.g. the composer's tomorrow-preset gear) now scrolls to a section instead of
+// switching a tab. Section anchors are keyed by the old tab ids so callers didn't change.
 const { accounts, scheduler, refreshAccounts, refreshScheduler } = useData()
 const { enabled: showTooltips } = useTooltipConfig()
 
-// Deep link from elsewhere in the app (e.g. the composer's tomorrow-preset gear): land on
-// the requested tab whether this view was already mounted or is mounting fresh, then clear
-// the one-shot request.
+const sectionEls = ref<Record<string, HTMLElement | null>>({})
+function setSectionEl(id: string, el: unknown) {
+  sectionEls.value[id] = el as { $el?: HTMLElement } | HTMLElement | null as HTMLElement | null
+}
+
 const { settingsRequestedTab } = usePanels()
 function consumeRequestedTab() {
   const req = settingsRequestedTab.value
-  if (req === 'general' || req === 'scheduler' || req === 'accounts') tab.value = req
+  if (req) {
+    // Wait a tick so the section is laid out (view may be mounting fresh), then scroll to it.
+    nextTick(() => {
+      const el = sectionEls.value[req]
+      const node = (el as { $el?: HTMLElement })?.$el ?? (el as HTMLElement | null)
+      node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
   if (req !== null) settingsRequestedTab.value = null
 }
 watch(settingsRequestedTab, consumeRequestedTab)
@@ -437,6 +438,7 @@ async function saveScheduler() {
 
 // progressive disclosure state
 const schedAdvancedOpen = ref(false)
+const monitorAdvancedOpen = ref(false)
 const addAccountOpen = ref(false)
 
 // --- auto-resume monitor ---
@@ -517,10 +519,9 @@ defineExpose({ save })
 
 <template>
   <div class="mx-auto max-w-3xl space-y-6 overflow-y-auto p-6">
-    <SettingsTabs v-model="tab" :tabs="tabs" />
+    <!-- One scrolling page (tabs merged). Sections carry a ref so a deep link
+         (composer's tomorrow gear → 'scheduler') can scroll straight to them. -->
 
-    <!-- General: appearance, updates, auto-update ─────────────────────────── -->
-    <div v-show="tab === 'general'" class="space-y-6">
     <!-- appearance -->
     <SettingsGroup :label="$t('settings.appearance')">
       <!-- theme: moved here from the app header (owner request); system mode finally
@@ -565,9 +566,32 @@ defineExpose({ save })
           <Switch :model-value="hideTrayIcon" @update:model-value="toggleHideTrayIcon" />
         </template>
       </SettingsRow>
+      <!-- which instance tables to show is an appearance choice (moved here from Usage) -->
+      <SettingsRow :icon="Monitor" :label="$t('settings.showDesktopInstancesLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.showDesktopInstancesHint')" />
+        </template>
+        <template #control>
+          <Switch
+            :model-value="showDesktopInstances"
+            @update:model-value="(v: boolean) => patchUsageSettings({ showDesktopInstances: v })"
+          />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="Terminal" :label="$t('settings.showCliInstancesLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.showCliInstancesHint')" />
+        </template>
+        <template #control>
+          <Switch
+            :model-value="showCliInstances"
+            @update:model-value="(v: boolean) => patchUsageSettings({ showCliInstances: v })"
+          />
+        </template>
+      </SettingsRow>
     </SettingsGroup>
 
-    <!-- usage: keep the quota numbers warm, and hide whichever instance table you don't use -->
+    <!-- usage: keep the quota numbers warm -->
     <SettingsGroup :label="$t('settings.usage')">
       <SettingsRow :icon="Gauge" :label="$t('settings.usageAutoRefreshLabel')">
         <template #info>
@@ -601,28 +625,6 @@ defineExpose({ save })
               {{ $t('settings.usageIntervalMinutes', { minutes: mins }) }}
             </Button>
           </div>
-        </template>
-      </SettingsRow>
-      <SettingsRow :icon="Monitor" :label="$t('settings.showDesktopInstancesLabel')">
-        <template #info>
-          <InfoHint :text="$t('settings.showDesktopInstancesHint')" />
-        </template>
-        <template #control>
-          <Switch
-            :model-value="showDesktopInstances"
-            @update:model-value="(v: boolean) => patchUsageSettings({ showDesktopInstances: v })"
-          />
-        </template>
-      </SettingsRow>
-      <SettingsRow :icon="Terminal" :label="$t('settings.showCliInstancesLabel')">
-        <template #info>
-          <InfoHint :text="$t('settings.showCliInstancesHint')" />
-        </template>
-        <template #control>
-          <Switch
-            :model-value="showCliInstances"
-            @update:model-value="(v: boolean) => patchUsageSettings({ showCliInstances: v })"
-          />
         </template>
       </SettingsRow>
     </SettingsGroup>
@@ -747,11 +749,9 @@ defineExpose({ save })
       </template>
       <p v-if="syncError" class="px-3.5 pb-2.5 text-xs text-destructive">{{ syncError }}</p>
     </SettingsGroup>
-    </div>
 
-    <!-- Scheduler: queue pacing and concurrency ───────────────────────────── -->
-    <div v-show="tab === 'scheduler'" class="space-y-6">
-    <!-- scheduler -->
+    <!-- scheduler (deep-link target: composer tomorrow gear scrolls here) -->
+    <div :ref="(el) => setSectionEl('scheduler', el)" class="scroll-mt-4">
     <SettingsGroup :label="$t('settings.scheduler')" :description="$t('settings.schedulerHint')">
       <SettingsRow :icon="Power" :label="$t('settings.schedulerEnabledLabel')">
         <template #control>
@@ -812,50 +812,71 @@ defineExpose({ save })
           />
         </template>
       </SettingsRow>
-      <SettingsRow :icon="Repeat" :label="$t('settings.monitorMaxAttemptsLabel')">
-        <template #control>
-          <Input v-model="monitorMaxAttempts" type="number" min="1" class="w-20" />
-        </template>
-      </SettingsRow>
-      <SettingsRow :icon="Timer" :label="$t('settings.monitorBufferLabel')">
-        <template #control>
-          <Input v-model="monitorResumeBufferMin" type="number" min="0" class="w-20" />
-        </template>
-      </SettingsRow>
 
-      <div v-if="monitorStatus.length === 0" class="px-3.5 py-2.5 text-xs italic text-muted-foreground">
-        {{ $t('settings.monitorEmpty') }}
-      </div>
-      <div v-else class="flex flex-col gap-2 px-3.5 py-2.5">
-        <div v-for="row in monitorStatus" :key="row.itemId" class="flex items-center gap-2 text-xs">
-          <Badge :variant="monitorStateVariant(row.state)">{{ $t(monitorStateLabelKey(row.state)) }}</Badge>
-          <span class="min-w-0 flex-1 truncate text-foreground">{{ row.title ?? row.sessionId }}</span>
-          <span v-if="row.message" class="max-w-[14rem] truncate text-muted-foreground">{{ row.message }}</span>
-          <span class="shrink-0 text-muted-foreground">
-            {{ $t('settings.monitorAttempts', { n: row.resumeAttempts }) }}
-          </span>
-        </div>
-      </div>
+      <!-- everything below only applies while the monitor is on: collapse it away when
+           it's off instead of leaving dead knobs on screen (owner request) -->
+      <ExpandTransition :open="monitorSettings?.enabled ?? false">
+        <div>
+          <!-- the tuning numbers are advanced, mirroring the Scheduler group's disclosure -->
+          <SettingsRow
+            :icon="SlidersHorizontal"
+            :label="$t('settings.advanced')"
+            clickable
+            @click="monitorAdvancedOpen = !monitorAdvancedOpen"
+          >
+            <template #control>
+              <ChevronDown
+                class="size-4 transition-transform duration-200"
+                :class="monitorAdvancedOpen ? 'rotate-180' : ''"
+              />
+            </template>
+          </SettingsRow>
+          <ExpandTransition :open="monitorAdvancedOpen">
+            <div class="grid grid-cols-2 gap-3 px-3.5 pb-3.5 pt-2.5">
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.monitorMaxAttemptsLabel') }}</label>
+                <Input v-model="monitorMaxAttempts" type="number" min="1" />
+              </div>
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.monitorBufferLabel') }}</label>
+                <Input v-model="monitorResumeBufferMin" type="number" min="0" />
+              </div>
+            </div>
+          </ExpandTransition>
 
-      <template v-if="accounts.length > 0">
-        <p class="px-3.5 pt-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          {{ $t('settings.monitorAccountOverridesLabel') }}
-        </p>
-        <SettingsRow v-for="a in accounts" :key="a.id" :label="a.label">
-          <template #control>
-            <Switch
-              :model-value="monitorAccountEnabled(a.id)"
-              @update:model-value="(v: boolean) => toggleMonitorAccount(a.id, v)"
-            />
+          <div v-if="monitorStatus.length === 0" class="px-3.5 py-2.5 text-xs italic text-muted-foreground">
+            {{ $t('settings.monitorEmpty') }}
+          </div>
+          <div v-else class="flex flex-col gap-2 px-3.5 py-2.5">
+            <div v-for="row in monitorStatus" :key="row.itemId" class="flex items-center gap-2 text-xs">
+              <Badge :variant="monitorStateVariant(row.state)">{{ $t(monitorStateLabelKey(row.state)) }}</Badge>
+              <span class="min-w-0 flex-1 truncate text-foreground">{{ row.title ?? row.sessionId }}</span>
+              <span v-if="row.message" class="max-w-[14rem] truncate text-muted-foreground">{{ row.message }}</span>
+              <span class="shrink-0 text-muted-foreground">
+                {{ $t('settings.monitorAttempts', { n: row.resumeAttempts }) }}
+              </span>
+            </div>
+          </div>
+
+          <template v-if="accounts.length > 0">
+            <p class="px-3.5 pt-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              {{ $t('settings.monitorAccountOverridesLabel') }}
+            </p>
+            <SettingsRow v-for="a in accounts" :key="a.id" :label="a.label">
+              <template #control>
+                <Switch
+                  :model-value="monitorAccountEnabled(a.id)"
+                  @update:model-value="(v: boolean) => toggleMonitorAccount(a.id, v)"
+                />
+              </template>
+            </SettingsRow>
           </template>
-        </SettingsRow>
-      </template>
+        </div>
+      </ExpandTransition>
     </SettingsGroup>
     </div>
 
-    <!-- Accounts: Claude accounts the instances run under ─────────────────── -->
-    <div v-show="tab === 'accounts'" class="space-y-6">
-    <!-- accounts -->
+    <!-- accounts (kept, but no longer its own tab) -->
     <SettingsGroup :label="$t('settings.accounts')" :description="$t('settings.accountsIntro')">
       <SettingsRow
         v-for="a in accounts"
@@ -927,6 +948,5 @@ defineExpose({ save })
         </div>
       </ExpandTransition>
     </SettingsGroup>
-    </div>
   </div>
 </template>

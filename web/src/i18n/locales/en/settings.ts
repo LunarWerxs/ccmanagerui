@@ -111,7 +111,8 @@ export default {
   monitorEnabledLabel: 'Enabled',
   monitorMaxAttemptsLabel: 'Max resume attempts',
   monitorBufferLabel: 'Resume buffer (min)',
-  monitorEmpty: 'No sessions being monitored.',
+  monitorEmpty:
+    'Nothing to resume right now. A run only appears here after it stops on a rate limit — the monitor then tracks it until the window resets and resumes it. An empty list means no runs are currently waiting on a limit, not that monitoring is off.',
   monitorAttempts: '{n} attempts',
   monitorStateScheduled: 'Scheduled',
   monitorStateBlockedWeekly: 'Blocked (weekly limit)',

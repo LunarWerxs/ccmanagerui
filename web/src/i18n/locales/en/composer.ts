@@ -18,6 +18,7 @@ export default {
   editTomorrowTime: 'Change this time (Settings → Scheduler)',
   schedulePickLabel: 'Or pick a date & time',
   scheduleConfirm: 'Queue for then',
+  clearOption: 'Default',
   chipModel: 'Model',
   chipEffort: 'Effort',
   chipPermission: 'Permissions',

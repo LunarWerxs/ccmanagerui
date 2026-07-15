@@ -5,9 +5,12 @@ export default {
     'effort, permission mode, and account. Press Run to dispatch an item on demand, or enable ' +
     'the scheduler in Settings to work through the queue automatically with concurrency and ' +
     'spacing limits. Nothing runs by itself while the scheduler is off.',
-  schedulerOn: 'Scheduler on',
+  schedulerOnLabel: 'Scheduler on',
+  schedulerOffLabel: 'Scheduler off',
+  schedulerOnHint: 'Queued items dispatch automatically. Toggle it in Settings → Scheduler.',
+  schedulerOffHint:
+    'Nothing runs by itself. Press Run on an item, or enable the scheduler in Settings.',
   newRun: 'New run',
-  queueResume: 'Queue resume',
   itemsCount: '{n} item(s)',
   edit: 'Edit',
   scheduledFor: 'runs {time}',

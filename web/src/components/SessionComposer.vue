@@ -226,6 +226,7 @@ function onKeydown(e: KeyboardEvent) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuRadioGroup v-model="model">
+                <DropdownMenuRadioItem value="">{{ $t('composer.clearOption') }}</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem v-for="o in MODELS" :key="o.value" :value="o.value">
                   {{ o.label }}
                 </DropdownMenuRadioItem>
@@ -241,6 +242,7 @@ function onKeydown(e: KeyboardEvent) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuRadioGroup v-model="effort">
+                <DropdownMenuRadioItem value="">{{ $t('composer.clearOption') }}</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem v-for="o in EFFORTS" :key="o.value" :value="o.value">
                   {{ o.label }}
                 </DropdownMenuRadioItem>
@@ -256,6 +258,7 @@ function onKeydown(e: KeyboardEvent) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
               <DropdownMenuRadioGroup v-model="permission">
+                <DropdownMenuRadioItem value="">{{ $t('composer.clearOption') }}</DropdownMenuRadioItem>
                 <DropdownMenuRadioItem v-for="o in PERMISSION_MODES" :key="o.value" :value="o.value">
                   {{ o.label }}
                 </DropdownMenuRadioItem>

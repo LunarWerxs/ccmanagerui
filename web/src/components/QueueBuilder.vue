@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { GitFork, Pencil, Plus, Sparkles } from '@lucide/vue'
+import { ChevronDown, GitFork, Pencil, Plus, Sparkles } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import SessionPicker from '@/components/SessionPicker.vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -24,6 +25,8 @@ import { useBuilder } from '@/composables/useBuilder'
 import { useData } from '@/composables/useData'
 import * as api from '@/lib/api'
 import { EFFORTS, MODELS, PERMISSION_MODES } from '@/lib/format'
+import ExpandTransition from '@/shell/ExpandTransition.vue'
+import InfoHint from '@/shell/InfoHint.vue'
 
 // open/prefill/editItem are module-scope state in useBuilder — any view can launch
 // the dialog (header "New run", session resume, queue card Edit) without prop plumbing.
@@ -31,11 +34,11 @@ const { open, prefill, editItem } = useBuilder()
 const emit = defineEmits<{ created: [] }>()
 
 const { t } = useI18n()
-const { accounts, refreshQueue } = useData()
+const { accounts, sessions, refreshQueue } = useData()
 
 const form = reactive({
   new_chat: false,
-  session_id: '',
+  session_ids: [] as string[],
   title: '',
   cwd: '',
   prompt: '',
@@ -48,8 +51,13 @@ const form = reactive({
 })
 const submitting = ref(false)
 const error = ref<string | null>(null)
+const advancedOpen = ref(false)
 
 const editing = computed(() => !!editItem.value)
+// Multi-select resume is a create-only convenience: editing acts on one existing item.
+const multiSession = computed(() => !editing.value && !form.new_chat)
+
+const byId = computed(() => new Map(sessions.value.map((s) => [s.session_id, s])))
 
 /** ISO (UTC) → the local wall-clock string a datetime-local input expects. */
 function toLocalInput(iso: string | null): string {
@@ -64,10 +72,11 @@ function toLocalInput(iso: string | null): string {
 watch([open, editItem], ([isOpen]) => {
   if (!isOpen) return
   error.value = null
+  advancedOpen.value = false
   const it = editItem.value
   if (it) {
     form.new_chat = it.new_chat
-    form.session_id = it.session_id
+    form.session_ids = it.session_id ? [it.session_id] : []
     form.title = it.title
     form.cwd = it.cwd
     form.prompt = it.prompt
@@ -81,7 +90,7 @@ watch([open, editItem], ([isOpen]) => {
   }
   const p = prefill.value ?? {}
   form.new_chat = p.new_chat ?? false
-  form.session_id = p.session_id ?? ''
+  form.session_ids = p.session_id ? [p.session_id] : []
   form.title = p.title ?? ''
   form.cwd = p.cwd ?? ''
   form.prompt = form.new_chat ? '' : 'resume'
@@ -101,35 +110,69 @@ const accountOptions = computed(() => [
   })),
 ])
 
-const canSubmit = computed(
-  () =>
-    form.title.trim() &&
-    form.cwd.trim() &&
-    form.prompt.trim() &&
-    (form.new_chat || form.session_id.trim()),
-)
+const canSubmit = computed(() => {
+  if (!form.prompt.trim()) return false
+  if (form.new_chat) return !!form.title.trim() && !!form.cwd.trim()
+  return form.session_ids.length > 0
+})
+
+/** For a resume item, fall back to the picked session's own title/cwd when not overridden. */
+function resolveTitleCwd(sessionId: string): { title: string; cwd: string } {
+  const s = byId.value.get(sessionId)
+  // In single-select the override fields apply; in multi each session keeps its own.
+  const singleOverride = form.session_ids.length === 1
+  return {
+    title: (singleOverride && form.title.trim()) || s?.title || t('builder.untitledRun'),
+    cwd: (singleOverride && form.cwd.trim()) || s?.cwd || '',
+  }
+}
 
 async function submit() {
   if (!canSubmit.value || submitting.value) return
   submitting.value = true
   error.value = null
   const not_before = form.not_before_local ? new Date(form.not_before_local).toISOString() : null
+  const shared = {
+    prompt: form.prompt,
+    model: form.model || null,
+    effort: (form.effort || null) as api.EffortLevel | null,
+    permission_mode: (form.permission_mode || null) as api.PermissionMode | null,
+    account_id: form.account_id || null,
+    not_before,
+  }
   try {
-    const body = {
-      session_id: form.session_id.trim() || undefined,
-      title: form.title.trim(),
-      cwd: form.cwd.trim(),
-      prompt: form.prompt,
-      model: form.model || null,
-      effort: (form.effort || null) as api.EffortLevel | null,
-      permission_mode: (form.permission_mode || null) as api.PermissionMode | null,
-      account_id: form.account_id || null,
-      new_chat: form.new_chat,
-      fork: form.fork,
-      not_before,
+    if (editItem.value) {
+      await api.updateQueueItem(editItem.value.id, {
+        ...shared,
+        session_id: form.session_ids[0] || undefined,
+        title: form.title.trim() || t('builder.untitledRun'),
+        cwd: form.cwd.trim(),
+        new_chat: form.new_chat,
+        fork: form.fork,
+      })
+    } else if (form.new_chat) {
+      await api.createQueueItem({
+        ...shared,
+        session_id: undefined,
+        title: form.title.trim(),
+        cwd: form.cwd.trim(),
+        new_chat: true,
+        fork: false,
+      })
+    } else {
+      // resume: one queued run per selected session, each using its own title/cwd
+      for (const id of form.session_ids) {
+        const { title, cwd } = resolveTitleCwd(id)
+        await api.createQueueItem({
+          ...shared,
+          session_id: id,
+          title,
+          cwd,
+          new_chat: false,
+          fork: form.fork,
+        })
+      }
     }
-    if (editItem.value) await api.updateQueueItem(editItem.value.id, body)
-    else await api.createQueueItem(body)
     await refreshQueue()
     emit('created')
     open.value = false
@@ -149,24 +192,28 @@ async function submit() {
       </DialogHeader>
 
       <div class="space-y-4">
-        <!-- mode toggle -->
-        <div class="flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+        <!-- mode toggle: create-only. Editing an existing item never converts it to/from
+             a from-scratch run, so the switch is hidden there (owner request). -->
+        <div
+          v-if="!editing"
+          class="flex items-center gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5"
+        >
           <Sparkles class="size-4 text-primary" />
           <div class="flex-1">
             <div class="text-sm font-medium">{{ $t('builder.newChatTitle') }}</div>
-            <div class="text-xs text-muted-foreground">
-              {{ $t('builder.newChatHelper') }}
-            </div>
+            <div class="text-xs text-muted-foreground">{{ $t('builder.newChatHelper') }}</div>
           </div>
           <Switch v-model="form.new_chat" />
         </div>
 
+        <!-- resume: searchable session picker (multi in create, single in edit) -->
         <div v-if="!form.new_chat" class="space-y-1.5">
           <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.sessionToResumeLabel') }}</label>
-          <Input v-model="form.session_id" :placeholder="$t('builder.sessionToResumePlaceholder')" class="font-mono text-xs" />
+          <SessionPicker v-model="form.session_ids" :multiple="multiSession" />
         </div>
 
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <!-- new chat: title + cwd are the core inputs -->
+        <div v-if="form.new_chat" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div class="space-y-1.5">
             <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.titleLabel') }}</label>
             <Input v-model="form.title" :placeholder="$t('builder.titlePlaceholder')" />
@@ -179,60 +226,93 @@ async function submit() {
 
         <div class="space-y-1.5">
           <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.promptLabel') }}</label>
-          <Textarea v-model="form.prompt" :rows="4" :placeholder="$t('builder.promptPlaceholder')" />
+          <Textarea v-model="form.prompt" class="max-h-56 min-h-24" :placeholder="$t('builder.promptPlaceholder')" />
         </div>
 
-        <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.modelLabel') }}</label>
-            <Select v-model="form.model">
-              <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="o in MODELS" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.effortLabel') }}</label>
-            <Select v-model="form.effort">
-              <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="o in EFFORTS" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.permissionLabel') }}</label>
-            <Select v-model="form.permission_mode">
-              <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="o in PERMISSION_MODES" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+        <!-- Account stays in the core view (not Advanced): it's the "which login this run uses"
+             choice and people want it up front. "Default" = whatever the CLI is already signed
+             into; specific accounts are added in Settings → Accounts. -->
+        <div class="space-y-1.5">
+          <label class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            {{ $t('builder.accountLabel') }}
+            <InfoHint :text="$t('builder.accountHint')" />
+          </label>
+          <Select v-model="form.account_id">
+            <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.accountAmbient')" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="o in accountOptions" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
 
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.accountLabel') }}</label>
-            <Select v-model="form.account_id">
-              <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem v-for="o in accountOptions" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div class="space-y-1.5">
-            <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.runAtLabel') }}</label>
-            <Input v-model="form.not_before_local" type="datetime-local" class="text-xs" :title="$t('builder.runAtHint')" />
-          </div>
-        </div>
+        <!-- everything else is advanced: hidden by default so the common path stays short -->
+        <button
+          type="button"
+          class="flex w-full items-center justify-between rounded-md px-1 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+          @click="advancedOpen = !advancedOpen"
+        >
+          {{ $t('builder.advancedOptions') }}
+          <ChevronDown class="size-4 transition-transform duration-200" :class="advancedOpen ? 'rotate-180' : ''" />
+        </button>
+        <ExpandTransition :open="advancedOpen">
+          <div class="space-y-4 pt-1">
+            <!-- resume: optional title/cwd overrides (single select only) -->
+            <div v-if="!form.new_chat && form.session_ids.length === 1" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.titleOverrideLabel') }}</label>
+                <Input v-model="form.title" :placeholder="$t('builder.titleOverridePlaceholder')" />
+              </div>
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.cwdOverrideLabel') }}</label>
+                <Input v-model="form.cwd" :placeholder="$t('builder.cwdOverridePlaceholder')" class="font-mono text-xs" />
+              </div>
+            </div>
 
-        <label v-if="!form.new_chat" class="flex cursor-pointer items-center gap-2.5 text-sm">
-          <Switch v-model="form.fork" />
-          <GitFork class="size-4 text-muted-foreground" />
-          {{ $t('builder.forkLabel') }}
-        </label>
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.modelLabel') }}</label>
+                <Select v-model="form.model">
+                  <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">{{ $t('builder.defaultPlaceholder') }}</SelectItem>
+                    <SelectItem v-for="o in MODELS" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.effortLabel') }}</label>
+                <Select v-model="form.effort">
+                  <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">{{ $t('builder.defaultPlaceholder') }}</SelectItem>
+                    <SelectItem v-for="o in EFFORTS" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="space-y-1.5">
+                <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.permissionLabel') }}</label>
+                <Select v-model="form.permission_mode">
+                  <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.defaultPlaceholder')" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">{{ $t('builder.defaultPlaceholder') }}</SelectItem>
+                    <SelectItem v-for="o in PERMISSION_MODES" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div class="space-y-1.5">
+              <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.runAtLabel') }}</label>
+              <Input v-model="form.not_before_local" type="datetime-local" class="text-xs" :title="$t('builder.runAtHint')" />
+            </div>
+
+            <label v-if="!form.new_chat" class="flex cursor-pointer items-center gap-2.5 text-sm">
+              <Switch v-model="form.fork" />
+              <GitFork class="size-4 text-muted-foreground" />
+              {{ $t('builder.forkLabel') }}
+            </label>
+          </div>
+        </ExpandTransition>
 
         <p v-if="error" class="text-xs text-destructive">{{ error }}</p>
       </div>

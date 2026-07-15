@@ -6,6 +6,7 @@ import { toast } from 'vue-sonner'
 import InstancesView from '@/components/InstancesView.vue'
 import QueueBuilder from '@/components/QueueBuilder.vue'
 import QueueView from '@/components/QueueView.vue'
+import SchedulerStatus from '@/components/SchedulerStatus.vue'
 import SessionsView from '@/components/SessionsView.vue'
 import SettingsView from '@/components/SettingsView.vue'
 import { Button } from '@/components/ui/button'
@@ -122,6 +123,8 @@ onMounted(handleConnectRedirect)
       </nav>
 
       <div class="ml-auto flex items-center gap-2">
+        <!-- always-on "is it working?" indicator: scheduler state + live run / next-run -->
+        <SchedulerStatus />
         <!-- New run lives inside the queue drawer's toolbar (QueueView) now, so the header
              carries just the queue toggle + settings. -->
         <!-- queue drawer toggle: stays available on every view. Brand-purple (primary)

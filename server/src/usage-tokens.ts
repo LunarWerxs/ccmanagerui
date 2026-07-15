@@ -106,7 +106,7 @@ export function sumTranscriptTokens(text: string, sinceMs: number): TokenSpend {
     turns: 0,
   }
   for (const line of text.split('\n')) {
-    if (!line || line.charCodeAt(0) !== 123 /* '{' */) continue
+    if (line?.charCodeAt(0) !== 123 /* '{' */) continue
     // Cheap pre-filter: skip the ~90% of lines that cannot contribute, before paying for JSON.parse.
     if (!line.includes('"usage"')) continue
 

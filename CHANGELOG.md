@@ -6,6 +6,32 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **Queuing a run resumes a session from a searchable list instead of a pasted UUID.** The run
+  builder's "session to resume" field is now a searchable picker over the same session list the
+  sidebar shows (sorted most-recently-active first), each row carrying the friendly title, its
+  folder/branch/last-activity, and the opaque id tucked to the side (click it to copy). It supports
+  multi-select: pick several sessions and one queued run is created per session, sharing the same
+  prompt and options. A new `SessionPicker.vue` backs it.
+- **The run builder leads with three fields, not thirteen.** Model, effort, permission, account,
+  run-at, fork, and the resume title/folder overrides now live behind an "Advanced options"
+  disclosure; the common path is just the session (or new-chat title + folder) and the prompt. The
+  "New chat from scratch" toggle is hidden when editing an existing item (editing never converts a
+  run's kind). Long prompts no longer push the dialog off-screen — the prompt box caps its height and
+  every dialog now scrolls instead of overflowing the viewport.
+- **Settings is one scrolling page.** The General / Scheduler / Accounts tabs were merged: Accounts
+  is now a section rather than a tab, and Scheduler folds in with everything else. "Show desktop /
+  CLI instances" moved from Usage to Appearance (it's a display choice). The auto-resume monitor's
+  tuning numbers (max attempts, resume buffer) moved behind an Advanced disclosure and, along with
+  the monitored-runs list and per-account overrides, collapse away entirely when the monitor is off.
+  The monitor's empty state now explains that a run only appears there after it stops on a rate limit
+  (an empty list doesn't mean monitoring is off). A deep link (the composer's "tomorrow" gear) now
+  scrolls to the Scheduler section instead of switching a tab.
+- **The queue toolbar's scheduler indicator is an icon with a hover, not a text pill**, and shows
+  both on and off states at a glance. The redundant "Queue resume" button was removed — "New run"
+  already opens the builder in resume mode.
+
 ### Added
 
 - **A quota percentage is now quantified into something you can plan with.** "98% used" is not a
