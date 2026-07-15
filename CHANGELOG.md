@@ -106,6 +106,42 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Changed
 
+- **An instance is named after the account it is signed into, not the folder it lives in.** The
+  folder name was only ever a guess at the identity, and it stops being true the moment a profile is
+  signed into an account other than the one it was named after — nothing prevents that drift and
+  nothing corrects it. On the machine this was built against, the folder called `claude` was signed
+  into `6claude@lunarwerx.com` and had been reading as "claude" the whole time, while two other
+  instances had been hand-relabelled to their accounts precisely to paper over the same problem. So
+  the resolved account's name (its profile name, else the local part of its email) is now the
+  default, ahead of the folder name; an explicit label you set still wins over both, and the folder
+  name remains the last resort for an instance with no resolved identity. The dir is still shown
+  under each name, so two profiles on one account stay distinguishable. `SessionsView` reads the
+  same shared instance list rather than fetching its own, so a session's instance chip and the
+  Instances table can no longer disagree about what the same instance is called.
+- **Accounts resolve themselves; the "Resolve" button is gone.** Resolving reads `config.json` and
+  the token cache off disk, so a stopped instance resolves exactly as well as a running one — but
+  auto-resolution was gated on `isRunning`, which meant a stopped instance sat there offering a
+  button that would have worked on the first click, every time. That is a chore, not a choice. Every
+  instance now resolves on its own, running or not, and an instance with no identity yet (logged
+  out, offline) is retried once a minute so signing one in surfaces without a restart. The inline
+  button and its ⋮ entry are both removed; the toolbar's Refresh now force-re-resolves every account
+  live, which is the only case a manual action was ever good for (a stale cached identity). Resolving
+  no longer marks the row busy — it changes nothing about the instance, and flagging it made the
+  row's buttons flicker un-clickable whenever a background resolve was in flight.
+- **The Instances table's quota numbers stay current while you watch them.** The background sweep
+  refreshes the server's usage cache every 15 minutes, but the UI only ever pulled that cache once,
+  on mount — so an open Instances tab kept showing its first reading and went quietly stale for as
+  long as you left it open. It now pulls on the same 4-second cycle the instance list already
+  refreshes on, measured firing in lockstep with it. This is a read of the server's own cache: no
+  probe, no `claude`, no request to Anthropic, and no quota spent — so there was no reason to do it
+  once and hope. The "Refresh all usage" tooltip no longer claims each check "spawns a real claude
+  process", which stopped being true when checks became a direct ~300ms API read.
+- **Fewer rules on the Instances screen.** The two tables abutted, separated only by a hairline
+  sitting flush against the desktop table's last row, which read as one continuous table whose last
+  rows happened to have different columns. They are now separated by space instead, and both section
+  toolbars lost their bottom border — the sticky table header immediately below each one already
+  draws that line, so the second rule was weight for nothing. This matches Sessions, Queue, and the
+  app header, which were borderless already. The row separators stay; they are the ones doing work.
 - **Renaming an instance is now instant and works while it is running.** A rename used to move the
   instance's on-disk profile folder, which Windows will not allow while Claude Desktop holds it open.
   The name is now a display label kept as UI metadata (`~/.ccmanagerui/instance-meta.json`, never a

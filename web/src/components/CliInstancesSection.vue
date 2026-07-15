@@ -305,8 +305,12 @@ onUnmounted(stopPolling)
 </script>
 
 <template>
-  <div class="border-t border-border">
-    <div class="flex flex-wrap items-center justify-between gap-2 border-b border-border p-3">
+  <!-- No border-t: the parent (InstancesView) separates its two tables with space instead. That
+       hairline sat flush against the desktop table's last row, so the two tables read as one. -->
+  <div>
+    <!-- Borderless toolbar, same as the Instances one above it — the table header below draws the
+         only line this heading needs. -->
+    <div class="flex flex-wrap items-center justify-between gap-2 p-3">
       <div class="flex items-center gap-2 text-sm font-semibold">
         <Terminal class="size-4" />
         {{ $t('cliInstances.title') }}

@@ -23,6 +23,7 @@ import {
   Zap,
 } from '@lucide/vue'
 import {
+  type CMAccount,
   type CMInstance,
   INSTANCE_COLOR_KEYS,
   INSTANCE_ICON_KEYS,
@@ -104,9 +105,27 @@ export function colorValue(key: InstanceColorKey): string {
   return COLOR_VALUES[key]
 }
 
-/** The name to show for an instance: the user's display label, else the folder name. */
-export function displayName(inst: Pick<CMInstance, 'name' | 'label'>): string {
-  return inst.label?.trim() || inst.name
+/** The short human name of a resolved account: the profile's full name, else the local part of
+ *  its email ("4claude" out of "4claude@lunarwerx.com"). Null when nothing is resolved yet, or
+ *  the instance is logged out — both leave name/email null, so no status check is needed. */
+export function accountName(account: CMAccount | null | undefined): string | null {
+  const name = account?.name?.trim()
+  if (name) return name
+  const localPart = account?.email?.trim().split('@')[0]?.trim()
+  return localPart || null
+}
+
+/** The name to show for an instance: the user's own label, else the ACCOUNT it is signed into,
+ *  else the folder name.
+ *
+ *  The account comes before the folder because the folder name is a lie the moment you sign a
+ *  profile into a different account than the one you named it after — and nothing stops that
+ *  drift or corrects it later. The account is what the instance actually IS, so it is the right
+ *  default; the folder name survives only as the last resort for an instance that has no
+ *  resolved identity at all. Two profiles on the same account will share a name — the dir shown
+ *  beneath it is what tells them apart. */
+export function displayName(inst: Pick<CMInstance, 'name' | 'label' | 'account'>): string {
+  return inst.label?.trim() || accountName(inst.account) || inst.name
 }
 
 export type { InstanceColorKey, InstanceIconKey }

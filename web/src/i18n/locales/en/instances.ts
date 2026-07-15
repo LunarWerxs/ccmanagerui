@@ -18,9 +18,8 @@ export default {
   running: 'Running',
   stopped: 'Stopped',
   external: 'External',
-  loggedOut: 'Logged out',
-  unresolved: 'Unresolved',
-  resolve: 'Resolve',
+  // Shown while an instance's account is still being worked out. There is no "Resolve" action
+  // anymore — every instance resolves itself — so this is the whole of the unresolved state.
   resolving: 'Resolving…',
   open: 'Open',
   quit: 'Quit',
@@ -44,7 +43,8 @@ export default {
   toastCliUnlinked: 'Unlinked. It is back in the CLI instances table below.',
   toastCliUnlinkFailed: 'Failed to unlink the CLI instance.',
   refreshAllUsage: 'Refresh all usage',
-  refreshAllUsageHint: 'Checks every instance at once (each spawns a real claude process).',
+  refreshAllUsageHint:
+    'Re-check every instance now. Reading your quota does not use any of it, and takes about a third of a second per instance.',
   usageNotChecked: 'Not checked yet.',
   usageReasonLoggedOut:
     'Not signed in. Open this instance and sign in to Claude, then check again.',
@@ -105,8 +105,6 @@ export default {
   toastCreateFailed: 'Failed to create instance.',
   toastDeleted: 'Instance deleted.',
   toastDeleteFailed: 'Failed to delete instance.',
-  toastResolved: 'Account resolved.',
-  toastResolveFailed: 'Failed to resolve account.',
   toastSaved: 'Changes saved.',
   toastSaveFailed: 'Failed to save changes.',
   toastShortcutCreated: 'Desktop shortcut created.',

@@ -11,9 +11,14 @@ const loading = ref(false)
 const resolvingAccounts = ref(false)
 const busyDirs = ref<Set<string>>(new Set())
 const lastError = ref<string | null>(null)
-// Dirs whose account resolution has already been auto-triggered this session, so a
-// persistently-unresolvable instance (e.g. logged out) isn't re-hit on every 4s poll tick.
-const autoResolveAttempted = new Set<string>()
+// When each dir was last auto-resolved, so a poll tick doesn't re-hit one every 4 seconds.
+// See autoResolveAccounts() for what actually gets retried and why.
+const lastAutoResolveAt = new Map<string, number>()
+/** How long before an instance with NO identity yet (logged out, offline, unreadable) is retried.
+ *  Short, because the thing that changes it — signing the profile in — is something the user does
+ *  in the next minute and then looks straight at this table to confirm. A retry is a local file
+ *  read that finds no token and gives up, so this is close to free. */
+const UNRESOLVED_RETRY_MS = 60_000
 
 function guard<T>(p: Promise<T>): Promise<T | undefined> {
   return p.catch((e) => {
@@ -42,8 +47,9 @@ function upsert(next: CMInstance) {
 
 /** Reload the instance list. `silent` (used by the 4s background poll) skips the `loading`
  *  toggle so the toolbar Refresh icon only spins on a first load or a user-initiated refresh —
- *  not every poll tick, which reads as a distracting constant spinner. */
-async function refreshInstances(opts: { silent?: boolean } = {}) {
+ *  not every poll tick, which reads as a distracting constant spinner. `force` re-resolves every
+ *  account from scratch (the toolbar Refresh button), rather than only the ones still unknown. */
+async function refreshInstances(opts: { silent?: boolean; force?: boolean } = {}) {
   if (!opts.silent) loading.value = true
   const r = await guard(api.listInstances())
   if (r) {
@@ -55,24 +61,39 @@ async function refreshInstances(opts: { silent?: boolean } = {}) {
     )
   }
   if (!opts.silent) loading.value = false
-  void autoResolveUnresolvedAccounts()
+  void autoResolveAccounts({ force: opts.force })
 }
 
-/** Auto-triggers account resolution for running instances that don't have one yet. Runs
- *  silently (no toasts) on every load/poll tick, but only ever attempts a given dir once per
- *  app session so a persistently-unresolvable instance (logged out, offline) isn't retried
- *  every 4s forever. The manual per-row "Resolve" action bypasses this guard entirely. */
-async function autoResolveUnresolvedAccounts(): Promise<void> {
+/**
+ * Resolve the account identity of every instance that doesn't have one yet. Silent (no toasts,
+ * and no busy flag — see resolveAccount), driven off every list load and poll tick.
+ *
+ * There is no manual "Resolve" action anymore, and nothing here is limited to RUNNING instances:
+ * resolving reads config.json and the token cache straight off disk (see core/accounts.ts), so a
+ * stopped instance resolves exactly as well as a running one. Gating it on `isRunning` only meant
+ * a stopped instance sat there showing a button that resolved it on the first click, every time —
+ * which is a chore, not a choice.
+ *
+ * What gets retried: an instance with NO identity (logged out / offline / unreadable) is re-tried
+ * every UNRESOLVED_RETRY_MS, so signing one in shows up on its own. A resolved identity is left
+ * alone until the user hits Refresh (`force`), which re-resolves everything live.
+ */
+async function autoResolveAccounts(opts: { force?: boolean } = {}): Promise<void> {
   if (resolvingAccounts.value) return
-  const unresolved = instances.value.filter(
-    (i) => i.isRunning && i.account == null && !autoResolveAttempted.has(i.dir),
-  )
-  if (unresolved.length === 0) return
+  const now = Date.now()
+  const stale = instances.value.filter((i) => {
+    if (opts.force) return true
+    // Identity known — nothing to chase.
+    if (i.account?.email || i.account?.name) return false
+    const last = lastAutoResolveAt.get(i.dir)
+    return last === undefined || now - last >= UNRESOLVED_RETRY_MS
+  })
+  if (stale.length === 0) return
 
   resolvingAccounts.value = true
   try {
-    for (const inst of unresolved) {
-      autoResolveAttempted.add(inst.dir)
+    for (const inst of stale) {
+      lastAutoResolveAt.set(inst.dir, Date.now())
       await resolveAccount(inst.dir)
     }
   } finally {
@@ -190,18 +211,19 @@ async function setAppearance(
   }
 }
 
-/** Resolve (or re-resolve) the account identity for one instance and merge it in. */
+/** Resolve (or re-resolve) the account identity for one instance and merge it in.
+ *
+ *  Deliberately does NOT set the row busy: this runs unattended now (see autoResolveAccounts),
+ *  and busy disables the row's buttons — so flagging it would make Open/Focus flicker
+ *  un-clickable every time a background resolve happened to be in flight. Resolving reads a file
+ *  and asks Anthropic who this token belongs to; it changes nothing about the instance, so there
+ *  is nothing for a busy flag to protect. */
 async function resolveAccount(dir: string, noNetwork = false): Promise<boolean> {
-  setBusy(dir, true)
-  try {
-    const account = await guard(api.getInstanceAccount(dir, { noNetwork }))
-    if (account === undefined) return false
-    const existing = instances.value.find((i) => i.dir === dir)
-    if (existing) upsert({ ...existing, account })
-    return true
-  } finally {
-    setBusy(dir, false)
-  }
+  const account = await guard(api.getInstanceAccount(dir, { noNetwork }))
+  if (account === undefined) return false
+  const existing = instances.value.find((i) => i.dir === dir)
+  if (existing) upsert({ ...existing, account })
+  return true
 }
 
 export function useInstances() {

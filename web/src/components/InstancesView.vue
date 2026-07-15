@@ -84,12 +84,18 @@ const {
   create,
   remove,
   setAppearance,
-  resolveAccount,
 } = useInstances()
 
 const { t } = useI18n()
 const { enabled: tooltipsEnabled } = useTooltipConfig()
-const { snapshotFor, isChecking, checkDesktop, hydrate, reasonFor } = useUsage()
+const {
+  snapshotFor,
+  isChecking,
+  checkDesktop,
+  reasonFor,
+  startPolling: startUsagePolling,
+  stopPolling: stopUsagePolling,
+} = useUsage()
 
 const usageKeyFor = (inst: CMInstance) => `desktop:${inst.dir}`
 const usageFor = (inst: CMInstance) => snapshotFor(usageKeyFor(inst))
@@ -153,7 +159,9 @@ function accountBadgeVariant(inst: CMInstance) {
 async function handleRefresh() {
   // fresh: bypass the server's 5-minute detection cache so installing the classic build and
   // hitting Refresh actually clears the warning banner below.
-  await Promise.all([refreshInstances(), refreshDesktopInstall(true)])
+  // force: re-resolve every account live. Accounts resolve themselves now, so this button is the
+  // one way left to say "that identity is stale, go ask again" (e.g. after a plan upgrade).
+  await Promise.all([refreshInstances({ force: true }), refreshDesktopInstall(true)])
 }
 
 async function onCheckUsage(inst: CMInstance) {
@@ -238,11 +246,6 @@ async function onQuit(inst: CMInstance) {
   const ok = await quit(inst.dir)
   if (ok) toast.success(t('instances.toastQuit'))
   else toast.error(t('instances.toastQuitFailed'))
-}
-async function onResolve(inst: CMInstance) {
-  const ok = await resolveAccount(inst.dir)
-  if (ok) toast.success(t('instances.toastResolved'))
-  else toast.error(t('instances.toastResolveFailed'))
 }
 async function onFocus(inst: CMInstance) {
   if (!inst.isRunning || isBusy(inst)) return
@@ -361,15 +364,21 @@ async function refreshDesktopInstall(fresh = false) {
 
 onMounted(() => {
   startPolling()
+  startUsagePolling()
   refreshDesktopInstall()
-  hydrate()
 })
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  stopUsagePolling()
+})
 </script>
 
 <template>
   <div class="flex h-full flex-col">
-    <div class="flex flex-wrap items-center justify-between gap-2 border-b border-border p-3">
+    <!-- Borderless toolbar, matching Sessions/Queue and the app header (App.vue): the sticky table
+         header right below already draws a line there, and two rules a row apart was one of them
+         doing nothing but adding weight. -->
+    <div class="flex flex-wrap items-center justify-between gap-2 p-3">
       <div class="flex items-center gap-2 text-sm font-semibold">
         <Boxes class="size-4" />
         {{ $t('instances.title') }}
@@ -436,7 +445,10 @@ onUnmounted(stopPolling)
       </div>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto scroll-slim">
+    <!-- gap-10, not a divider: the two tables used to abut with a hairline between them, which read
+         as one continuous table whose last rows happened to have different columns. A flex gap only
+         applies BETWEEN children, so hiding either table leaves no orphan space behind it. -->
+    <div class="flex min-h-0 flex-1 flex-col gap-10 overflow-y-auto scroll-slim">
       <!-- Both tables are hideable (Settings → General): plenty of people use only the desktop app,
            or only the CLI, and shouldn't have to look at an empty table for the other. -->
       <Table v-if="showDesktopInstances">
@@ -603,21 +615,16 @@ onUnmounted(stopPolling)
               </div>
             </TableCell>
             <TableCell>
+              <!-- No "Resolve" button: every instance resolves itself (see
+                   useInstances.autoResolveAccounts), so a missing account is a moment, not a
+                   state you act on. A logged-out instance still lands here as a badge — its
+                   account.label reads "(not logged in)". -->
               <Badge v-if="accountLabel(inst)" :variant="accountBadgeVariant(inst)">
                 {{ accountLabel(inst) }}
               </Badge>
-              <Badge v-else-if="inst.account?.status === 'loggedout'" variant="outline">
-                {{ $t('instances.loggedOut') }}
-              </Badge>
-              <Button
-                v-else
-                variant="ghost"
-                size="xs"
-                :disabled="isBusy(inst)"
-                @click="onResolve(inst)"
-              >
-                {{ $t('instances.resolve') }}
-              </Button>
+              <span v-else class="text-xs text-muted-foreground">
+                {{ $t('instances.resolving') }}
+              </span>
             </TableCell>
             <TableCell class="mono text-xs text-muted-foreground">{{ inst.pid ?? '—' }}</TableCell>
             <TableCell class="text-xs text-muted-foreground">
@@ -673,9 +680,6 @@ onUnmounted(stopPolling)
                       @click="onQuit(inst)"
                     >
                       <Square /> {{ $t('instances.quit') }}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem :disabled="isBusy(inst)" @click="onResolve(inst)">
-                      <RefreshCw /> {{ $t('instances.resolve') }}
                     </DropdownMenuItem>
                     <DropdownMenuItem :disabled="isBusy(inst)" @click="onRevealFolder(inst)">
                       <FolderOpen /> {{ $t('instances.openFolder') }}

@@ -66,6 +66,31 @@ async function hydrate(): Promise<void> {
   hydrated.value = true
 }
 
+// --- keeping the numbers current -----------------------------------------------------------------
+// The server re-checks quota on its own schedule (usage-refresh.ts, every 15 min by default), but
+// that only writes to ITS cache — until something pulls, an open Instances tab keeps showing
+// whatever it hydrated on mount and quietly goes stale for as long as you leave it open.
+//
+// So pull on the same cycle the instances table already refreshes on. hydrate() is a read of the
+// server's cache: no probe, no `claude`, no request to Anthropic, no quota — one localhost GET of a
+// small JSON file. It costs nothing, so there is no reason to do it only once and hope.
+
+/** Matches useInstances.ts's list poll — the Instances screen refreshes as one thing. */
+const HYDRATE_INTERVAL_MS = 4000
+
+let pollTimer: number | null = null
+
+function startPolling(): void {
+  if (pollTimer !== null) return
+  void hydrate()
+  pollTimer = window.setInterval(() => void hydrate(), HYDRATE_INTERVAL_MS)
+}
+
+function stopPolling(): void {
+  if (pollTimer !== null) window.clearInterval(pollTimer)
+  pollTimer = null
+}
+
 function snapshotFor(key: string): UsageSnapshot | undefined {
   return snapshots.value.get(key)
 }
@@ -137,6 +162,8 @@ export function useUsage() {
     lastError,
     lastAutoRefreshAt,
     hydrate,
+    startPolling,
+    stopPolling,
     snapshotFor,
     reasonFor,
     isChecking,

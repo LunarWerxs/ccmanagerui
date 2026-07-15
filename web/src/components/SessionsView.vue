@@ -38,6 +38,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { useData } from '@/composables/useData'
+import { useInstances } from '@/composables/useInstances'
 import { useShellWidth } from '@/composables/useShellWidth'
 import type { SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
 import * as api from '@/lib/api'
@@ -49,22 +50,23 @@ const { sessions, sessionsLoading, refreshSessions, queue, sessionInstanceFilter
 const { t } = useI18n()
 
 // Named instances for the filter dropdown; "default"/"other" are fixed options. The folder
-// name stays the stable filter key (sessions are tagged by it); the user's display label, if
-// any, is what we SHOW — in the dropdown and in each row's instance chip. A failed fetch just
-// leaves the named entries out.
-const namedInstances = ref<{ name: string; label: string }[]>([])
+// name stays the stable filter key (sessions are tagged by it); displayName() is what we SHOW —
+// in the dropdown and in each row's instance chip.
+//
+// Reads the shared useInstances singleton rather than fetching the list itself, because
+// displayName() now prefers the ACCOUNT an instance is signed into, and only that composable
+// resolves accounts. A private fetch would show the folder name here while the Instances tab
+// showed the account name for the very same instance. `computed`, so the chips fill in on their
+// own as each account resolves. A failed load just leaves the named entries out.
+const { instances: desktopInstances, refreshInstances } = useInstances()
+const namedInstances = computed(() =>
+  desktopInstances.value.map((i) => ({ name: i.name, label: displayName(i) })),
+)
 const instanceLabelFor = (folder: string) =>
   namedInstances.value.find((i) => i.name === folder)?.label ?? folder
-onMounted(async () => {
-  try {
-    namedInstances.value = (await api.listInstances()).map((i) => ({
-      name: i.name,
-      label: displayName(i),
-    }))
-  } catch {
-    /* dropdown falls back to All / Default / Other */
-  }
-})
+// silent: this view has no instance-list spinner to drive, and the toolbar Refresh icon it would
+// toggle belongs to a different view entirely.
+onMounted(() => void refreshInstances({ silent: true }))
 watch(sessionInstanceFilter, () => refreshSessions())
 
 const sessionFileUrl = api.sessionFileUrl
