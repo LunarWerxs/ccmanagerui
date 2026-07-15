@@ -19,9 +19,32 @@
 
 import { db, getSetting, setSetting } from './db'
 import { dispatchItem, isActive, isSessionActive } from './dispatch'
-import type { MonitorSettings, MonitorStateName, MonitorStatusRow, QueueItem } from './types'
+import type {
+  MonitorSettings,
+  MonitorStateName,
+  MonitorStatusRow,
+  QueueItem,
+  UsageSnapshot,
+} from './types'
 import { parseResetTime } from './usage'
-import { checkUsageForAccount } from './usage-service'
+import { checkUsageAmbient, checkUsageForAccount } from './usage-service'
+
+/**
+ * The one outside-world read this module makes, behind a seam so tests can drive the gate.
+ *
+ * Not indirection for its own sake: a real read either calls the API with the developer's own login
+ * or spawns `claude -p "/usage"` (~9s), so without this the gate's branches can only be exercised by
+ * globally mock.module-ing usage-service — which in Bun leaks into every other test file in the run.
+ */
+export interface MonitorDeps {
+  readUsage: (accountId: string | null) => Promise<UsageSnapshot>
+}
+
+const defaultDeps: MonitorDeps = {
+  // A run with no dispatch account is not an unauthenticated run: it uses the ambient CLI login,
+  // whose quota is just as readable. See checkUsageAmbient.
+  readUsage: (accountId) => (accountId ? checkUsageForAccount(accountId) : checkUsageAmbient()),
+}
 
 /** The locked resume prompt — a code constant, not a field users casually edit (an advanced
  *  override lives in settings if ever needed). "resume" nudges the model to continue its task. */
@@ -239,13 +262,13 @@ function fmtLocalTime(iso: string): string {
 
 let ticking = false
 
-async function tick(): Promise<void> {
+async function tick(deps: MonitorDeps): Promise<void> {
   if (getSetting('monitor_enabled') !== '1') return
   if (ticking) return // a slow checkUsage must not let ticks pile up
   ticking = true
   try {
     await dispatchDueResumes()
-    await processRateLimited()
+    await processRateLimited(deps)
   } catch (err) {
     console.error('[ccmanagerui] monitor tick error:', err)
   } finally {
@@ -274,7 +297,7 @@ async function dispatchDueResumes(): Promise<void> {
   }
 }
 
-async function processRateLimited(): Promise<void> {
+async function processRateLimited(deps: MonitorDeps): Promise<void> {
   const settings = getMonitorSettings()
   const now = new Date().toISOString()
   const limited = db
@@ -297,17 +320,6 @@ async function processRateLimited(): Promise<void> {
 
     const priorAttempts = existing?.resume_attempts ?? sessionAttempts(item.session_id)
 
-    // No account on the run → we can neither read usage to gate nor inject auth to resume.
-    if (!item.account_id) {
-      upsertState(item, {
-        state: 'needs_human',
-        message: 'no dispatch account on the run — cannot gate on usage or auth a resume',
-        resumeItemId: null,
-        attempts: priorAttempts,
-      })
-      continue
-    }
-
     // Idempotent: a live resume already pending for this session.
     if (hasPendingResume(item.session_id)) continue
 
@@ -322,8 +334,11 @@ async function processRateLimited(): Promise<void> {
       continue
     }
 
-    // The usage gate — the crux. Read the account's quota fresh.
-    const snap = await checkUsageForAccount(item.account_id)
+    // The usage gate — the crux. Read the run's quota fresh, from whichever credential it actually
+    // ran under: a named dispatch account, or (the DEFAULT) the ambient CLI login. Hard-refusing the
+    // ambient case made the monitor inert for anyone who never pasted a token in, which is everyone
+    // by default: it parked every real stop at "needs you — no dispatch account" and resumed nothing.
+    const snap = await deps.readUsage(item.account_id)
     const wk = snap.weekAll
     if (!wk) {
       // Unknown usage is NOT "plenty left" — refuse to resume blindly.
@@ -367,7 +382,7 @@ let timer: ReturnType<typeof setInterval> | null = null
 
 export function startMonitor(): void {
   if (timer) return
-  timer = setInterval(() => void tick(), MONITOR_POLL_MS)
+  timer = setInterval(() => void tick(defaultDeps), MONITOR_POLL_MS)
 }
 
 export function stopMonitor(): void {
@@ -378,6 +393,6 @@ export function stopMonitor(): void {
 }
 
 /** Run one tick now (used by the "check now" route + tests). */
-export async function runMonitorOnce(): Promise<void> {
-  await tick()
+export async function runMonitorOnce(deps: MonitorDeps = defaultDeps): Promise<void> {
+  await tick(deps)
 }

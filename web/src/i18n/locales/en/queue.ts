@@ -32,4 +32,10 @@ export default {
   delete: 'Delete',
   toastCancelFailed: 'Failed to cancel the run.',
   toastDeleteFailed: 'Failed to delete the queue item.',
+  showFinished: 'Show {n} finished',
+  hideFinished: 'Hide finished',
+  allDone: 'Nothing left to run.',
+  exitLost: 'interrupted',
+  exitLostHint:
+    'The run was cut off before it finished — the process was killed, or CC Manager UI restarted under it. Whatever it had already done is on disk; open the session to see how far it got.',
 }

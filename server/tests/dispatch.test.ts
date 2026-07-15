@@ -2,8 +2,9 @@
 // These drive the REAL flow with the fake `claude` stand-in (CCMANAGERUI_FAKE): dispatchItem writes
 // a spec, launches the detached runner (WMI on win32 / setsid on POSIX), which runs the fake CLI and
 // appends its stream-json to a per-run log; the daemon tails that log, records run_events, and
-// finalizes the DB row. Full survive-a-daemon-tree-kill + reattach was verified manually end-to-end
-// (see the dispatch.ts / dispatch-runner.ts headers); here we lock in complete / cancel / reattach.
+// finalizes the DB row. Locks in complete / cancel / reattach, plus the property the whole detached
+// design exists for: the runner does NOT hang off the daemon, so quitting the app cannot take a run
+// with it (see 'the runner escapes...' below).
 import { expect, test } from 'bun:test'
 import { existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -85,6 +86,62 @@ test('dispatchItem: a fake run completes, records events, and cleans up its spec
   expect(existsSync(join(RUN_LOG_DIR, `${item.id}.stream.jsonl`))).toBe(true)
   expect(dispatch.isActive(item.id)).toBe(false)
 })
+
+// THE guard for the promise the whole detached design exists to keep: "close CC Manager UI and your
+// runs carry on". It exists because that promise was previously only "verified manually", and
+// nothing stopped it regressing.
+//
+// What must hold is JOB-OBJECT escape, not merely tree escape. Bun puts everything it spawns into a
+// job object that kills its members when the daemon dies, and the `cmd /c start` hand-off's
+// grandchild STAYS in that job (verified 2026-07-12). Only Win32_Process.Create (WMI) truly escapes:
+// the OS builds the process for us, outside our job, parented to the WMI provider host.
+//
+// So this asserts the parent is WmiPrvSE *specifically*. "Parent isn't the daemon" would be too weak
+// to be worth writing: under CCMANAGERUI_RUNNER_LAUNCH='start' the runner's parent is a cmd.exe that
+// has already exited, which also isn't the daemon — that check passes for the very method documented
+// NOT to survive. Naming the expected parent is what gives this teeth (confirmed: it goes red under
+// 'startb', where the parent is cmd.exe).
+test.if(process.platform === 'win32')(
+  'the runner is created by WMI, outside the daemon job — so quitting the app cannot kill a run',
+  async () => {
+    process.env.FAKE_SLEEP_MS = '1200' // keep the runner alive long enough to inspect it
+    const item = makeItem()
+    const p = dispatch.dispatchItem(item)
+    for (let i = 0; i < 60 && !dispatch.isActive(item.id); i++) await Bun.sleep(50)
+
+    // Find OUR runner by its unique spec-file argument (the same identity trick isRunnerAlive uses).
+    // `AND Name <> 'powershell.exe'` matters: the launcher's OWN command line embeds the spec path
+    // (it is the argument to Win32_Process.Create), so an unqualified match also returns the
+    // transient PowerShell — which IS a child of the daemon and would make this assert the opposite
+    // of what it means to.
+    let parent = ''
+    for (let i = 0; i < 40 && !parent; i++) {
+      const proc = Bun.spawn(
+        [
+          'powershell',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$r = Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%${item.id}.spec.json%' AND Name <> 'powershell.exe'" | Select-Object -First 1;` +
+            ` if ($r) { (Get-CimInstance Win32_Process -Filter "ProcessId=$($r.ParentProcessId)").Name }`,
+        ],
+        { stdout: 'pipe', stderr: 'ignore' },
+      )
+      const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+      const name = out.trim()
+      if (name) parent = name
+      else await Bun.sleep(100)
+    }
+
+    // WmiPrvSE.exe as the parent IS the escape: it means the OS created the runner on our behalf,
+    // so it is in neither this process's tree nor its job object.
+    expect(parent.toLowerCase()).toBe('wmiprvse.exe')
+
+    await p
+    delete process.env.FAKE_SLEEP_MS
+  },
+  30000,
+)
 
 test('cancelItem: a running fake dispatch is killed and finalized as canceled', async () => {
   process.env.FAKE_SLEEP_MS = '1500' // slow enough to cancel mid-run

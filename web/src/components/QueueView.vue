@@ -1,34 +1,15 @@
 <script setup lang="ts">
-import {
-  Ban,
-  ChevronDown,
-  Clock,
-  Cpu,
-  FastForward,
-  FolderGit2,
-  Gauge,
-  ListPlus,
-  Pencil,
-  Play,
-  Plus,
-  Power,
-  PowerOff,
-  Trash2,
-  UserCircle2,
-} from '@lucide/vue'
+import { ChevronDown, FastForward, ListPlus, Plus, Power, PowerOff } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
-import RunViewer from '@/components/RunViewer.vue'
-import StatusBadge from '@/components/StatusBadge.vue'
-import { Badge } from '@/components/ui/badge'
+import QueueItemCard from '@/components/QueueItemCard.vue'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useBuilder } from '@/composables/useBuilder'
 import { useData } from '@/composables/useData'
 import type { QueueItem } from '@/lib/api'
 import * as api from '@/lib/api'
-import { baseName, formatRunAt } from '@/lib/format'
 import IconTooltip from '@/shell/IconTooltip.vue'
 import InfoHint from '@/shell/InfoHint.vue'
 
@@ -37,7 +18,15 @@ const { queue, queueLoaded, accounts, scheduler, refreshQueue } = useData()
 const { openBuilder, openEditor } = useBuilder()
 const expanded = ref<string | null>(null)
 
-const sorted = computed(() => queue.value)
+// A finished run is history, not a to-do. Left in the one flat list they crowd out the handful of
+// items that still need something to happen, and the panel reads as a pile of work rather than a
+// queue. Split by "is this still going to do something?" — everything else folds away behind a count.
+const TERMINAL: QueueItem['status'][] = ['completed', 'failed', 'canceled', 'rate_limited']
+const isFinished = (q: QueueItem) => TERMINAL.includes(q.status)
+
+const active = computed(() => queue.value.filter((q) => !isFinished(q)))
+const finished = computed(() => queue.value.filter(isFinished))
+const showFinished = ref(false)
 
 // re-evaluated on every 2s queue poll, so a schedule crossing "now" surfaces the button
 const dueCount = computed(
@@ -100,8 +89,10 @@ async function remove(item: QueueItem) {
        toolbar carries the count, scheduler state, and the new-run shortcut -->
   <div class="flex h-full min-h-0 flex-col">
     <div class="flex shrink-0 items-center justify-between gap-2 p-3">
+      <!-- count what's still pending, not the all-time total: "7 items" over a queue of 6 finished
+           runs and 1 live one described the history, not the work -->
       <div class="flex items-center gap-1.5 text-sm text-muted-foreground">
-        {{ $t('queue.itemsCount', { n: queue.length }) }}
+        {{ $t('queue.itemsCount', { n: active.length }) }}
         <InfoHint :text="$t('queue.whatIsQueue')" />
       </div>
       <div class="flex items-center gap-2">
@@ -176,93 +167,54 @@ async function remove(item: QueueItem) {
         >
       </div>
 
-      <div
-        v-for="item in sorted"
+      <QueueItemCard
+        v-for="item in active"
         :key="item.id"
-        class="mb-2.5 overflow-hidden rounded-xl border border-border bg-card"
+        :item="item"
+        :expanded="expanded === item.id"
+        :account-label="accountLabel(item.account_id)"
+        @toggle="toggle(item.id)"
+        @run="run(item)"
+        @cancel="cancel(item)"
+        @edit="openEditor(item)"
+        @remove="remove(item)"
+      />
+
+      <!-- nothing left to run, but the history is still there: say so rather than show the empty-queue
+           call to action, which would read as "you have no runs at all" -->
+      <p
+        v-if="active.length === 0 && finished.length > 0"
+        class="py-6 text-center text-sm text-muted-foreground"
       >
-        <div class="flex items-start gap-3 p-3">
-          <button
-            class="mt-0.5 text-muted-foreground transition-transform hover:text-foreground"
-            :class="expanded === item.id ? 'rotate-0' : '-rotate-90'"
-            :title="$t('queue.toggleLiveOutput')"
-            @click="toggle(item.id)"
-          >
-            <ChevronDown class="size-4" />
-          </button>
+        {{ $t('queue.allDone') }}
+      </p>
 
-          <div class="min-w-0 flex-1">
-            <div class="flex items-start justify-between gap-2">
-              <span class="truncate text-sm font-medium">{{ item.title }}</span>
-              <StatusBadge :status="item.status" />
-            </div>
+      <template v-if="finished.length > 0">
+        <button
+          type="button"
+          class="mt-1 flex w-full items-center gap-1.5 rounded-md px-1 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+          :aria-expanded="showFinished"
+          @click="showFinished = !showFinished"
+        >
+          <ChevronDown class="size-3.5 transition-transform" :class="showFinished ? 'rotate-0' : '-rotate-90'" />
+          {{ showFinished ? $t('queue.hideFinished') : $t('queue.showFinished', { n: finished.length }) }}
+        </button>
 
-            <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">{{ item.prompt }}</p>
-
-            <div class="mt-2 flex flex-wrap items-center gap-1.5">
-              <Badge variant="secondary">
-                <FolderGit2 /> {{ baseName(item.cwd) }}
-              </Badge>
-              <Badge v-if="item.not_before && item.status === 'queued'" variant="warning">
-                <Clock /> {{ $t('queue.scheduledFor', { time: formatRunAt(item.not_before) }) }}
-              </Badge>
-              <Badge v-if="item.new_chat" variant="info">{{ $t('queue.newChat') }}</Badge>
-              <Badge v-if="item.fork" variant="secondary">{{ $t('queue.fork') }}</Badge>
-              <Badge v-if="item.model" variant="secondary">
-                <Cpu /> {{ item.model }}
-              </Badge>
-              <Badge v-if="item.effort" variant="secondary">
-                <Gauge /> {{ item.effort }}
-              </Badge>
-              <Badge v-if="accountLabel(item.account_id)" variant="secondary">
-                <UserCircle2 /> {{ accountLabel(item.account_id) }}
-              </Badge>
-              <Badge v-if="item.exit_code !== null" variant="secondary">
-                {{ $t('queue.exit') }} {{ item.exit_code }}
-              </Badge>
-            </div>
-          </div>
-
-          <div class="flex shrink-0 flex-col gap-1.5">
-            <Button
-              v-if="item.status !== 'running'"
-              size="sm"
-              variant="outline"
-              :title="$t('queue.runNow')"
-              @click="run(item)"
-            >
-              <Play /> {{ $t('queue.run') }}
-            </Button>
-            <Button v-else size="sm" variant="outline" :title="$t('queue.cancel')" @click="cancel(item)">
-              <Ban /> {{ $t('queue.stop') }}
-            </Button>
-            <div class="flex items-center justify-end gap-0.5">
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                :title="$t('queue.edit')"
-                :disabled="item.status === 'running'"
-                @click="openEditor(item)"
-              >
-                <Pencil />
-              </Button>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                :title="$t('queue.delete')"
-                :disabled="item.status === 'running'"
-                @click="remove(item)"
-              >
-                <Trash2 />
-              </Button>
-            </div>
-          </div>
+        <div v-if="showFinished" class="mt-2">
+          <QueueItemCard
+            v-for="item in finished"
+            :key="item.id"
+            :item="item"
+            :expanded="expanded === item.id"
+            :account-label="accountLabel(item.account_id)"
+            @toggle="toggle(item.id)"
+            @run="run(item)"
+            @cancel="cancel(item)"
+            @edit="openEditor(item)"
+            @remove="remove(item)"
+          />
         </div>
-
-        <div v-if="expanded === item.id" class="h-72 border-t border-border bg-background/40">
-          <RunViewer :item-id="item.id" />
-        </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>

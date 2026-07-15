@@ -17,6 +17,8 @@
 // back to spawning `claude` (see usage.ts). Callers get a snapshot plus a `reason` explaining a
 // no-data result, so the UI never has to render a bare "—" with no explanation.
 
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { resolveAccount, resolveCliConfigDirToken, resolveInstanceToken } from './core/accounts'
 import { cliInstanceForDesktop, getCliInstance, listCliInstances } from './core/cli-instances'
 import { listInstances } from './core/instances'
@@ -63,6 +65,25 @@ export async function checkUsageForAccount(accountId: string): Promise<UsageSnap
     auth: resolved?.auth,
   })
   setCachedUsage(`acct:${accountId}`, snap)
+  return snap
+}
+
+/** Where a plain `claude` login (no CLAUDE_CONFIG_DIR override) keeps its credentials. */
+const ambientConfigDir = (): string => process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+
+/**
+ * Check the AMBIENT login's usage — the credential a run with no dispatch account uses.
+ *
+ * "Ambient" is the default for every run (the `accounts` table is empty until someone deliberately
+ * pastes a token in), and it is a perfectly ordinary readable credential: the CLI keeps its token in
+ * plain JSON at <config dir>/.credentials.json, which is the same source `check_my_usage` already
+ * reads (mcp.ts). Nothing about a null account_id means "unknowable quota" — it only meant that to
+ * anything routing through checkUsageForAccount, whose `where id = ?` can never match a null id.
+ */
+export async function checkUsageAmbient(): Promise<UsageSnapshot> {
+  const configDir = ambientConfigDir()
+  const snap = await checkUsage({ configDir, account: configDir })
+  setCachedUsage(`dir:${configDir}`, snap)
   return snap
 }
 

@@ -161,7 +161,15 @@ while ($true) {
   if ((Get-Date) -gt $deadline) { $survivors = $targets; break }
 
   foreach ($procId in $targets.Keys) {
-    # /T so the daemon's children (a dispatch runner, a spawned claude) go with it.
+    # /T reaps whatever the daemon actually parented. Note what it does NOT reach, and must not:
+    # work the app has already dispatched. ccmanagerui launches a run's supervisor through WMI
+    # (Win32_Process.Create) precisely so it is parented to WmiPrvSE, outside this tree AND outside
+    # the daemon's job object -- restarting the app is not a reason to destroy a run in flight.
+    # (The old comment here claimed the opposite -- "so the dispatch runner and its claude go with
+    # it" -- which contradicts dispatch.ts's contract and, read literally, describes a bug.
+    # Verified 2026-07-15: a run survives this exact taskkill with no daemon alive at all, and the
+    # reopened app reattaches and finalizes it 'completed'. ccmanagerui guards the property with the
+    # WmiPrvSE-parent test in server/tests/dispatch.test.ts.)
     taskkill /PID $procId /T /F *> $null
     if (-not $killed.ContainsKey($procId)) {
       $killed[$procId] = $targets[$procId]

@@ -202,7 +202,9 @@ function onKeydown(e: KeyboardEvent) {
         <UsersRound class="size-3.5 text-primary" />
         <span class="font-medium text-foreground">{{ $t('composer.sendingToN', { n: targets.length }) }}</span>
       </div>
-      <p v-if="anyBusy" class="mb-2 text-xs text-warning">{{ $t('composer.busyHint') }}</p>
+      <p v-if="anyBusy" class="mb-2 text-xs text-warning">
+        {{ scheduler?.enabled ? $t('composer.busyHintAuto') : $t('composer.busyHintManual') }}
+      </p>
 
       <div class="rounded-xl border border-border bg-input/10 focus-within:border-ring">
         <Textarea

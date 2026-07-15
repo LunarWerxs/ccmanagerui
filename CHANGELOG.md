@@ -6,8 +6,48 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **A run that merely TALKED about rate limits was marked rate-limited.** The detector matched its
+  patterns against every event of a run — tool inputs and tool results included — so an agent that
+  grepped for "session limit", or read a file whose line 529 scrolled past, finished as
+  `rate_limited` despite exiting 0 with the job done. (Both such rows in the shipped database were
+  this; `\b529\b` had matched a line number.) Only the CLI's own report counts now: a synthetic
+  API-error message, an errored terminal `result`, or stderr — never model prose, tool inputs, or
+  tool results. Runs already mislabeled this way are repaired on startup, along with the auto-resume
+  bookkeeping that existed only to babysit them.
+- **The auto-resume monitor did nothing at all unless you had added an account.** A run with no
+  dispatch account — the default, since the accounts table is empty until you paste a token in — was
+  parked at "needs you — no dispatch account on the run" on sight, on the grounds that its usage
+  couldn't be gated and its auth couldn't be injected. Neither was true: an ambient run uses the
+  login `claude` already has, which needs no injection to resume and whose quota reads straight from
+  its config dir (the same read `check_my_usage` already did). Ambient runs now go through the usage
+  gate like any other, so the monitor actually resumes them.
+- **Sending a message opened a console window that stayed on screen for the whole run.** The detached
+  runner is created through WMI, which applies default startup info — so `bun` (a console app) got a
+  real, visible window; the daemon's own `windowsHide` only ever covered the short-lived PowerShell.
+  Beyond the eyesore, closing that stray window killed the runner and `claude` mid-turn, and the run
+  then finalized as a bare "failed, exit -1". It is created hidden now.
+- **The session view showed conversation the CLI was having with itself.** Resuming a session whose
+  last turn died on an API error makes `claude` append a canned "Continue from where you left off." /
+  "No response requested." pair — same millisecond, no model call. Rendered as real turns they read
+  as though a prompt had been sent and refused. They're filtered; the rate-limit notice, the one
+  synthetic message that explains anything, still shows.
+- **"exit -1" now says what it means.** It is our own code for "the process vanished before it
+  finished" — never something `claude` reported — and the paths that produce it recorded nothing to
+  say so. They now explain themselves, and the badge reads "interrupted" instead of a number nobody
+  can look up. Transcribing an event can also no longer throw and take the tail loop down with it.
+
 ### Changed
 
+- **Finished runs fold away in the queue.** Completed, failed, canceled, and rate-limited items move
+  behind a "Show N finished" disclosure instead of crowding the list, and the header counts what is
+  still pending rather than the all-time total. The per-item card moved to `QueueItemCard.vue`.
+- **The composer's busy warning says what will happen to your message.** It stated a rule ("a session
+  with a run in progress gets its message queued instead of sent") and left you to guess whether the
+  message was about to run or stuck. It now says which — start on its own when the current run
+  finishes, or wait for you to press Run when the scheduler is off — and why two runs can't share a
+  session.
 - **Queuing a run resumes a session from a searchable list instead of a pasted UUID.** The run
   builder's "session to resume" field is now a searchable picker over the same session list the
   sidebar shows (sorted most-recently-active first), each row carrying the friendly title, its

@@ -91,6 +91,33 @@ create table if not exists monitor_accounts (
   if (!cols.includes('not_before')) db.exec('alter table queue_items add column not_before text')
 }
 
+// --- one-time repair: rate_limited rows the old over-eager detector invented ---
+// Until 2026-07-15 dispatch.ts matched its rate-limit patterns against EVERY event of a run,
+// including tool results and tool inputs — so a run that merely READ the string "quota", or a file
+// whose line 529 scrolled past, finished with status 'rate_limited' despite exiting 0 with the job
+// done. Those phantom stops are not cosmetic: monitor.ts queues auto-resumes off exactly this
+// status, so each one becomes a session the watchdog wants to re-prompt (or, before ambient usage
+// reads landed, a permanent "needs you" chip). A process that exited 0 reported success and was by
+// definition not cut off, so the status is simply wrong — correct it, and drop the monitor bookkeeping
+// that only existed to babysit it. Idempotent: after the detector fix nothing new matches this.
+{
+  const bogus = db
+    .query<{ id: string }, []>(
+      "select id from queue_items where status = 'rate_limited' and exit_code = 0",
+    )
+    .all()
+  if (bogus.length) {
+    db.exec(
+      "update queue_items set status = 'completed' where status = 'rate_limited' and exit_code = 0",
+    )
+    const del = db.query('delete from monitor_state where item_id = ?')
+    for (const r of bogus) del.run(r.id)
+    console.log(
+      `[ccmanagerui] repaired ${bogus.length} run(s) mislabeled 'rate_limited' by the old detector (they exited 0)`,
+    )
+  }
+}
+
 // --- settings helpers -------------------------------------------------------
 
 const DEFAULT_SETTINGS: Record<string, string> = {

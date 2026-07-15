@@ -3,7 +3,10 @@ export default {
   placeholder: 'Message this session — Enter to send, Shift+Enter for a new line',
   placeholderMulti: 'Message {n} sessions — Enter to send to each',
   sendingToN: 'Sending to {n} sessions',
-  busyHint: 'A session with a run in progress gets its message queued instead of sent.',
+  busyHintAuto:
+    'This session is busy, so your message will queue and start on its own once the current run finishes (two runs cannot share one session).',
+  busyHintManual:
+    'This session is busy, so your message will queue behind the current run. The scheduler is off, so it waits until you press Run.',
   send: 'Send',
   queue: 'Queue',
   queueForLater: 'Queue for later',

@@ -44,6 +44,28 @@ function looksRateLimited(text: string): boolean {
   return RATE_LIMIT_PATTERNS.some((re) => re.test(text))
 }
 
+/**
+ * WHERE a rate-limit pattern is allowed to match — the other half of the detector, and the more
+ * important one.
+ *
+ * The patterns above are deliberately loose (`\b529\b`, `\bquota\b`), which is fine for text the
+ * CLI itself emits about its own state and catastrophic for anything else. Matching them against
+ * every event marked EVERY run that merely TALKED about rate limits as rate-limited: an agent
+ * grepping for "session limit", a Read whose output happened to contain line number 529, an Edit
+ * touching this very file. Both `rate_limited` rows in the shipped DB were exactly that — false
+ * positives on runs that exited 0 with the job done (2026-07-15), which then fed the auto-resume
+ * monitor a queue of phantom stops to babysit.
+ *
+ * So: model prose, tool inputs, and tool results are NEVER evidence — only the CLI's own report is.
+ * A genuine limit surfaces as a SYNTHETIC assistant message (`message.model === '<synthetic>'` with
+ * `isApiErrorMessage: true`, e.g. "You've hit your session limit · resets 5:40am"), as an errored
+ * terminal `result`, or on stderr. Note `<synthetic>` alone is not enough: the CLI also emits
+ * `<synthetic>` no-op chatter with `isApiErrorMessage: false` ("No response requested.").
+ */
+function isApiErrorEvent(ev: any): boolean {
+  return ev?.isApiErrorMessage === true || ev?.message?.model === '<synthetic>'
+}
+
 // --- pub/sub for live run streaming (SSE) ------------------------------------
 
 export type RunMessage =
@@ -105,7 +127,15 @@ function recordEvent(
   rt.seq += 1
   runtime.set(id, rt)
   const ts = new Date().toISOString()
-  const info = insertEvent.run(id, rt.seq, ts, role, kind, text, toolName)
+  let info: { lastInsertRowid: number | bigint }
+  try {
+    info = insertEvent.run(id, rt.seq, ts, role, kind, text, toolName)
+  } catch {
+    // run_events is FK'd to queue_items, so recording against a row that is already gone (the item
+    // was deleted mid-run) throws. Transcribing output must never be able to kill the tail loop that
+    // is trying to finalize the run — same reason publish() swallows a bad subscriber.
+    return
+  }
   const ev: RunEvent = {
     id: Number(info.lastInsertRowid),
     queue_item_id: id,
@@ -165,14 +195,19 @@ function handleLine(id: string, line: string) {
   const rt = runtime.get(id)
   const t = ev.type
   if (t === 'assistant' || t === 'user') {
+    // Only the CLI's own synthetic error notice counts (see isApiErrorEvent) — never model prose,
+    // tool inputs, or tool results, which is what a run about rate limits is full of.
+    const trusted = isApiErrorEvent(ev)
     for (const te of eventToTailEvents(ev)) {
-      if (rt && looksRateLimited(te.text)) rt.rateLimited = true
+      if (rt && trusted && looksRateLimited(te.text)) rt.rateLimited = true
       recordEvent(id, te.role, te.kind, te.text, te.tool_name)
     }
   } else if (t === 'result') {
     const text = typeof ev.result === 'string' ? ev.result : JSON.stringify(ev)
-    if (rt && (ev.is_error || looksRateLimited(text)))
-      rt.rateLimited = rt.rateLimited || looksRateLimited(text)
+    // A `result` mirrors the model's final summary, so its text is only evidence when the CLI also
+    // flagged the turn as errored — otherwise a run that ANSWERS a question about rate limits
+    // (this repo's own bread and butter) reports itself rate-limited.
+    if (rt && ev.is_error && looksRateLimited(text)) rt.rateLimited = true
     recordEvent(id, 'system', 'meta', text, null)
   } else if (t === 'system' && ev.subtype === 'init') {
     recordEvent(id, 'system', 'meta', `session started (${ev.model ?? 'model'})`, null)
@@ -260,7 +295,20 @@ function launchDetachedRunner(specPath: string): void {
   if (method === 'wmi') {
     // Each argv element double-quoted for CreateProcess; single-quotes escaped for the PS string.
     const cmdline = [process.execPath, DISPATCH_RUNNER, specPath].map((s) => `"${s}"`).join(' ')
-    const ps = `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${cmdline.replace(/'/g, "''")}' } | Out-Null`
+    // ProcessStartupInformation is NOT optional polish: Win32_Process.Create applies DEFAULT
+    // STARTUPINFO, and `bun` is a console-subsystem exe, so the runner gets a REAL, VISIBLE console
+    // window on the user's desktop for the whole run — the daemon's own `windowsHide: true` (below)
+    // only hides the short-lived powershell.exe, never the WMI-created grandchild. Worse than ugly:
+    // closing that stray window sends CTRL_CLOSE_EVENT to everything on its console, killing the
+    // runner AND `claude` mid-turn with no exit marker (the run then finalizes as a bare "failed,
+    // exit -1"). SW_HIDE (0) keeps the console allocated — the runner still redirects the child's
+    // stdout/stderr to the log, so nothing needs a window — but never shows it.
+    // Verified 2026-07-15 by probing GetConsoleWindow/IsWindowVisible from INSIDE a WMI-created
+    // process: without this, VISIBLE; with it, hidden. (CreateFlags=CREATE_NO_WINDOW is not an
+    // option here — Win32_ProcessStartup rejects that flag with ReturnValue 21, "invalid parameter".)
+    const ps =
+      `$s = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }; ` +
+      `Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = '${cmdline.replace(/'/g, "''")}'; ProcessStartupInformation = $s } | Out-Null`
     nodeSpawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
       stdio: 'ignore',
       windowsHide: true,
@@ -501,6 +549,17 @@ async function tailRun(id: string, entry: ActiveEntry): Promise<void> {
     if (entry.childPid !== null && !isAlive(entry.childPid)) {
       deadFor += POLL_MS
       if (deadFor > DEAD_GRACE_MS) {
+        // Say WHY. exit -1 is our own synthetic code for "we lost the process", not something
+        // `claude` reported, and without this line the run reads as a bare red "failed, exit -1"
+        // with no hint that the work up to this point actually happened and landed on disk.
+        if (!entry.canceled)
+          recordEvent(
+            id,
+            'system',
+            'meta',
+            'run interrupted: the claude process exited without finishing this turn (killed, or CC Manager UI restarted under it). Work it had already completed is on disk — open the session to see how far it got.',
+            null,
+          )
         finalize(id, -1, { canceled: entry.canceled })
         return
       }
@@ -661,6 +720,13 @@ export async function reattachRuns(): Promise<void> {
 
     if (!runnerAlive && !hasLog) {
       // The runner is gone and left nothing to replay: unrecoverable, mark failed.
+      recordEvent(
+        id,
+        'system',
+        'meta',
+        'run lost: CC Manager UI restarted and this run left no output to recover from.',
+        null,
+      )
       finalize(id, -1)
       continue
     }

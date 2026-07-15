@@ -104,12 +104,32 @@ function stringifyToolResult(content: unknown): string {
 }
 
 /**
+ * Bookkeeping the CLI writes into its own transcript that was never part of the conversation.
+ *
+ * Resuming a session whose last turn died on an API error makes `claude` repair the dangling tail
+ * by appending a canned pair — user `isMeta: true` "Continue from where you left off." plus a
+ * `<synthetic>` assistant "No response requested." — both stamped with the SAME millisecond,
+ * because no model was ever called. Rendering them as real turns tells a story that never happened:
+ * it reads as though we prompted the session and it refused, when the CLI was talking to itself
+ * (mis-read exactly that way 2026-07-15; the run had in fact been sent nothing but "resume").
+ *
+ * The rate-limit notice is the ONE synthetic message worth keeping: it is also `<synthetic>` but
+ * carries `isApiErrorMessage: true`, and it is the only thing on screen that explains why a session
+ * stopped. Keep that; drop the self-talk.
+ */
+function isCliBookkeeping(ev: any): boolean {
+  if (ev?.isMeta === true) return true
+  return ev?.message?.model === '<synthetic>' && ev?.isApiErrorMessage !== true
+}
+
+/**
  * THE hide-"thinking" filter. Turns one raw transcript JSONL event into zero or more
  * displayable TailEvents. Reused for both disk-tail reading and the live stream-json path,
  * so the rule lives in exactly one place (per the rebuild plan).
  *
  * Rules:
  *  - keep only user/assistant events
+ *  - drop the CLI's own resume bookkeeping (see isCliBookkeeping)
  *  - drop `thinking` and `redacted_thinking` content blocks entirely (explicit type check)
  *  - assistant `text` -> text event
  *  - `tool_use` -> collapsed tool event (name + compact input)
@@ -121,6 +141,7 @@ export function eventToTailEvents(ev: any): TailEvent[] {
   const role: string | undefined = message?.role ?? ev?.type
   const type: string | undefined = ev?.type
   if (type !== 'user' && type !== 'assistant' && role !== 'user' && role !== 'assistant') return []
+  if (isCliBookkeeping(ev)) return []
   const r: 'user' | 'assistant' =
     role === 'assistant' || type === 'assistant' ? 'assistant' : 'user'
   const ts: string | null = ev?.timestamp ?? null
