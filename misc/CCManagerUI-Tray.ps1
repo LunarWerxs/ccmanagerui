@@ -6,7 +6,8 @@
 # $TrayConfig hashtable, then hand off to the engine. See Tray-Host.ps1's header comment
 # for the full $TrayConfig contract (every key below is documented there).
 #
-# Launch it via CCManagerUI.vbs (which sets the port) so there's no console flash. The
+# Launch it via Tray-Launch.vbs (which auto-discovers the sibling *-Tray.ps1 and runs it
+# hidden; the port comes from this file's own param() default, not the .vbs). The
 # daemon serves the built Vue SPA + API on one port. The shortcut launches FAST with the
 # existing build; use the tray's "Rebuild & Restart" to rebuild the GUI from source and
 # restart the daemon. This script lives in misc/; the repo root (one level up) IS the app

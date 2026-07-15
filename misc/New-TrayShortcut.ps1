@@ -9,7 +9,7 @@ function New-TrayShortcut {
   # -ScriptDir   The app's misc/ dir — holds Tray-Launch.vbs and the icon.
   # -LnkName     Shortcut label WITHOUT ".lnk" (the name users SEE under the icon). MAY contain
   #              non-ASCII (e.g. 'RēDesign' with U+0113) — handled via the ASCII-temp dance below.
-  # -IconFile    Icon filename inside ScriptDir (e.g. 'Reimagine.ico').
+  # -IconFile    Icon filename inside ScriptDir (e.g. '<App>.ico').
   # -Description The .lnk Description tooltip. MUST be pure ASCII (see the ANSI note below).
   # -VbsFile     The launcher the shortcut runs (default the shared 'Tray-Launch.vbs').
   # -LegacyLnks  Old .lnk BASE names (with or without .lnk) to delete from Root so a rename/history
