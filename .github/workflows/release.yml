@@ -5,14 +5,14 @@
 # build + smoke only (no release), for validating the pipeline without a tag.
 #
 # Design notes (verified 2026-07-16 against a real compiled exe on Windows):
-# - `bun build --compile` cross-compiles every POSIX target from one Linux runner. The windows-x64
-#   leg runs on windows-latest for its resource patching: Bun's own --windows-icon/--windows-title
-#   are host-gated to Windows AND currently panic Bun 1.3.14 outright, so the icon/version info is
-#   applied post-compile with electron/rcedit (a Windows exe). What compiling does NOT prove is
-#   that the binary RUNS — the smoke job boots each bundle on real hardware for its OS and asserts
-#   /api/health, because the failure modes here (virtual import.meta.dir paths, the implicit-serve
-#   entrypoint trap, a resource rewrite corrupting Bun's bundled data) all pass the build and only
-#   explode at runtime.
+# - `bun build --compile` cross-compiles every POSIX target (minified) from one Linux runner. The
+#   windows-x64 leg runs on windows-latest UNMINIFIED: --minify alone panics Bun 1.3.14 when the
+#   compile host is Windows (isolated locally; the exact same --minify is fine cross-compiling from
+#   Linux). --windows-icon/--windows-title are host-gated to Windows but otherwise fine, so the
+#   Windows leg applies them natively at compile time (no post-processing tool). What compiling does
+#   NOT prove is that the binary RUNS — the smoke job boots each bundle on real hardware for its OS
+#   and asserts /api/health, because the failure modes here (virtual import.meta.dir paths, the
+#   implicit-serve entrypoint trap) all pass the build and only explode at runtime.
 # - The SPA is a SIDECAR web/dist folder next to the binary, not embedded: Vite emits hashed
 #   filenames unknown at compile time, and config.ts's APP_ROOT already resolves web/dist beside
 #   the exe in compiled mode.
@@ -87,23 +87,17 @@ jobs:
           cp LICENSE CHANGELOG.md "${stage}/"
           cp .github/RELEASE-README.md "${stage}/README.md"
           if [ "$target" = "windows-x64" ]; then
-            # No --minify and no --windows-icon/--windows-title: on a WINDOWS compile host each
-            # of the three panics Bun 1.3.14 outright ("Crashed while printing main.ts" —
-            # reproduced locally and on this runner, 2026-07-16; the same --minify works fine on
-            # the Linux legs). Unminified costs a few MB; the icon/version info is patched
-            # post-compile with electron/rcedit instead — verified the patched exe still boots
-            # and serves (Bun's bundled data survives the resource rewrite).
+            # NO --minify: on a WINDOWS compile host --minify alone panics Bun 1.3.14 outright
+            # ("Crashed while printing main.ts" — isolated locally 2026-07-16 to --minify specifically;
+            # --windows-icon/--windows-title are innocent, they only appeared guilty when paired with
+            # --minify, and the same --minify works fine on the Linux legs). The native Windows
+            # resource flags DO work on a Windows host (they're only unavailable when cross-compiling
+            # from Linux), so the icon + title are applied at compile time — no rcedit post-step.
+            # Unminified costs a few MB.
             bun build --compile --sourcemap=none --target="bun-${target}" \
+              --windows-icon=misc/CCManagerUI.ico --windows-title="CC Manager UI" \
               --outfile="${stage}/CCManagerUI.exe" server/src/main.ts
-            gh release download -R electron/rcedit -p "rcedit-x64.exe" -O rcedit.exe --skip-existing
-            ./rcedit.exe "${stage}/CCManagerUI.exe" \
-              --set-icon misc/CCManagerUI.ico \
-              --set-version-string ProductName "CC Manager UI" \
-              --set-version-string FileDescription "CC Manager UI" \
-              --set-version-string CompanyName "LunarWerx" \
-              --set-file-version "$VERSION" \
-              --set-product-version "$VERSION"
-            "${stage}/CCManagerUI.exe" --version   # prove the patched exe still runs
+            "${stage}/CCManagerUI.exe" --version   # canary: the compiled exe runs
             mkdir -p "${stage}/misc"
             cp misc/CCManagerUI-Tray.ps1 misc/Tray-Host.ps1 misc/Tray-Launch.vbs \
                misc/New-TrayShortcut.ps1 misc/CCManagerUI.ico "${stage}/misc/"
