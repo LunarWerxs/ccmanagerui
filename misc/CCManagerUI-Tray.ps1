@@ -77,10 +77,12 @@ $TrayConfig = @{
   # 1024px viewport, so 1060 outer clears it with slack; 800 tall ≈ the header + ~10 session
   # rows), so a COLD tray start (tray boots the daemon and opens the window itself, before
   # the daemon's own POST /api/portable-window path exists) stops opening a never-seen
-  # profile at ~the whole work area. NO PortableWindowSizeHint: this web build has no
-  # ?window-size applier (no resizeTo anywhere in web/src), so the hint would ride every URL
-  # as an inert param — enable it only after porting devwebui's web/src/lib/window-size-hint.ts.
-  PortableWindowSize   = @{ Width = 1060; Height = 800 }
+  # profile at ~the whole work area. PortableWindowSizeHint is safe here: the web build now
+  # applies ?window-size via resizeTo (web/src/lib/window-size-hint.ts), the only fix that
+  # reaches a FORWARDED --app launch (a window already open on the profile, which ignores
+  # --window-size and the saved placement alike).
+  PortableWindowSize     = @{ Width = 1060; Height = 800 }
+  PortableWindowSizeHint = $true
   SelfTestMarker       = "CCMANAGERUI_TRAY_SELFTEST"
   MenuOpenLabel        = "Open CC Manager UI"
   MutexName            = "CCManagerUITrayHost"

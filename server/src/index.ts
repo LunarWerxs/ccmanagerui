@@ -125,6 +125,7 @@ import {
   checkUsageForDesktop,
   surveyUsage,
 } from './usage-service'
+import { WINDOW_SIZE_HINT_PARAM, windowSizeHintFor } from './window-size'
 
 // Persist console output to <CONFIG_DIR>/logs/daemon.log BEFORE anything else can throw, so the
 // crash reason logged just below actually survives the process (the tray runs us with a hidden
@@ -1035,9 +1036,24 @@ app.post('/api/portable-window', async (c) => {
   // last-resort fallback for an unusual boot order.
   const url = readInstanceInfo()?.url ?? `http://${HOST}:${PORT}`
   const profileDir = join(CONFIG_DIR, 'portable-profile')
-  // First-run size only — openPortableWindow yields to the profile's saved placement once
-  // the user has resized the window themselves (see PORTABLE_WINDOW_SIZE in config.ts).
-  return c.json(await openPortableWindow(url, { profileDir, initialSize: PORTABLE_WINDOW_SIZE }))
+  // First-run size only — openPortableWindow yields to the profile's saved placement once the
+  // user has resized the window themselves (see PORTABLE_WINDOW_SIZE in config.ts). A forwarded
+  // --app launch (a window already open on this profile) ignores --window-size AND the saved
+  // placement, so also tag the URL with the size this window should have and the page corrects
+  // itself with resizeTo (web/src/lib/window-size-hint.ts). The query string is not part of
+  // Chromium's placement key; a URL that won't parse just goes out un-hinted.
+  let target = url
+  try {
+    const hint = windowSizeHintFor(profileDir, url, PORTABLE_WINDOW_SIZE)
+    if (hint) {
+      const u = new URL(url)
+      u.searchParams.set(WINDOW_SIZE_HINT_PARAM, hint)
+      target = u.toString()
+    }
+  } catch {
+    // unparseable base URL: open it un-hinted rather than fail the route
+  }
+  return c.json(await openPortableWindow(target, { profileDir, initialSize: PORTABLE_WINDOW_SIZE }))
 })
 
 // --- graceful shutdown (tray Quit calls this before falling back to taskkill) ---

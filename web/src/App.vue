@@ -15,9 +15,15 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { useData } from '@/composables/useData'
 import { usePanels } from '@/composables/usePanels'
 import { SHELL_BASE_MAX, SHELL_WIDE_MAX, useShellWidth } from '@/composables/useShellWidth'
+import { applyWindowSizeHint } from '@/lib/window-size-hint'
 import SettingsPanel from '@/shell/SettingsPanel.vue'
 import Sidebar from '@/shell/Sidebar.vue'
 import { usePushPanel } from '@/shell/usePushPanel'
+
+// A portable (--app) window forwarded into an already-running Chromium instance ignores
+// --window-size and the saved placement; the daemon/tray tag its URL with the size it should
+// be and we correct it here before first paint. No-op in a browser tab or on an un-hinted URL.
+applyWindowSizeHint()
 
 const { t } = useI18n()
 
