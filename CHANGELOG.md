@@ -57,6 +57,13 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
+- **CI actually typechecks now, and it covers the tests too.** The job had been named
+  "lint · typecheck · build · test" since day one while never running a typecheck — and something
+  had already slipped through: the portable-window exports (`appWindowPlacementKey`,
+  `hasRememberedBounds`, `quoteWinArg`) went undeclared for two commits, which nothing noticed
+  because nothing looked. `tests/` was outside every tsconfig for the same reason, so a test could
+  only fail at runtime; wiring it in immediately caught a real error in a new fixture. All 34 test
+  files across the three test directories are covered now.
 - **Copy the session file to the clipboard.** A new button beside "save a copy" puts the `.jsonl`
   FILE on the clipboard — not its text — so Ctrl+V into a folder, a chat or an email pastes the
   actual file, named after the session rather than its uuid. A web page cannot do this at all (no

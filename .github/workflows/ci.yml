@@ -38,6 +38,12 @@ jobs:
       - name: Lint + format (Biome)
         run: bun run lint
 
+      # The job has been named "typecheck" since day one but never ran one, so a change could go
+      # green here carrying real type errors — and one was: the portable-window exports went
+      # undeclared for two commits with nothing to notice. Covers src AND every tests/ dir.
+      - name: Typecheck
+        run: bun run typecheck
+
       - name: i18n check (web)
         run: bun run --cwd web check:i18n
 
