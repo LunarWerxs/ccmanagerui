@@ -114,12 +114,17 @@ watch([open, editItem], ([isOpen]) => {
   form.not_before_local = ''
 })
 
+// Select items may not carry an empty-string value (the machinery drops them — an ''-valued
+// "Ambient" option silently never rendered, so you couldn't switch BACK to Ambient), so Ambient
+// gets a sentinel; '' (the pristine default) and the sentinel both mean ambient at submit.
+const AMBIENT = '__ambient__'
+
 // Run-as options, in preference order: Ambient, then every signed-in instance (Desktop rows are
 // the account rows; a CLI instance LINKED to one is the same account and would be a duplicate
 // entry, so only unlinked CLI logins appear), then any legacy pasted credentials. Instance values
 // are prefixed ('desktop:<dir>' / 'cli:<id>'); a bare uuid is a sqlite accounts row.
 const accountOptions = computed(() => [
-  { value: '', label: t('builder.accountAmbient') },
+  { value: AMBIENT, label: t('builder.accountAmbient') },
   ...instances.value
     .filter((i) => i.account?.email)
     .map((i) => ({
@@ -161,7 +166,7 @@ async function submit() {
   error.value = null
   const not_before = form.not_before_local ? new Date(form.not_before_local).toISOString() : null
   // Split the one picker value back into its two storage shapes (see accountOptions).
-  const runAs = form.account_id
+  const runAs = form.account_id === AMBIENT ? '' : form.account_id
   const isInstanceRef = runAs.startsWith('desktop:') || runAs.startsWith('cli:')
   const shared = {
     prompt: form.prompt,
