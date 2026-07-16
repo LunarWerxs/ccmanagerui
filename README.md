@@ -34,6 +34,14 @@
 
 ## Quick start
 
+**Download a release (no Bun needed):** grab the bundle for your OS from
+[Releases](https://github.com/LunarWerxs/ccmanagerui/releases) — a self-contained executable
+(Windows x64, Linux x64/arm64, macOS x64/arm64) with the web UI beside it. Unzip and run
+`CCManagerUI.exe` (or `./ccmanagerui`); on Windows, `misc\Tray-Launch.vbs` gives you the
+system-tray icon instead of a console window.
+
+**Or run from source:**
+
 ```sh
 git clone https://github.com/LunarWerxs/ccmanagerui.git
 cd ccmanagerui && bun install

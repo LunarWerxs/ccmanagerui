@@ -6,7 +6,24 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-16
+
 ### Fixed
+
+- **Quitting could kill your real Claude Desktop chat.** The External row (the regular,
+  non-isolated Claude Desktop) can no longer be quit with one click: the server refuses the
+  default profile dir without an explicit confirmation (`confirmExternal`, the quit-side analog
+  of Delete's existing guard), and the UI routes it through a warning dialog. The "Browser
+  Dance" copy now names ISOLATED instances and says outright that your regular Claude Desktop
+  should stay open — the old "quit every other running instance" wording steered a user into
+  closing a real conversation.
+- **The MSIX warning banner could be flat wrong.** `manageable` now also accepts a LIVE running
+  Claude process (carrying `--user-data-dir`) as proof of a working classic install, the
+  authoritative `Get-AppxPackage` probe runs (and overrides) when filesystem leftovers from an
+  uninstalled MSIX would otherwise pin the verdict forever, the classic binary resolves via the
+  stable Squirrel stub first (versioned `app-<ver>` dirs are replaced on every update), and the
+  banner re-verifies fresh after any successful open/create and every 60s while visible — so
+  "install the classic build" actually clears it once you do.
 
 - **A run that merely TALKED about rate limits was marked rate-limited.** The detector matched its
   patterns against every event of a run — tool inputs and tool results included — so an agent that
@@ -74,6 +91,26 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
+- **Real executables on every release.** A tag push now cross-compiles self-contained binaries
+  (Bun runtime embedded — no install step) for Windows x64, Linux x64/arm64, and macOS x64/arm64,
+  smoke-tests each one on real hardware for its OS (`--version`, `/api/health`, the served SPA),
+  and attaches them to a draft GitHub release. The compiled binary carries every process mode as a
+  subcommand (`--version`, `--mcp`, the detached dispatch runner), keeps its state under
+  `~/.ccmanagerui/`, serves the SPA from a sidecar `web/dist/` next to the exe, and the Windows
+  zip ships the tray toolkit (the tray detects the compiled layout — no Bun on PATH required).
+  Packaged builds report `distribution: "compiled"` and honestly disable the git-based
+  self-update, pointing at the Releases page instead.
+- **Run queued work as any signed-in instance — no token pasting.** The queue's "Run as" picker
+  now lists every signed-in desktop instance and (unlinked) CLI instance; the detached runner
+  extracts that instance's own OAuth token value-blind at spawn time, and fails the run with a
+  clear "signed out?" message instead of silently running as Ambient. Signing in on the
+  Instances tab is now the one way accounts get added — the Settings paste-a-token "Add account"
+  form is gone (existing pasted credentials still work and can be removed; the raw
+  `POST /api/accounts` route remains for headless/API-key setups).
+- **CLI sign-in on every instance row.** Each row's actions menu now carries the CLI section:
+  Launch / Sign in + Unlink when a CLI login is linked, and a create-on-demand "Sign in CLI"
+  (creates the CLI instance, links it, opens the `/login` terminal) when none is. The inline
+  table sub-line is gone — the table stays one row tall per instance.
 - **A quota percentage is now quantified into something you can plan with.** "98% used" is not a
   decision: 98% with a reset in 20 minutes is fine, while 98% with a reset in four days at 1%/hour
   means being cut off mid-task in about two hours. Same number, opposite action. Anthropic publishes
