@@ -87,6 +87,59 @@ test('dispatchItem: a fake run completes, records events, and cleans up its spec
   expect(dispatch.isActive(item.id)).toBe(false)
 })
 
+// Instance-pinning must never silently degrade to Ambient credentials: a queue item's instance_ref
+// that doesn't resolve to a real, live instance has to fail loudly BEFORE the runner ever launches
+// (dispatch.ts never registers the item in `active`, so isActive must read false throughout).
+test('dispatchItem: an unrecognized instance_ref prefix fails loudly instead of falling back to Ambient', async () => {
+  const item = makeItem({ instance_ref: 'garbage:foo' })
+  await dispatch.dispatchItem(item)
+
+  const row = statusOf(item.id)
+  expect(row?.status).toBe('failed')
+  expect(row?.exit_code).toBe(-1)
+  expect(dispatch.isActive(item.id)).toBe(false)
+
+  const events = dispatch.getRunEvents(item.id)
+  expect(events.some((e) => e.text.includes('malformed'))).toBe(true)
+})
+
+test('dispatchItem: "desktop:" with an empty suffix fails loudly instead of falling back to Ambient', async () => {
+  const item = makeItem({ instance_ref: 'desktop:' })
+  await dispatch.dispatchItem(item)
+
+  const row = statusOf(item.id)
+  expect(row?.status).toBe('failed')
+  expect(row?.exit_code).toBe(-1)
+
+  const events = dispatch.getRunEvents(item.id)
+  expect(events.some((e) => e.text.includes('malformed'))).toBe(true)
+})
+
+test('dispatchItem: "cli:" with an empty suffix fails loudly instead of falling back to Ambient', async () => {
+  const item = makeItem({ instance_ref: 'cli:' })
+  await dispatch.dispatchItem(item)
+
+  const row = statusOf(item.id)
+  expect(row?.status).toBe('failed')
+  expect(row?.exit_code).toBe(-1)
+
+  const events = dispatch.getRunEvents(item.id)
+  expect(events.some((e) => e.text.includes('CLI instance not found'))).toBe(true)
+})
+
+test('dispatchItem: a "desktop:" ref pointing at a deleted/nonexistent dir fails loudly', async () => {
+  const missingDir = join(tmpdir(), `ccmanagerui-missing-desktop-${counter}-${Date.now()}`)
+  const item = makeItem({ instance_ref: `desktop:${missingDir}` })
+  await dispatch.dispatchItem(item)
+
+  const row = statusOf(item.id)
+  expect(row?.status).toBe('failed')
+  expect(row?.exit_code).toBe(-1)
+
+  const events = dispatch.getRunEvents(item.id)
+  expect(events.some((e) => e.text.includes('desktop instance not found'))).toBe(true)
+})
+
 // THE guard for the promise the whole detached design exists to keep: "close CC Manager UI and your
 // runs carry on". It exists because that promise was previously only "verified manually", and
 // nothing stopped it regressing.

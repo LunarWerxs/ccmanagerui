@@ -1,3 +1,4 @@
+import { isDispatchReady } from './boot-state'
 import { db, getSetting, setSetting } from './db'
 import { activeCount, dispatchItem, isSessionActive } from './dispatch'
 import type { QueueItem, SchedulerState } from './types'
@@ -18,6 +19,10 @@ export function tomorrowTime(): string {
 
 function tick() {
   if (getSetting('scheduler_enabled') !== '1') return
+  // Don't dispatch until reattachRuns() has settled: a run that survived the previous daemon isn't
+  // in `active` yet, so isSessionActive() below would wrongly say "free" and we'd double-dispatch
+  // that session. See boot-state.ts. The timer keeps ticking; it just waits out the boot window.
+  if (!isDispatchReady()) return
   const maxConcurrent = num('max_concurrent', 3)
   const spacingSeconds = num('spacing_seconds', 60)
 

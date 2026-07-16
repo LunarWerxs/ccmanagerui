@@ -12,7 +12,7 @@
 // auto-resume monitor.
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { PORT, VERSION } from './config'
+import { IS_COMPILED, PORT, VERSION } from './config'
 import { readInstanceInfo } from './instance'
 import type { McpEngineTool } from './mcp-stdio.mjs'
 import { runMcpStdio } from './mcp-stdio.mjs'
@@ -34,13 +34,19 @@ export function daemonBase(): string {
  *  in-process against different code. */
 class DaemonUnreachable extends Error {}
 
+/** How to START the daemon, phrased for THIS distribution: a packaged build has no Bun, so telling
+ *  its user to `bun run start` is a dead end — point them at the executable / tray instead. */
+const startHint = IS_COMPILED
+  ? 'Start it by running the CCManagerUI executable (or its tray shortcut).'
+  : 'Start it with `bun run start`.'
+
 async function api(pathname: string, init?: RequestInit): Promise<unknown> {
   let res: Response
   try {
     res = await fetch(`${daemonBase()}${pathname}`, init)
   } catch (e) {
     throw new DaemonUnreachable(
-      `couldn't reach the CC Manager UI daemon at ${daemonBase()}. Start it with \`bun run start\`. (${e instanceof Error ? e.message : String(e)})`,
+      `couldn't reach the CC Manager UI daemon at ${daemonBase()}. ${startHint} (${e instanceof Error ? e.message : String(e)})`,
     )
   }
   if (!res.ok) throw new Error(`CC Manager UI ${res.status}: ${await res.text()}`)
@@ -147,6 +153,11 @@ export const TOOLS: McpEngineTool[] = [
           enum: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
         },
         account_id: { type: 'string' },
+        instance_ref: {
+          type: 'string',
+          description:
+            "Run under a signed-in instance's login: 'desktop:<dir>' (a dir from list_instances) or 'cli:<id>' (an id from list_cli_instances). Takes precedence over account_id.",
+        },
         new_chat: {
           type: 'boolean',
           description: 'Start a brand-new session instead of resuming.',
@@ -165,13 +176,14 @@ export const TOOLS: McpEngineTool[] = [
   {
     name: 'update_queue_item',
     description:
-      'MUTATES: patch a queue item (title, cwd, prompt, model, effort, permission_mode, account_id, status, position, new_chat, fork).',
+      "MUTATES: patch a queue item (title, cwd, prompt, model, effort, permission_mode, account_id, instance_ref, status, position, new_chat, fork). instance_ref ('desktop:<dir>' from list_instances, or 'cli:<id>' from list_cli_instances) runs the item under that signed-in instance's login and takes precedence over account_id.",
     inputSchema: S(
       {
         id: { type: 'string' },
         patch: {
           type: 'object',
-          description: 'Fields to update; any subset of the queue item columns.',
+          description:
+            "Fields to update; any subset of the queue item columns, e.g. instance_ref: run under a signed-in instance's login ('desktop:<dir>' from list_instances or 'cli:<id>' from list_cli_instances) — takes precedence over account_id.",
         },
       },
       ['id', 'patch'],
@@ -207,7 +219,7 @@ export const TOOLS: McpEngineTool[] = [
   {
     name: 'list_accounts',
     description:
-      'List saved dispatch accounts (label, auth_type, created_at). Secrets are always masked, never returned in full.',
+      'List only legacy, manually-added credentials (label, auth_type, created_at) from the old pasted-credentials table. Secrets are always masked, never returned in full. This is NOT the primary account list — most signed-in accounts live on instances now; use list_instances / list_cli_instances for those.',
     inputSchema: S(),
     run: () => api('/api/accounts'),
   },

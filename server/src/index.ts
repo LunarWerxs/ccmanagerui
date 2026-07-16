@@ -16,6 +16,7 @@ import {
   startAutoUpdate,
   stopAutoUpdate,
 } from './auto-update'
+import { markDispatchReady } from './boot-state'
 import {
   CONFIG_DIR,
   HOST,
@@ -83,6 +84,7 @@ import {
   writeInstanceInfo,
 } from './instance'
 import { initFileLogging } from './log-file.mjs'
+import { isLoopbackOrigin, loopbackGuard } from './loopback-guard'
 import {
   getMonitorSettings,
   listMonitorAccounts,
@@ -167,6 +169,20 @@ function coerceItem(row: any): QueueItem {
   return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
 }
 
+// Dispatch-argv enums, validated SERVER-SIDE (the MCP/web schemas are advisory only). permission_mode
+// especially: it flows into `claude --permission-mode <v>` (dispatch.ts buildArgv), and
+// `bypassPermissions` runs every tool with no approval — so a garbage/unexpected value must be
+// rejected here, never passed through to the CLI. A null/absent value is fine (CLI default).
+const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'bypassPermissions', 'plan'])
+const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+/** Returns an error string if the field is present-but-invalid, else null. */
+function invalidEnum(value: unknown, valid: Set<string>, field: string): string | null {
+  if (value == null) return null
+  if (typeof value !== 'string' || !valid.has(value))
+    return `${field} must be one of: ${[...valid].join(', ')}`
+  return null
+}
+
 /** Parse a request JSON body as an object. Anything non-object — malformed JSON OR a valid but
  *  non-object literal (`null`, `42`, `"x"`) — degrades to `{}`, so the downstream `body.x` /
  *  `'x' in body` reads never throw a 500 on a hostile or empty body. This is the leniency every
@@ -199,7 +215,14 @@ function listAccounts(): Account[] {
 }
 
 const app = new Hono()
-app.use('/api/*', cors())
+// CORS narrowed to loopback origins (defense-in-depth for cross-origin READABILITY); the actual
+// cross-site protection is loopbackGuard below, which rejects the REQUEST — see loopback-guard.ts
+// for why a CORS allowlist alone is insufficient (the "simple request" write-CSRF bypasses it).
+app.use('/api/*', cors({ origin: (origin) => (origin && isLoopbackOrigin(origin) ? origin : '') }))
+// Reject browser cross-site requests to the loopback API (drive-by CSRF → RCE). Runs after cors so
+// preflight OPTIONS is answered by cors; applies to every /api/* verb. NOT applied to /oauth/*
+// (those are legitimate cross-site top-level navigations returning from the OAuth provider).
+app.use('/api/*', loopbackGuard)
 
 // --- health (also the single-instance probe: body.service must equal SERVICE_NAME) ---
 app.get('/api/health', (c) =>
@@ -471,6 +494,10 @@ app.post('/api/queue', async (c) => {
   ) {
     return c.json({ error: 'not_before must be an ISO timestamp' }, 400)
   }
+  const enumError =
+    invalidEnum(body.permission_mode, VALID_PERMISSION_MODES, 'permission_mode') ??
+    invalidEnum(body.effort, VALID_EFFORTS, 'effort')
+  if (enumError) return c.json({ error: enumError }, 400)
   // normalize to UTC ISO so the scheduler's lexicographic compare is always sound
   const notBefore = body.not_before ? new Date(Date.parse(body.not_before)).toISOString() : null
   const posRow = db
@@ -517,6 +544,13 @@ app.patch('/api/queue/:id', async (c) => {
   if ('session_id' in body && (typeof body.session_id !== 'string' || !body.session_id.trim())) {
     return c.json({ error: 'session_id must be a non-empty string' }, 400)
   }
+  // Same server-side enum guard as POST: never patch a garbage permission_mode/effort into a row
+  // (permission_mode reaches `claude --permission-mode <v>`). Only checked when the field is present.
+  const patchEnumError =
+    ('permission_mode' in body
+      ? invalidEnum(body.permission_mode, VALID_PERMISSION_MODES, 'permission_mode')
+      : null) ?? ('effort' in body ? invalidEnum(body.effort, VALID_EFFORTS, 'effort') : null)
+  if (patchEnumError) return c.json({ error: patchEnumError }, 400)
   const allow: Record<string, (v: any) => unknown> = {
     session_id: String,
     title: String,
@@ -1164,7 +1198,9 @@ if (IS_COMPILED) cleanupStaleUpdateArtifacts()
 // A tray Quit / auto-update relaunch / crash leaves detached `claude` runs still executing. Recover
 // them now: rebuild each run's events from its on-disk log and resume tailing to completion, so the
 // UI shows them live again and their final status is recorded instead of being stuck 'running'.
-void reattachRuns()
+// The scheduler/monitor auto-dispatchers stay parked (boot-state.ts) until this settles, so they
+// can't double-dispatch a surviving run's session before it's back in the `active` map.
+void reattachRuns().finally(markDispatchReady)
 
 startAutoUpdate()
 

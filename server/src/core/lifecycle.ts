@@ -15,6 +15,7 @@
 
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { basename } from 'node:path'
+import { linkCliInstanceToDesktop, listCliInstances } from './cli-instances'
 import { deleteInstanceMeta } from './instance-meta'
 import { openInstance } from './instances'
 import { defaultClaudeDir, instancesRoot, normalizePath } from './paths'
@@ -377,6 +378,17 @@ export async function removeInstance(
 
   // Drop any UI metadata (label/icon/color) so the meta file doesn't accrete orphan entries.
   deleteInstanceMeta(normDir)
+
+  // Clear the link on any CLI instance associated with this desktop dir. Left alone, a linked CLI
+  // instance would become a ghost: still "linked" (so CliInstancesSection's unlinkedCliInstances
+  // filter hides it from the standalone CLI table) even though the desktop row it was linked to no
+  // longer exists — invisible and unmanageable. Unlinking returns it to the CLI Instances table.
+  for (const cli of listCliInstances()) {
+    const linkedDir = cli.associatedDesktopDir ? normalizePath(cli.associatedDesktopDir) : null
+    if (linkedDir === normDir) {
+      linkCliInstanceToDesktop(cli.id, null, null)
+    }
+  }
 
   return {
     ok: true,

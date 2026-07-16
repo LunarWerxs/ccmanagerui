@@ -52,11 +52,16 @@ function reader(snap: UsageSnapshot): MonitorDeps & { asked: (string | null)[] }
 
 const PREFIX = 'MONTEST_'
 
-function insertRateLimited(id: string, sessionId: string, accountId: string | null = null): void {
+function insertRateLimited(
+  id: string,
+  sessionId: string,
+  accountId: string | null = null,
+  instanceRef: string | null = null,
+): void {
   db.query(
-    `insert into queue_items (id, session_id, title, cwd, prompt, account_id, status, position, created_at)
-     values (?, ?, ?, ?, ?, ?, 'rate_limited', 0, ?)`,
-  ).run(id, sessionId, 'test run', 'D:/x', 'do work', accountId, Date.now())
+    `insert into queue_items (id, session_id, title, cwd, prompt, account_id, instance_ref, status, position, created_at)
+     values (?, ?, ?, ?, ?, ?, ?, 'rate_limited', 0, ?)`,
+  ).run(id, sessionId, 'test run', 'D:/x', 'do work', accountId, instanceRef, Date.now())
 }
 
 function stateFor(itemId: string) {
@@ -119,6 +124,23 @@ describe('monitor gate', () => {
     const s = stateFor(`${PREFIX}e`)
     expect(s?.state).toBe('blocked_weekly')
     expect(s?.resumeItemId).toBeNull()
+  })
+
+  // The regression this guards: enqueueResume's INSERT used to omit instance_ref, so an
+  // instance-pinned run that got auto-resumed silently lost its pin and resumed as Ambient —
+  // defeating the entire point of pinning (wrong credentials, and never surfaced as an error).
+  test('a rate-limited run pinned to an instance carries that pin forward into its auto-resume', async () => {
+    setSetting('monitor_enabled', '1')
+    insertRateLimited(`${PREFIX}f`, `${PREFIX}sess-f`, null, 'desktop:C:\\fake\\dir')
+    await runMonitorOnce(reader(snapshot(10)))
+    const s = stateFor(`${PREFIX}f`)
+    expect(s?.state).toBe('scheduled')
+    const resume = db
+      .query<{ instance_ref: string | null }, [string]>(
+        'select instance_ref from queue_items where id = ?',
+      )
+      .get(s?.resumeItemId as string)
+    expect(resume?.instance_ref).toBe('desktop:C:\\fake\\dir')
   })
 
   test('is idempotent — a second pass does not add a duplicate state row or a second resume', async () => {

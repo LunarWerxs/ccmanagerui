@@ -595,6 +595,23 @@ async function tailRun(id: string, entry: ActiveEntry): Promise<void> {
   }
 }
 
+/** Fail a queue item BEFORE it's ever registered in `active` (finalize() no-ops until active.set,
+ *  so the terminal state has to be written directly here — same fields finalize() sets). Used for
+ *  every pre-launch instance-pinning failure: a pinned run must NEVER silently fall back to Ambient
+ *  credentials, so an instance_ref that doesn't resolve to a real, live instance fails loudly here
+ *  instead of reaching the runner with desktopDir/cliConfigDir both null. */
+function failPreLaunch(item: QueueItem, message: string): void {
+  recordEvent(item.id, 'system', 'meta', message, null)
+  db.query(
+    'update queue_items set status = ?, finished_at = ?, exit_code = ?, pid = null where id = ?',
+  ).run('failed', new Date().toISOString(), -1, item.id)
+  publish(item.id, {
+    type: 'status',
+    data: { id: item.id, status: 'failed', exit_code: -1, pid: null },
+  })
+  runtime.delete(item.id)
+}
+
 /** Spawn one queue item. Resolves when the run finalizes (or immediately if its session is busy).
  *  Registers the run in `active` SYNCHRONOUSLY before the first await, so callers (run-due,
  *  scheduler) that check isActive/isSessionActive right after see it as running. */
@@ -626,28 +643,36 @@ export async function dispatchItem(item: QueueItem): Promise<void> {
   let cliConfigDir: string | null = null
   if (item.instance_ref?.startsWith('desktop:')) {
     desktopDir = item.instance_ref.slice('desktop:'.length) || null
+    // Existence check (parallel to the 'cli:' branch's getCliInstance lookup below): a deleted
+    // desktop instance's dir must fail HERE, pre-launch, not reach the runner. An isolated desktop
+    // instance dir is a real folder on disk (Electron's --user-data-dir), so existsSync is sound.
+    if (desktopDir && !existsSync(desktopDir)) {
+      failPreLaunch(
+        item,
+        `run-as desktop instance not found (${desktopDir}) — it may have been deleted`,
+      )
+      return
+    }
   } else if (item.instance_ref?.startsWith('cli:')) {
     cliConfigDir = getCliInstance(item.instance_ref.slice('cli:'.length))?.configDir ?? null
     if (!cliConfigDir) {
-      // Fail loudly, pre-launch. finalize() can't be used here — it no-ops before active.set —
-      // so write the terminal state directly (same fields finalize sets).
-      recordEvent(
-        item.id,
-        'system',
-        'meta',
+      failPreLaunch(
+        item,
         `run-as CLI instance not found (${item.instance_ref}) — it may have been deleted`,
-        null,
       )
-      db.query(
-        'update queue_items set status = ?, finished_at = ?, exit_code = ?, pid = null where id = ?',
-      ).run('failed', new Date().toISOString(), -1, item.id)
-      publish(item.id, {
-        type: 'status',
-        data: { id: item.id, status: 'failed', exit_code: -1, pid: null },
-      })
-      runtime.delete(item.id)
       return
     }
+  }
+  // A non-null instance_ref that resolved to NEITHER a desktopDir NOR a cliConfigDir is malformed
+  // (an empty suffix like 'desktop:'/'cli:', an unrecognized prefix like 'garbage:foo', or a bare
+  // 'desktop' with no colon) — it must fail loudly here, not fall through and silently dispatch as
+  // Ambient. This is the other half of the pinning guarantee: a pinned run never runs unpinned.
+  if (item.instance_ref && !desktopDir && !cliConfigDir) {
+    failPreLaunch(
+      item,
+      `run-as instance reference is malformed (${item.instance_ref}) — expected 'desktop:<dir>' or 'cli:<id>'`,
+    )
+    return
   }
 
   const spec = {

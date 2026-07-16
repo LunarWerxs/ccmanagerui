@@ -17,6 +17,7 @@
 // switch + optional per-account opt-out; at most N resumes per session (resume_attempts cap) then
 // "needs human"; idempotent (never double-queues a resume for a session that already has one).
 
+import { isDispatchReady } from './boot-state'
 import { db, getSetting, setSetting } from './db'
 import { dispatchItem, isActive, isSessionActive } from './dispatch'
 import type {
@@ -226,8 +227,8 @@ function enqueueResume(item: QueueItem, notBefore: string): string {
   const position = (posRow?.m ?? 0) + 1
   db.query(
     `insert into queue_items
-       (id, session_id, title, cwd, prompt, model, effort, permission_mode, account_id, new_chat, fork, status, position, not_before, created_at)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'queued', ?, ?, ?)`,
+       (id, session_id, title, cwd, prompt, model, effort, permission_mode, account_id, instance_ref, new_chat, fork, status, position, not_before, created_at)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'queued', ?, ?, ?)`,
   ).run(
     id,
     item.session_id,
@@ -238,6 +239,9 @@ function enqueueResume(item: QueueItem, notBefore: string): string {
     item.effort ?? null,
     item.permission_mode ?? null,
     item.account_id ?? null,
+    // Carry the ORIGINAL item's pinning forward — otherwise an instance-pinned run that gets
+    // auto-resumed loses its pin and resumes as Ambient (wrong credentials, defeats the pin).
+    item.instance_ref ?? null,
     position,
     notBefore,
     Date.now(),
@@ -279,6 +283,10 @@ async function tick(deps: MonitorDeps): Promise<void> {
 /** Fire OUR scheduled resumes the moment they're due — independent of the global scheduler switch,
  *  since auto-resume is its own opt-in and shouldn't require the main scheduler to be on. */
 async function dispatchDueResumes(): Promise<void> {
+  // Same boot-window guard as the scheduler (boot-state.ts): a run that survived the previous
+  // daemon isn't in `active` until reattachRuns() settles, so isSessionActive() below could miss
+  // it and this would auto-resume a SECOND `claude` against a session already running.
+  if (!isDispatchReady()) return
   const now = new Date().toISOString()
   const rows = db
     .query<{ resume_item_id: string | null }, []>(
