@@ -461,7 +461,15 @@ onUnmounted(stopPolling)
                     <DropdownMenuItem :disabled="isBusy(inst)" @click="openLinkDialog(inst)">
                       <Monitor /> {{ $t('cliInstances.linkDesktop') }}
                     </DropdownMenuItem>
-                    <DropdownMenuItem :disabled="isBusy(inst)" @click="openAssociateDialog(inst)">
+                    <!-- "Associate account" points a CLI instance at a LEGACY pasted credential.
+                         With none saved (the norm now — accounts come from signing in instances),
+                         the dialog is an empty dead end, so hide it until such a credential exists.
+                         "Link to desktop instance" above is the primary path either way. -->
+                    <DropdownMenuItem
+                      v-if="associateAccountOptions.length > 0"
+                      :disabled="isBusy(inst)"
+                      @click="openAssociateDialog(inst)"
+                    >
                       <Link2 /> {{ $t('cliInstances.associate') }}
                     </DropdownMenuItem>
                     <DropdownMenuItem :disabled="isBusy(inst)" @click="openRenameDialog(inst)">
