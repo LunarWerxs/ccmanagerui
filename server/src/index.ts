@@ -16,7 +16,15 @@ import {
   startAutoUpdate,
   stopAutoUpdate,
 } from './auto-update'
-import { CONFIG_DIR, HOST, PORT, SERVICE_NAME, WEB_DIST_CANDIDATES } from './config'
+import {
+  CONFIG_DIR,
+  HOST,
+  IS_COMPILED,
+  PORT,
+  SERVICE_NAME,
+  VERSION,
+  WEB_DIST_CANDIDATES,
+} from './config'
 import {
   buildAuthorizeUrl,
   disable,
@@ -193,12 +201,23 @@ const app = new Hono()
 app.use('/api/*', cors())
 
 // --- health (also the single-instance probe: body.service must equal SERVICE_NAME) ---
-app.get('/api/health', (c) => c.json({ ok: true, service: SERVICE_NAME, ts: Date.now() }))
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    service: SERVICE_NAME,
+    version: VERSION,
+    distribution: IS_COMPILED ? 'compiled' : 'source',
+    ts: Date.now(),
+  }),
+)
 
 // --- self-update (git-based; see updater-engine.mjs via server/src/updater.ts) ---------------
 app.get('/api/update', async (c) =>
   c.json({
     ...(await checkForUpdate()),
+    // 'compiled' = a packaged release build: git-based self-update can't apply there, so the web
+    // UI hides the auto-update controls and points at the Releases page instead.
+    distribution: IS_COMPILED ? 'compiled' : 'source',
     autoUpdate: { enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() },
   }),
 )
@@ -643,7 +662,11 @@ app.post('/api/instances/:dir/open', async (c) => {
 })
 app.post('/api/instances/:dir/quit', async (c) => {
   const dir = decodeURIComponent(c.req.param('dir'))
-  return c.json(await quitInstance(dir))
+  const body = await jsonBody(c)
+  // Quitting the DEFAULT (non-isolated) Claude Desktop — the user's real chats — needs an explicit
+  // opt-in from the caller (the UI shows a confirmation first); quitInstance refuses it otherwise.
+  // Mirrors the delete route's confirmName pattern one section below.
+  return c.json(await quitInstance(dir, { confirmExternal: body.confirmExternal === true }))
 })
 app.post('/api/instances/:dir/focus', async (c) => {
   const dir = decodeURIComponent(c.req.param('dir'))
@@ -1087,7 +1110,13 @@ setAutoUpdateHooks({
   hasActiveRuns: () => activeCount() > 0,
   relaunch: () => {
     try {
-      const child = spawn(process.argv[0]!, process.argv.slice(1), {
+      // In a compiled binary process.argv is ['bun', '<virtual embedded path>', ...realArgs] — a
+      // placeholder pair, NOT respawnable. process.execPath + (real script in source mode) + the
+      // real args (argv.slice(2)) is the one shape that relaunches correctly in both modes.
+      const relaunchArgs = IS_COMPILED
+        ? process.argv.slice(2)
+        : [process.argv[1]!, ...process.argv.slice(2)]
+      const child = spawn(process.execPath, relaunchArgs, {
         cwd: process.cwd(),
         detached: true,
         stdio: 'ignore',
@@ -1131,11 +1160,15 @@ startMonitor()
 // Settings → General.
 startUsageRefresh()
 
-export default {
+// Explicit serve, NOT Bun's implicit `export default { fetch }` sugar: the implicit form only
+// auto-serves when THIS file is the process entrypoint, and the compiled binary reaches the daemon
+// via main.ts's dynamic import (where the default export would be silently inert — verified: the
+// daemon "booted", logged its URL, and listened on nothing).
+Bun.serve({
   port: boundPort,
   hostname: HOST,
   fetch: app.fetch,
   idleTimeout: 255,
-}
+})
 
 export type App = typeof app

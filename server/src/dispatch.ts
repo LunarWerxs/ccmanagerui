@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { DB_PATH, RUN_LOG_DIR, resolveClaudeExe } from './config'
+import { DB_PATH, IS_COMPILED, RUN_LOG_DIR, resolveClaudeExe } from './config'
 import { db } from './db'
 import { buildDetachedSpawn } from './detached-spawn.mjs'
 import { eventToTailEvents } from './transcript'
@@ -159,8 +159,12 @@ export function getRunEvents(id: string): RunEvent[] {
 
 export function buildArgv(item: QueueItem): string[] {
   const useFake = !!process.env.CCMANAGERUI_FAKE
+  // Compiled binaries can't spawn sibling .ts files (import.meta.dir is virtual inside the exe);
+  // the exe re-spawns itself with the __fake_claude subcommand instead (server/src/main.ts).
   const argv: string[] = useFake
-    ? [process.execPath, join(import.meta.dir, 'fake-claude.ts')]
+    ? IS_COMPILED
+      ? [process.execPath, '__fake_claude']
+      : [process.execPath, join(import.meta.dir, 'fake-claude.ts')]
     : [resolveClaudeExe()]
 
   if (!useFake) {
@@ -217,6 +221,14 @@ function handleLine(id: string, line: string) {
 // --- per-run files (owned by the detached runner; the daemon reads them) ------
 
 const DISPATCH_RUNNER = join(import.meta.dir, 'dispatch-runner.ts')
+
+/** The argv that spawns the detached runner in either mode: a source checkout spawns
+ *  `bun dispatch-runner.ts <spec>`; a compiled exe re-spawns ITSELF with the __dispatch_runner
+ *  subcommand (server/src/main.ts) — the sibling .ts file doesn't exist on disk there. */
+const runnerArgv = (specPath: string): string[] =>
+  IS_COMPILED
+    ? [process.execPath, '__dispatch_runner', specPath]
+    : [process.execPath, DISPATCH_RUNNER, specPath]
 const logPathFor = (id: string) => join(RUN_LOG_DIR, `${id}.stream.jsonl`)
 const statusPathFor = (id: string) => join(RUN_LOG_DIR, `${id}.status.json`)
 const specPathFor = (id: string) => join(RUN_LOG_DIR, `${id}.spec.json`)
@@ -279,11 +291,7 @@ function launchDetachedRunner(specPath: string): void {
     process.env.CCMANAGERUI_RUNNER_LAUNCH || (process.platform === 'win32' ? 'wmi' : 'posix')
 
   if (process.platform !== 'win32' || method === 'posix') {
-    const { argv } = buildDetachedSpawn(process.platform, [
-      process.execPath,
-      DISPATCH_RUNNER,
-      specPath,
-    ])
+    const { argv } = buildDetachedSpawn(process.platform, runnerArgv(specPath))
     nodeSpawn(argv[0]!, argv.slice(1), {
       stdio: 'ignore',
       detached: true,
@@ -294,7 +302,9 @@ function launchDetachedRunner(specPath: string): void {
 
   if (method === 'wmi') {
     // Each argv element double-quoted for CreateProcess; single-quotes escaped for the PS string.
-    const cmdline = [process.execPath, DISPATCH_RUNNER, specPath].map((s) => `"${s}"`).join(' ')
+    const cmdline = runnerArgv(specPath)
+      .map((s) => `"${s}"`)
+      .join(' ')
     // ProcessStartupInformation is NOT optional polish: Win32_Process.Create applies DEFAULT
     // STARTUPINFO, and `bun` is a console-subsystem exe, so the runner gets a REAL, VISIBLE console
     // window on the user's desktop for the whole run — the daemon's own `windowsHide: true` (below)
@@ -320,7 +330,7 @@ function launchDetachedRunner(specPath: string): void {
   // where it's blocked. The run works but will NOT survive Quit (a console child stays in the
   // daemon's job object) — that trade-off is documented on the setting in .env.example.
   const b = method === 'startb' ? ['/b'] : []
-  nodeSpawn('cmd', ['/c', 'start', '', ...b, process.execPath, DISPATCH_RUNNER, specPath], {
+  nodeSpawn('cmd', ['/c', 'start', '', ...b, ...runnerArgv(specPath)], {
     stdio: 'ignore',
     windowsHide: true,
     detached: true,

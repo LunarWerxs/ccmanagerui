@@ -1,0 +1,168 @@
+# Release: compile real executables for every OS and attach them to a DRAFT GitHub release.
+#
+# Trigger: pushing a version tag (v0.2.1). The maintainer edits the draft's notes and publishes —
+# matching how the existing releases carry hand-written Highlights prose. workflow_dispatch runs
+# build + smoke only (no release), for validating the pipeline without a tag.
+#
+# Design notes (verified 2026-07-16 against a real compiled exe on Windows):
+# - `bun build --compile` cross-compiles ALL targets from one Linux runner; no per-OS build matrix
+#   is needed for the COMPILE step. What cross-compiling does NOT prove is that the binary RUNS —
+#   the smoke job boots each bundle on real hardware for its OS and asserts /api/health, because
+#   the failure modes here (virtual import.meta.dir paths, the implicit-serve entrypoint trap) all
+#   pass the build and only explode at runtime.
+# - The SPA is a SIDECAR web/dist folder next to the binary, not embedded: Vite emits hashed
+#   filenames unknown at compile time, and config.ts's APP_ROOT already resolves web/dist beside
+#   the exe in compiled mode.
+# - The Windows zip ships the misc/ tray toolkit; CCManagerUI-Tray.ps1 detects the compiled layout
+#   (CCManagerUI.exe at the app root) and starts the exe instead of `bun server/src/index.ts`.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: compile all targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Verify tag matches package.json version
+        if: github.ref_type == 'tag'
+        run: |
+          PKG_V=$(bun -e 'console.log(require("./package.json").version)')
+          TAG_V="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_V" != "$TAG_V" ]; then
+            echo "tag v$TAG_V does not match package.json version $PKG_V — bump package.json (and CHANGELOG) first"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build web SPA (shared by every target)
+        run: bun run --cwd web build
+
+      - name: Compile + package every target
+        run: |
+          VERSION=$(bun -e 'console.log(require("./package.json").version)')
+          mkdir -p out
+          for target in windows-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            name="CCManagerUI-${VERSION}-${target}"
+            stage="out/${name}"
+            mkdir -p "${stage}/web"
+            cp -R web/dist "${stage}/web/dist"
+            cp LICENSE CHANGELOG.md "${stage}/"
+            cp .github/RELEASE-README.md "${stage}/README.md"
+            if [ "$target" = "windows-x64" ]; then
+              bun build --compile --minify --sourcemap=none --target="bun-${target}" \
+                --windows-icon=misc/CCManagerUI.ico --windows-title="CC Manager UI" \
+                --outfile="${stage}/CCManagerUI.exe" server/src/main.ts
+              mkdir -p "${stage}/misc"
+              cp misc/CCManagerUI-Tray.ps1 misc/Tray-Host.ps1 misc/Tray-Launch.vbs \
+                 misc/New-TrayShortcut.ps1 misc/CCManagerUI.ico "${stage}/misc/"
+              (cd out && zip -qr "${name}.zip" "${name}")
+            else
+              bun build --compile --minify --sourcemap=none --target="bun-${target}" \
+                --outfile="${stage}/ccmanagerui" server/src/main.ts
+              tar -C out -czf "out/${name}.tar.gz" "${name}"
+            fi
+            rm -rf "${stage}"
+          done
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundles
+          path: |
+            out/*.zip
+            out/*.tar.gz
+          if-no-files-found: error
+
+  # Boot each bundle on REAL hardware for its OS: --version answers, /api/health reports
+  # service+distribution, and the sidecar SPA serves. This is the step that catches the
+  # compiled-only runtime bugs a green cross-compile can't.
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            bin: ccmanagerui
+          - os: windows-latest
+            target: windows-x64
+            bin: CCManagerUI.exe
+          - os: macos-latest # arm64 runner
+            target: darwin-arm64
+            bin: ccmanagerui
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundles
+          path: out
+
+      - name: Unpack and boot the real binary
+        shell: bash
+        run: |
+          cd out
+          bundle=$(ls CCManagerUI-*-${{ matrix.target }}.* | head -1)
+          echo "smoking $bundle"
+          case "$bundle" in
+            *.zip) unzip -q "$bundle" ;;
+            *) tar -xzf "$bundle" ;;
+          esac
+          dir="${bundle%.zip}"; dir="${dir%.tar.gz}"
+          cd "$dir"
+          chmod +x "${{ matrix.bin }}" 2>/dev/null || true
+          "./${{ matrix.bin }}" --version
+          export CCMANAGERUI_HOME="$RUNNER_TEMP/ccm-smoke-home"
+          PORT=7797 "./${{ matrix.bin }}" > daemon.out 2>&1 &
+          DAEMON_PID=$!
+          ok=""
+          for _ in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:7797/api/health > health.json 2>/dev/null; then ok=1; break; fi
+            sleep 0.5
+          done
+          if [ -z "$ok" ]; then echo "daemon never served /api/health"; cat daemon.out; exit 1; fi
+          cat health.json; echo
+          grep -q '"service":"ccmanagerui"' health.json
+          grep -q '"distribution":"compiled"' health.json
+          curl -sf http://127.0.0.1:7797/ | grep -qi '<!doctype html'
+          kill $DAEMON_PID 2>/dev/null || true
+
+  release:
+    name: draft the GitHub release
+    if: github.ref_type == 'tag'
+    needs: [build, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundles
+          path: out
+
+      # DRAFT on purpose: the maintainer writes the Highlights prose and publishes by hand,
+      # consistent with the existing releases.
+      - name: Create draft release with binaries attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/*.zip out/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "CC Manager UI ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            --draft

@@ -26,6 +26,13 @@ $appRoot = Split-Path -Parent $scriptDir
 # source-checkout users never see "Rebuild & Restart"; they use misc/Rebuild.bat instead.
 $isDevTree = ($env:CCMANAGERUI_DEV -eq "1")
 
+# Release layout (the GitHub-release zip): a compiled CCManagerUI.exe sits at the app root, next
+# to web\dist — start THAT instead of `bun server/src/index.ts`, skip the bun-based first run, and
+# don't require bun on PATH at all (the exe embeds its runtime). A source checkout has no exe at
+# the root, so this stays the dev/bun path there.
+$exeFile = Join-Path $appRoot "CCManagerUI.exe"
+$isCompiledTree = Test-Path $exeFile
+
 # Config dir honours CCMANAGERUI_HOME (matches server/src/config.ts CONFIG_DIR), else
 # ~/.ccmanagerui — so the runtime pointer + daemon log path the engine reads always track
 # where the daemon writes.
@@ -48,11 +55,11 @@ $TrayConfig = @{
   UrlHost              = "localhost"
   InfoFile             = $infoFile
   DaemonLogPath        = $logPath
-  StartCommand         = "bun server/src/index.ts"
+  StartCommand         = if ($isCompiledTree) { "`"$exeFile`"" } else { "bun server/src/index.ts" }
   StartEnv             = @{}                            # PortEnvVar covers PORT; token env var added below
   PortEnvVar           = "PORT"
-  EntryFile            = "server\src\index.ts"
-  FirstRun             = $firstRun
+  EntryFile            = if ($isCompiledTree) { "CCManagerUI.exe" } else { "server\src\index.ts" }
+  FirstRun             = if ($isCompiledTree) { $null } else { $firstRun }
   RebuildCommand       = "bun run build"
   RebuildLogName       = "CCManagerUI-Rebuild.log"
   IsDevTree            = $isDevTree
@@ -68,7 +75,7 @@ $TrayConfig = @{
   SelfTestMarker       = "CCMANAGERUI_TRAY_SELFTEST"
   MenuOpenLabel        = "Open CC Manager UI"
   MutexName            = "CCManagerUITrayHost"
-  RuntimeCheckCommand  = "bun"
+  RuntimeCheckCommand  = if ($isCompiledTree) { $exeFile } else { "bun" }   # Get-Command accepts a full exe path
   ScriptDir            = $scriptDir
   Root                 = $appRoot
   # OLD script's background worker (Restart / Rebuild & Restart) waited 15s for the daemon to

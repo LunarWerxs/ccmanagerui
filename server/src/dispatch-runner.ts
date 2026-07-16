@@ -10,7 +10,9 @@
 // completion, still writing the log; the next daemon reattaches by re-reading the log + a terminal
 // marker (see dispatch.ts reattachRuns). Verified end-to-end 2026-07-12.
 //
-// Run as: `bun dispatch-runner.ts <specPath>`  (spec written by dispatch.ts, JSON).
+// Run as: `bun dispatch-runner.ts <specPath>` from a source checkout, or as the compiled exe's
+// `__dispatch_runner <specPath>` subcommand (server/src/main.ts) — a compiled binary can't spawn
+// sibling .ts files by path, so it re-spawns itself. Spec written by dispatch.ts, JSON.
 //
 // The log is an append-only stream: `claude`'s raw stdout lines (stream-json) verbatim, plus two
 // kinds of runner marker lines the daemon recognizes:
@@ -102,8 +104,7 @@ function buildChildEnv(spec: RunSpec): Record<string, string> {
   return env
 }
 
-async function main(): Promise<void> {
-  const specPath = process.argv[2]
+async function main(specPath: string | undefined): Promise<void> {
   if (!specPath) process.exit(2)
   const spec: RunSpec = JSON.parse(readFileSync(specPath, 'utf8'))
   const startedAt = new Date().toISOString()
@@ -172,28 +173,37 @@ async function main(): Promise<void> {
   process.exit(0)
 }
 
-main().catch((err) => {
+/** The runner's whole lifecycle, error-fenced: any throw still leaves a terminal exit marker in
+ *  the log so the daemon can finalize the run instead of leaving it stuck 'running'. */
+export async function runDispatchRunner(specPath: string | undefined): Promise<void> {
   try {
-    const specPath = process.argv[2]
-    if (specPath) {
-      const spec: RunSpec = JSON.parse(readFileSync(specPath, 'utf8'))
-      logLine(
-        spec.logPath,
-        JSON.stringify({ __dispatch: 'stderr', text: `runner error: ${String(err)}` }),
-      )
-      logLine(
-        spec.logPath,
-        JSON.stringify({ __dispatch: 'exit', code: -1, at: new Date().toISOString() }),
-      )
-      writeStatus(spec, {
-        childPid: null,
-        startedAt: new Date().toISOString(),
-        state: 'exited',
-        code: -1,
-      })
+    await main(specPath)
+  } catch (err) {
+    try {
+      if (specPath) {
+        const spec: RunSpec = JSON.parse(readFileSync(specPath, 'utf8'))
+        logLine(
+          spec.logPath,
+          JSON.stringify({ __dispatch: 'stderr', text: `runner error: ${String(err)}` }),
+        )
+        logLine(
+          spec.logPath,
+          JSON.stringify({ __dispatch: 'exit', code: -1, at: new Date().toISOString() }),
+        )
+        writeStatus(spec, {
+          childPid: null,
+          startedAt: new Date().toISOString(),
+          state: 'exited',
+          code: -1,
+        })
+      }
+    } catch {
+      // nothing more we can do
     }
-  } catch {
-    // nothing more we can do
+    process.exit(0)
   }
-  process.exit(0)
-})
+}
+
+if (import.meta.main) {
+  await runDispatchRunner(process.argv[2])
+}

@@ -12,7 +12,7 @@
 // auto-resume monitor.
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { PORT } from './config'
+import { PORT, VERSION } from './config'
 import { readInstanceInfo } from './instance'
 import type { McpEngineTool } from './mcp-stdio.mjs'
 import { runMcpStdio } from './mcp-stdio.mjs'
@@ -468,10 +468,15 @@ export const TOOLS: McpEngineTool[] = [
   },
 ]
 
-export const SERVER_INFO = { name: 'ccmanagerui', version: '0.1.0' }
+export const SERVER_INFO = { name: 'ccmanagerui', version: VERSION }
+
+/** The stdio loop, callable from main.ts's `--mcp` subcommand (the compiled exe's MCP mode). */
+export function runMcp(): Promise<void> {
+  return runMcpStdio({ serverInfo: SERVER_INFO, tools: TOOLS })
+}
 
 // Only run the stdio loop when this file is the entry point (`bun run mcp`), not when a test
 // imports TOOLS/daemonBase — Bun sets import.meta.main false for module imports.
 if (import.meta.main) {
-  await runMcpStdio({ serverInfo: SERVER_INFO, tools: TOOLS })
+  await runMcp()
 }
