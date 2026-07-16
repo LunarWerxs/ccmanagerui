@@ -55,6 +55,73 @@ function New-TrayHostIcon([string]$icoPath, [string]$displayName) {
   return $ni
 }
 
+# --- Chromium app-window placement probe (feeds Open-AppUi's sizing decision) ---------
+# PowerShell port of the daemon's placement probe (server-lib/portable-window.mjs
+# appWindowPlacementKey/hasRememberedBounds and devwebui's rememberedPlacement,
+# server/src/window-size.ts), so a COLD start — the tray opening the window before the
+# daemon is even up — makes the same sizing decision the daemon's POST
+# /api/portable-window makes. Top-level rather than inside Start-TrayHost because both
+# are pure: dot-sourcing this file is enough to unit-test them.
+
+# The key Chromium files a saved app-window placement under — its own
+# GenerateApplicationNameFromURL: hostname + "_" + path. The PORT and the QUERY STRING
+# are both absent from the key (Chromium's omissions, not ours; verified Edge 150), so
+# probing with the plain app URL and launching with a ?window-size-tagged one land on
+# the SAME slot. $null for a URL that won't parse.
+function Get-AppWindowPlacementKey([string]$u) {
+  try {
+    $uri = [uri]$u
+    if (-not $uri.IsAbsoluteUri) { return $null }
+    return "$($uri.Host)_$($uri.AbsolutePath)"
+  } catch { return $null }
+}
+
+# The placement Chromium has saved for $u's window in $profileDir —
+# @{ Width; Height; Maximized } — or $null when nothing usable is stored (fresh profile,
+# unreadable/corrupt Preferences, junk rect). Carries the daemon probe's two
+# verified-on-Edge-150 subtleties:
+#   · Chromium writes prefs BY DOTTED PATH, so a placement key containing dots (any URL
+#     path with a dot in it) lands as NESTED dicts, not under the flat key its own
+#     GenerateApplicationNameFromURL produces. Probe flat first, then walk the key as a
+#     dotted path — requiring an object at every hop so a sibling window's dotted key
+#     that shares this key as a prefix can't read as "this window was saved".
+#   · maximized:true means the rect holds the pre-maximize RESTORE bounds, not the
+#     window's live size — surfaced so the caller can skip the size hint for it.
+# A rect under 50px a side is junk (zero-area rects, monitor-reconciliation leftovers;
+# Chromium's own drag-resize minimum sits well above 50), not a remembered size — the
+# same floor the daemon's hint path uses, which also subsumes portable-window.mjs's
+# positive-area rule on the --window-size decision.
+function Get-RememberedPlacement([string]$profileDir, [string]$u) {
+  $key = Get-AppWindowPlacementKey $u
+  if (-not $profileDir -or -not $key) { return $null }
+  try {
+    $prefsPath = Join-Path $profileDir "Default\Preferences"
+    if (-not (Test-Path $prefsPath)) { return $null }
+    $prefs = Get-Content $prefsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $placements = $prefs.browser.app_window_placement
+    $node = $placements.$key                     # flat probe first…
+    if ($null -eq $node) {                       # …then the dotted-path form
+      $node = $placements
+      foreach ($seg in $key.Split('.')) {
+        if ($node -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+        $node = $node.$seg
+      }
+    }
+    if ($node -isnot [System.Management.Automation.PSCustomObject]) { return $null }
+    foreach ($edge in @('left', 'top', 'right', 'bottom')) {
+      $v = $node.$edge
+      # Numbers only, as JS `typeof === "number"`: WinPS 5.1 deserializes JSON numbers as
+      # int/long/decimal, PS7 as long/double — anything else (missing, string, bool) is
+      # not a placement rect.
+      if (-not ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal])) { return $null }
+    }
+    $w = $node.right - $node.left
+    $h = $node.bottom - $node.top
+    if ($w -lt 50 -or $h -lt 50) { return $null }
+    return @{ Width = [int]$w; Height = [int]$h; Maximized = ($node.maximized -eq $true) }
+  } catch { return $null }
+}
+
 # =====================================================================================
 # Invoke-TrayHostSelfTest — headless -SelfTest. Proves the tray can actually start (runtime on
 # PATH, daemon entry exists, the icon LOADS into a real NotifyIcon then disposes), then reports
@@ -330,6 +397,33 @@ function Start-TrayHost($Config) {
   function Stop-DaemonHere([bool]$forceKill, [bool]$skipGraceful = $false) { Stop-Daemon $infoFile $port $serviceName (Get-TrayConfigValue $Config 'UrlHost' '127.0.0.1') $script:shutdownToken $headerPrefix $forceKill $skipGraceful }
 
   # --- Portable-window open path (UI-thread only) --------------------------------------
+  # Opt-in portable-window sizing, validated once here (unlike runtime.json, the app's own
+  # config can't change mid-run):
+  #   · PortableWindowSize = @{ Width; Height } — outer px for a window this profile has
+  #     NEVER seen. Without it Chromium's never-seen default is ~the whole work area
+  #     (~1905x2092 on a 4K display; verified Edge 150, Windows 11) — comically large for a
+  #     small single-purpose window. Passed only while NOTHING usable is remembered:
+  #     --window-size overrides a saved placement, so once the user sizes (or maximizes)
+  #     the window themselves, their geometry must win on every later launch. A malformed
+  #     value degrades to $null (feature off), never to a junk --window-size.
+  #   · PortableWindowSizeHint = $true — additionally append ?window-size=WxH to the URL,
+  #     for apps whose web build applies it via resizeTo. A FORWARDED --app launch (a
+  #     Chromium instance already running on the profile) ignores --window-size AND the
+  #     saved placement, inheriting the running window's geometry (verified Edge 150) —
+  #     only the page itself can correct that case, so this stays off for apps that don't
+  #     implement the applier (devwebui does: web/src/lib/window-size-hint.ts).
+  # Neither key set ⇒ Open-AppUi's launch line is byte-identical to what it always was.
+  $portableWindowSize = $null
+  $rawPortableSize = Get-TrayConfigValue $Config 'PortableWindowSize' $null
+  if ($rawPortableSize) {
+    try {
+      $pwsW = [int][math]::Round([double]$rawPortableSize.Width)
+      $pwsH = [int][math]::Round([double]$rawPortableSize.Height)
+      if ($pwsW -gt 0 -and $pwsH -gt 0) { $portableWindowSize = @{ Width = $pwsW; Height = $pwsH } }
+    } catch {}
+  }
+  $portableWindowSizeHint = [bool](Get-TrayConfigValue $Config 'PortableWindowSizeHint' $false)
+
   # First installed Chromium-family browser that understands --app= (msedge preferred, then
   # Chrome), or $null. Mirrors src/portable-window.mjs's Windows candidate list so the tray's
   # cold-start behavior (before the daemon is up) matches the daemon's own.
@@ -348,8 +442,11 @@ function Start-TrayHost($Config) {
   # Open the app UI at $url, honouring portableMode: re-reads runtime.json FRESH on every call
   # (so a setting flipped after this tray started is picked up on the next open) and, when
   # portableMode is truthy AND a Chromium browser is found, launches it as a chromeless --app=
-  # window (with a dedicated profile) instead of a normal tab. Never throws — worst case it
-  # falls back. Its body NEVER references hideTrayIcon or $tray.Visible: visibility and
+  # window (with a dedicated profile) instead of a normal tab. When the app opts in
+  # (PortableWindowSize / PortableWindowSizeHint, resolved above), the launch also carries the
+  # first-run --window-size and/or the ?window-size hint, so a cold tray start sizes the window
+  # the same way the daemon's own POST /api/portable-window path does. Never throws — worst
+  # case it falls back. Its body NEVER references hideTrayIcon or $tray.Visible: visibility and
   # where-the-UI-opens are orthogonal concerns (the launcher tests assert this decoupling).
   function Open-AppUi([string]$url) {
     $portable = $false
@@ -375,7 +472,41 @@ function Start-TrayHost($Config) {
         } catch {
           $profileArgs = @()
         }
-        Start-Process $browser -ArgumentList ($profileArgs + @("--app=$url"))
+        # First-run sizing: pass --window-size only while the profile remembers NOTHING usable
+        # for this URL's placement slot — a placement the user made by resizing (or maximizing:
+        # the rect then holds restore bounds, and the window reopens maximized natively) always
+        # wins, because --window-size would override it on every launch.
+        $sizeArgs = @()
+        if ($portableWindowSize) {
+          $placement = Get-RememberedPlacement $profileDir $url
+          if ($null -eq $placement) {
+            $sizeArgs = @("--window-size=$($portableWindowSize.Width),$($portableWindowSize.Height)")
+          }
+          # ?window-size=WxH hint: the size THIS window should have — remembered when there is
+          # one, else first-run, and never for a maximized window (the page's resizeTo would
+          # visibly un-maximize it). A forwarded launch ignores $sizeArgs and the saved
+          # placement alike, so the page correcting itself is the only fix that reaches that
+          # case. The query string is not part of Chromium's placement key, so the hint can't
+          # re-key the window; a URL that won't parse just goes out un-hinted.
+          if ($portableWindowSizeHint) {
+            $hint = $null
+            if ($null -eq $placement) {
+              $hint = "$($portableWindowSize.Width)x$($portableWindowSize.Height)"
+            } elseif (-not $placement.Maximized) {
+              $hint = "$($placement.Width)x$($placement.Height)"
+            }
+            if ($hint) {
+              try {
+                $b = New-Object System.UriBuilder($url)
+                $sizeParam = "window-size=$hint"
+                $q = $b.Query.TrimStart('?')
+                if ($q) { $b.Query = "$q&$sizeParam" } else { $b.Query = $sizeParam }
+                $url = $b.Uri.AbsoluteUri
+              } catch {}
+            }
+          }
+        }
+        Start-Process $browser -ArgumentList ($profileArgs + $sizeArgs + @("--app=$url"))
         return
       }
     }
