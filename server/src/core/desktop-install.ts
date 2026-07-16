@@ -12,17 +12,32 @@
 // MSIX; the classic ~217 MB exe stays available at
 // https://claude.ai/api/desktop/win32/<arch>/exe/latest/redirect (probed live 2026-07-10).
 //
+// `manageable` is never derived from the static filesystem guess alone: a running classic
+// process (core/process.ts's listClaudeProcesses(), which only ever returns processes whose
+// command line carried `--user-data-dir`) is direct proof a launchable classic binary exists,
+// even when resolveLaunchBinary()'s static scan misses it (e.g. a portable/relocated install).
+// So `manageable = directPath !== null || hasRunningClassic`.
+//
 // Detection is best-effort and never throws. MSIX signals, cheapest first:
 //   'packages-dir' — %LOCALAPPDATA%\Packages\Claude_<13-char-hash> exists (created at package
 //                    registration; the WindowsApps dir itself is ACL-locked, Packages is not)
 //   'exec-alias'   — %LOCALAPPDATA%\Microsoft\WindowsApps\claude.exe app-execution alias
-//   'appx'         — `Get-AppxPackage -Name Claude` (Anthropic's own documented detection);
-//                    spawned only when the filesystem signals found nothing, and cached.
+//   'appx'         — `Get-AppxPackage -Name Claude` (Anthropic's own documented detection), the
+//                    only AUTHORITATIVE signal. Spawned whenever classic evidence (directPath or
+//                    a running process) is still negative — REGARDLESS of whether a filesystem
+//                    signal already fired: skipping it "whenever any fs signal fired" (the old
+//                    rule) let a leftover packages-dir/exec-alias from an uninstalled MSIX pin
+//                    msixDetected true forever, since the probe never got a chance to correct it.
+//                    When the probe runs, its answer overrides the fs-signal verdict; when it
+//                    can't run (disabled via `appxProbe: null`, or the spawn fails), the fs
+//                    signals are the fallback verdict — a missing probe is never proof of
+//                    absence.
 
 import { existsSync, readdirSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { currentPlatform, resolveLaunchBinary } from './paths'
+import { listClaudeProcesses } from './process'
 import type { CMDesktopInstall } from './shared'
 
 /** MSIX package-family dirs look like `Claude_pzs8sxrjxfjjc` (name + 13-char publisher hash). */
@@ -35,6 +50,10 @@ export interface DetectDesktopInstallOptions {
   resolveDirect?: () => Promise<string | null>
   /** Override the Get-AppxPackage probe; pass null to disable it (tests). */
   appxProbe?: (() => Promise<boolean>) | null
+  /** Override live Claude-process enumeration (tests); pass null to disable it entirely
+   *  (treated as "no running instance found" rather than skipped-but-unknown). Defaults to
+   *  core/process.ts's listClaudeProcesses, narrowed to the one field this module needs. */
+  listRunningProcesses?: (() => Promise<{ dir?: string | null }[]>) | null
   /** Bypass the module cache. */
   fresh?: boolean
 }
@@ -161,7 +180,8 @@ export async function detectDesktopInstall(
   const injected =
     options.localAppData !== undefined ||
     options.resolveDirect !== undefined ||
-    options.appxProbe !== undefined
+    options.appxProbe !== undefined ||
+    options.listRunningProcesses !== undefined
   if (!injected && !options.fresh && cached && Date.now() - cached.at < CACHE_TTL_MS) {
     return cached.value
   }
@@ -191,20 +211,52 @@ export async function detectDesktopInstall(
   const msixSignals: string[] = []
   if (msixPackagesDirSignal(localAppData)) msixSignals.push('packages-dir')
   if (msixExecAliasSignal(localAppData)) msixSignals.push('exec-alias')
-  if (msixSignals.length === 0 && options.appxProbe !== null) {
+
+  // Live-process evidence: process.ts's parseProcessRecord() only ever constructs a
+  // CMProcessInfo when the command line carried `--user-data-dir` (process.ts:88-89), and
+  // listClaudeProcesses()'s default (includeChildren unset/false) further filters to `isMain`
+  // records — so every entry this returns has a non-null `dir` by construction; any entry at
+  // all is proof a classic launchable binary exists and is currently running. Short-circuited
+  // when directPath already resolved: manageable is already true, so there's no need to pay for
+  // the process-enumeration spawn.
+  let hasRunningClassic = false
+  if (directPath === null && options.listRunningProcesses !== null) {
     try {
-      if (await (options.appxProbe ?? msixAppxProbe)()) msixSignals.push('appx')
+      const running = await (options.listRunningProcesses ?? listClaudeProcesses)()
+      hasRunningClassic = running.some((p) => p.dir != null)
     } catch {
-      // Probe is best-effort only.
+      hasRunningClassic = false
     }
   }
+
+  const hasClassicEvidence = directPath !== null || hasRunningClassic
+
+  // Authoritative fallback — see the header comment for why this is gated on classic evidence
+  // rather than "no fs signal fired": a stale fs signal must not skip the one check that can
+  // correct it.
+  let probeRan = false
+  let probeResult = false
+  if (!hasClassicEvidence && options.appxProbe !== null) {
+    try {
+      probeResult = await (options.appxProbe ?? msixAppxProbe)()
+      probeRan = true
+    } catch {
+      // Probe is best-effort only; probeRan stays false so the fs-signal verdict below applies.
+    }
+  }
+  if (probeRan && probeResult) msixSignals.push('appx')
+
+  // When the probe ran, it's authoritative (overrides the fs-signal verdict either way). When
+  // it didn't run (skipped because classic evidence already answered the question, disabled via
+  // `appxProbe: null`, or the spawn failed), fall back to the fs signals alone.
+  const msixDetected = probeRan ? probeResult : msixSignals.length > 0
 
   const value: CMDesktopInstall = {
     platform,
     directPath,
-    msixDetected: msixSignals.length > 0,
+    msixDetected,
     msixSignals,
-    manageable: directPath !== null,
+    manageable: hasClassicEvidence,
   }
   if (!injected) cached = { value, at: Date.now() }
   return value

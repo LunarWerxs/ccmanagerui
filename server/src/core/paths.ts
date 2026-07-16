@@ -94,6 +94,13 @@ export async function resolveLaunchBinary(override?: string | null): Promise<str
       const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
       const anthropicDir = path.join(localAppData, 'AnthropicClaude')
 
+      // Prefer the STABLE Squirrel root stub over the versioned app-<ver> scan below — same
+      // rationale as core/shortcut.ts's stableWinLaunchTarget() (shortcut.ts:6-11, 48-54): the
+      // stub always forwards to whichever version is newest, so it survives Claude Desktop
+      // updates and needs no version-directory bookkeeping of its own.
+      const stableStub = path.join(anthropicDir, 'claude.exe')
+      if (existsSync(stableStub)) return stableStub
+
       let newestAppDir: { dir: string; version: number[] } | null = null
       try {
         const entries = readdirSync(anthropicDir, { withFileTypes: true })
@@ -113,7 +120,6 @@ export async function resolveLaunchBinary(override?: string | null): Promise<str
       if (newestAppDir) return path.join(anthropicDir, newestAppDir.dir, 'Claude.exe')
 
       const fallbacks = [
-        path.join(anthropicDir, 'claude.exe'),
         path.join(localAppData, 'Programs', 'Claude', 'Claude.exe'),
         'C:\\Program Files\\Claude\\Claude.exe',
       ]

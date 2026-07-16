@@ -10,6 +10,7 @@ import os from 'node:os'
 import { join } from 'node:path'
 import { appxOutputHasPfn, detectDesktopInstall } from '../src/core/desktop-install'
 import { openInstance } from '../src/core/instances'
+import { resolveLaunchBinary } from '../src/core/paths'
 
 const isWin = process.platform === 'win32'
 
@@ -17,6 +18,12 @@ const isWin = process.platform === 'win32'
 function fakeLocalAppData(): string {
   return mkdtempSync(join(os.tmpdir(), 'ccmui-desktop-install-'))
 }
+
+/** No live Claude process found — the deterministic default for every test below that resolves
+ *  `directPath` to null. Without this, detectDesktopInstall()'s live-process check falls back to
+ *  the REAL listClaudeProcesses(), which would make these tests depend on whether this machine
+ *  happens to have an actual Claude Desktop instance running. */
+const noRunningProcesses = async () => []
 
 const cleanups: string[] = []
 afterEach(() => {
@@ -53,6 +60,7 @@ describe('detectDesktopInstall — win32 detection matrix (injected dirs)', () =
       localAppData: lad,
       resolveDirect: async () => null,
       appxProbe: null,
+      listRunningProcesses: noRunningProcesses,
     })
     expect(result.manageable).toBe(false)
     expect(result.directPath).toBeNull()
@@ -69,6 +77,7 @@ describe('detectDesktopInstall — win32 detection matrix (injected dirs)', () =
       localAppData: lad,
       resolveDirect: async () => null,
       appxProbe: null,
+      listRunningProcesses: noRunningProcesses,
     })
     expect(result.msixDetected).toBe(true)
     expect(result.msixSignals).toEqual(['exec-alias'])
@@ -95,11 +104,76 @@ describe('detectDesktopInstall — win32 detection matrix (injected dirs)', () =
       localAppData: lad,
       resolveDirect: async () => null,
       appxProbe: null,
+      listRunningProcesses: noRunningProcesses,
     })
     expect(result.manageable).toBe(false)
     expect(result.msixDetected).toBe(false)
     expect(result.msixSignals).toEqual([])
   })
+
+  test.if(isWin)(
+    'MSIX fs signal present BUT a live classic process is running: manageable',
+    async () => {
+      const lad = fakeLocalAppData()
+      cleanups.push(lad)
+      mkdirSync(join(lad, 'Packages', 'Claude_pzs8sxrjxfjjc'), { recursive: true })
+      let probeRan = false
+      const result = await detectDesktopInstall({
+        localAppData: lad,
+        resolveDirect: async () => null,
+        // Mirrors process.ts's CMProcessInfo shape narrowed to `dir` — a running main process
+        // always carries a resolved (non-null) --user-data-dir by construction.
+        listRunningProcesses: async () => [{ dir: 'C:\\claude-instances\\work' }],
+        appxProbe: async () => {
+          probeRan = true
+          return false
+        },
+      })
+      expect(result.directPath).toBeNull()
+      expect(result.manageable).toBe(true)
+      // The classic evidence (a running process) already answers "manageable" — the fs-only
+      // MSIX signal is still reported for debuggability, and the probe is skipped because classic
+      // evidence is already positive (see the probe-skip-semantics tests below).
+      expect(result.msixDetected).toBe(true)
+      expect(result.msixSignals).toEqual(['packages-dir'])
+      expect(probeRan).toBe(false)
+    },
+  )
+
+  test.if(isWin)(
+    'no directPath, no MSIX signals, live classic process running: manageable',
+    async () => {
+      const lad = fakeLocalAppData()
+      cleanups.push(lad)
+      const result = await detectDesktopInstall({
+        localAppData: lad,
+        resolveDirect: async () => null,
+        listRunningProcesses: async () => [{ dir: 'C:\\claude-instances\\work' }],
+        appxProbe: null,
+      })
+      expect(result.directPath).toBeNull()
+      expect(result.manageable).toBe(true)
+      expect(result.msixDetected).toBe(false)
+      expect(result.msixSignals).toEqual([])
+    },
+  )
+
+  test.if(isWin)(
+    'a running-process list with no --user-data-dir entries does not count as running classic',
+    async () => {
+      const lad = fakeLocalAppData()
+      cleanups.push(lad)
+      const result = await detectDesktopInstall({
+        localAppData: lad,
+        resolveDirect: async () => null,
+        // Defends the `.some((p) => p.dir != null)` filter: a malformed/childless record must
+        // not be mistaken for proof of a launchable classic install.
+        listRunningProcesses: async () => [{ dir: null }, {}],
+        appxProbe: null,
+      })
+      expect(result.manageable).toBe(false)
+    },
+  )
 
   test.if(isWin)('Get-AppxPackage probe runs only as fallback and adds appx signal', async () => {
     const lad = fakeLocalAppData()
@@ -107,27 +181,58 @@ describe('detectDesktopInstall — win32 detection matrix (injected dirs)', () =
     const result = await detectDesktopInstall({
       localAppData: lad,
       resolveDirect: async () => null,
+      listRunningProcesses: noRunningProcesses,
       appxProbe: async () => true,
     })
     expect(result.msixDetected).toBe(true)
     expect(result.msixSignals).toEqual(['appx'])
   })
 
-  test.if(isWin)('probe is skipped when a filesystem signal already fired', async () => {
-    const lad = fakeLocalAppData()
-    cleanups.push(lad)
-    mkdirSync(join(lad, 'Packages', 'Claude_pzs8sxrjxfjjc'), { recursive: true })
-    let probeRan = false
-    const result = await detectDesktopInstall({
-      localAppData: lad,
-      resolveDirect: async () => null,
-      appxProbe: async () => {
-        probeRan = true
-        return true
-      },
+  describe('probe-skip semantics (classic evidence gates the probe, not the fs signal)', () => {
+    test.if(isWin)('probe is SKIPPED when directPath resolves, even with a fs signal', async () => {
+      const lad = fakeLocalAppData()
+      cleanups.push(lad)
+      mkdirSync(join(lad, 'Packages', 'Claude_pzs8sxrjxfjjc'), { recursive: true })
+      let probeRan = false
+      const result = await detectDesktopInstall({
+        localAppData: lad,
+        resolveDirect: async () => 'C:\\fake\\AnthropicClaude\\app-1.0.0\\Claude.exe',
+        appxProbe: async () => {
+          probeRan = true
+          return true
+        },
+      })
+      expect(probeRan).toBe(false)
+      expect(result.manageable).toBe(true)
+      expect(result.msixSignals).toEqual(['packages-dir'])
     })
-    expect(probeRan).toBe(false)
-    expect(result.msixSignals).toEqual(['packages-dir'])
+
+    test.if(isWin)(
+      'probe RUNS when a fs signal fired but classic evidence is negative, and OVERRIDES a stale leftover',
+      async () => {
+        const lad = fakeLocalAppData()
+        cleanups.push(lad)
+        // A leftover packages-dir from an MSIX that has since been uninstalled — the exact
+        // "leftovers-prone" false-positive scenario the fix addresses.
+        mkdirSync(join(lad, 'Packages', 'Claude_pzs8sxrjxfjjc'), { recursive: true })
+        let probeRan = false
+        const result = await detectDesktopInstall({
+          localAppData: lad,
+          resolveDirect: async () => null,
+          listRunningProcesses: noRunningProcesses,
+          appxProbe: async () => {
+            probeRan = true
+            return false // authoritative: the MSIX is not actually installed
+          },
+        })
+        expect(probeRan).toBe(true)
+        // msixSignals still records the fs signal that fired (debuggability)...
+        expect(result.msixSignals).toEqual(['packages-dir'])
+        // ...but msixDetected is corrected by the authoritative probe, not pinned true forever.
+        expect(result.msixDetected).toBe(false)
+        expect(result.manageable).toBe(false)
+      },
+    )
   })
 
   test.if(isWin)('package-family-name shape is strict: no false positives', async () => {
@@ -141,9 +246,54 @@ describe('detectDesktopInstall — win32 detection matrix (injected dirs)', () =
       localAppData: lad,
       resolveDirect: async () => null,
       appxProbe: null,
+      listRunningProcesses: noRunningProcesses,
     })
     expect(result.msixDetected).toBe(false)
   })
+})
+
+describe('resolveLaunchBinary — win32 stable-stub-first ordering', () => {
+  test.if(isWin)(
+    'the stable AnthropicClaude\\claude.exe stub wins over a versioned app-<ver> dir',
+    async () => {
+      const savedLad = process.env.LOCALAPPDATA
+      const lad = fakeLocalAppData()
+      cleanups.push(lad)
+      const anthropicDir = join(lad, 'AnthropicClaude')
+      mkdirSync(anthropicDir, { recursive: true })
+      writeFileSync(join(anthropicDir, 'claude.exe'), '')
+      mkdirSync(join(anthropicDir, 'app-9.9.9'), { recursive: true })
+      writeFileSync(join(anthropicDir, 'app-9.9.9', 'Claude.exe'), '')
+
+      process.env.LOCALAPPDATA = lad
+      try {
+        const resolved = await resolveLaunchBinary()
+        expect(resolved).toBe(join(anthropicDir, 'claude.exe'))
+      } finally {
+        process.env.LOCALAPPDATA = savedLad
+      }
+    },
+  )
+
+  test.if(isWin)(
+    'falls back to the newest versioned app-<ver> dir when the stub is absent',
+    async () => {
+      const savedLad = process.env.LOCALAPPDATA
+      const lad = fakeLocalAppData()
+      cleanups.push(lad)
+      const anthropicDir = join(lad, 'AnthropicClaude')
+      mkdirSync(join(anthropicDir, 'app-1.2.3'), { recursive: true })
+      writeFileSync(join(anthropicDir, 'app-1.2.3', 'Claude.exe'), '')
+
+      process.env.LOCALAPPDATA = lad
+      try {
+        const resolved = await resolveLaunchBinary()
+        expect(resolved).toBe(join(anthropicDir, 'app-1.2.3', 'Claude.exe'))
+      } finally {
+        process.env.LOCALAPPDATA = savedLad
+      }
+    },
+  )
 })
 
 describe('detectDesktopInstall — cross-platform behavior', () => {
