@@ -8,10 +8,14 @@ import { Loader2, PowerOff } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useData } from '@/composables/useData'
+import { usePanels } from '@/composables/usePanels'
 import IconTooltip from '@/shell/IconTooltip.vue'
 
 const { t } = useI18n()
 const { queue, scheduler } = useData()
+// The header chip is the one place people SEE the scheduler state (especially "off"), so make it
+// the way to fix it: a click deep-links straight to Settings → Scheduler (the enable/disable toggle).
+const { openSettingsTab } = usePanels()
 
 // Local clock so the "next in 4m 12s" text ticks every second, not only on the 2s queue poll.
 const now = ref(Date.now())
@@ -76,8 +80,9 @@ const label = computed(() => {
   }
 })
 
-const tooltip = computed(() =>
-  enabled.value ? t('scheduler.onTooltip') : t('scheduler.offTooltip'),
+const tooltip = computed(
+  () =>
+    `${enabled.value ? t('scheduler.onTooltip') : t('scheduler.offTooltip')} ${t('scheduler.clickToOpen')}`,
 )
 
 // green when actively working, dim-green when on-but-idle, amber when off so it draws the eye.
@@ -90,7 +95,13 @@ const tone = computed(() => {
 
 <template>
   <IconTooltip :label="label" :description="tooltip">
-    <span class="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs font-medium" :class="tone">
+    <button
+      type="button"
+      class="inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+      :class="tone"
+      :aria-label="label"
+      @click="openSettingsTab('scheduler')"
+    >
       <Loader2 v-if="state === 'running'" class="size-3.5 animate-spin" />
       <span
         v-else-if="state !== 'off'"
@@ -104,6 +115,6 @@ const tone = computed(() => {
       </span>
       <PowerOff v-else class="size-3.5" />
       <span class="hidden tabular-nums sm:inline">{{ label }}</span>
-    </span>
+    </button>
   </IconTooltip>
 </template>
