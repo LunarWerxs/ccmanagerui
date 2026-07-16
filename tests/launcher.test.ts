@@ -221,6 +221,8 @@ describe.skipIf(!win)('tray launcher', () => {
     expect(engine).toContain('--no-default-browser-check')
   })
 
+  // 20s timeout: two real PowerShell spawns + COM. A cold CI runner has taken 6.8s against the
+  // 5s default (flaked the 2026-07-16 run); the assertions are unchanged, only the allowance.
   test('the desktop shortcut points at wscript + Tray-Launch.vbs + the icon', () => {
     // was: asserted CCManagerUI.vbs as the target. Create-Shortcut.ps1 is now a thin adapter
     // over the shared New-TrayShortcut.ps1 engine, and the regenerated .lnk must resolve to the
@@ -247,7 +249,7 @@ describe.skipIf(!win)('tray launcher', () => {
     expect(out).toContain('CCManagerUI.ico')
     expect(out).toContain(REPO_ROOT)
     expect(out).toContain('Launch CC Manager UI (system tray)')
-  })
+  }, 20_000)
 
   test('the headless tray self-test passes against the rewritten adapter (icon loads, bun on PATH, entry present)', () => {
     // unchanged intent, still a live subprocess run — but now exercises the adapter's

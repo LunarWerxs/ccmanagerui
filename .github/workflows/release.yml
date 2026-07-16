@@ -5,11 +5,13 @@
 # build + smoke only (no release), for validating the pipeline without a tag.
 #
 # Design notes (verified 2026-07-16 against a real compiled exe on Windows):
-# - `bun build --compile` cross-compiles ALL targets from one Linux runner; no per-OS build matrix
-#   is needed for the COMPILE step. What cross-compiling does NOT prove is that the binary RUNS —
-#   the smoke job boots each bundle on real hardware for its OS and asserts /api/health, because
-#   the failure modes here (virtual import.meta.dir paths, the implicit-serve entrypoint trap) all
-#   pass the build and only explode at runtime.
+# - `bun build --compile` cross-compiles every POSIX target from one Linux runner, but
+#   `--windows-icon` is only available when compiling ON Windows (hard error otherwise — hit live
+#   on the first v0.2.1 run), so the windows-x64 leg runs on windows-latest and the rest share
+#   ubuntu-latest. What cross-compiling does NOT prove is that the binary RUNS — the smoke job
+#   boots each bundle on real hardware for its OS and asserts /api/health, because the failure
+#   modes here (virtual import.meta.dir paths, the implicit-serve entrypoint trap) all pass the
+#   build and only explode at runtime.
 # - The SPA is a SIDECAR web/dist folder next to the binary, not embedded: Vite emits hashed
 #   filenames unknown at compile time, and config.ts's APP_ROOT already resolves web/dist beside
 #   the exe in compiled mode.
@@ -27,8 +29,24 @@ permissions:
 
 jobs:
   build:
-    name: compile all targets
-    runs-on: ubuntu-latest
+    name: compile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # windows-x64 builds ON Windows so --windows-icon works; everything else cross-compiles
+          # from one Linux runner.
+          - target: windows-x64
+            os: windows-latest
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: linux-arm64
+            os: ubuntu-latest
+          - target: darwin-x64
+            os: ubuntu-latest
+          - target: darwin-arm64
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
@@ -39,6 +57,7 @@ jobs:
 
       - name: Verify tag matches package.json version
         if: github.ref_type == 'tag'
+        shell: bash
         run: |
           PKG_V=$(bun -e 'console.log(require("./package.json").version)')
           TAG_V="${GITHUB_REF_NAME#v}"
@@ -50,40 +69,40 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build web SPA (shared by every target)
+      - name: Build web SPA
         run: bun run --cwd web build
 
-      - name: Compile + package every target
+      - name: Compile + package
+        shell: bash
         run: |
           VERSION=$(bun -e 'console.log(require("./package.json").version)')
-          mkdir -p out
-          for target in windows-x64 linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
-            name="CCManagerUI-${VERSION}-${target}"
-            stage="out/${name}"
-            mkdir -p "${stage}/web"
-            cp -R web/dist "${stage}/web/dist"
-            cp LICENSE CHANGELOG.md "${stage}/"
-            cp .github/RELEASE-README.md "${stage}/README.md"
-            if [ "$target" = "windows-x64" ]; then
-              bun build --compile --minify --sourcemap=none --target="bun-${target}" \
-                --windows-icon=misc/CCManagerUI.ico --windows-title="CC Manager UI" \
-                --outfile="${stage}/CCManagerUI.exe" server/src/main.ts
-              mkdir -p "${stage}/misc"
-              cp misc/CCManagerUI-Tray.ps1 misc/Tray-Host.ps1 misc/Tray-Launch.vbs \
-                 misc/New-TrayShortcut.ps1 misc/CCManagerUI.ico "${stage}/misc/"
-              (cd out && zip -qr "${name}.zip" "${name}")
-            else
-              bun build --compile --minify --sourcemap=none --target="bun-${target}" \
-                --outfile="${stage}/ccmanagerui" server/src/main.ts
-              tar -C out -czf "out/${name}.tar.gz" "${name}"
-            fi
-            rm -rf "${stage}"
-          done
+          target="${{ matrix.target }}"
+          name="CCManagerUI-${VERSION}-${target}"
+          stage="out/${name}"
+          mkdir -p "${stage}/web"
+          cp -R web/dist "${stage}/web/dist"
+          cp LICENSE CHANGELOG.md "${stage}/"
+          cp .github/RELEASE-README.md "${stage}/README.md"
+          if [ "$target" = "windows-x64" ]; then
+            bun build --compile --minify --sourcemap=none --target="bun-${target}" \
+              --windows-icon=misc/CCManagerUI.ico --windows-title="CC Manager UI" \
+              --outfile="${stage}/CCManagerUI.exe" server/src/main.ts
+            mkdir -p "${stage}/misc"
+            cp misc/CCManagerUI-Tray.ps1 misc/Tray-Host.ps1 misc/Tray-Launch.vbs \
+               misc/New-TrayShortcut.ps1 misc/CCManagerUI.ico "${stage}/misc/"
+            # windows-latest has 7z on PATH; git-bash there has no `zip`
+            (cd out && 7z a -tzip "${name}.zip" "${name}" > /dev/null)
+          else
+            bun build --compile --minify --sourcemap=none --target="bun-${target}" \
+              --outfile="${stage}/ccmanagerui" server/src/main.ts
+            tar -C out -czf "out/${name}.tar.gz" "${name}"
+          fi
+          rm -rf "${stage}"
           ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-bundles
+          name: release-${{ matrix.target }}
           path: |
             out/*.zip
             out/*.tar.gz
@@ -91,7 +110,7 @@ jobs:
 
   # Boot each bundle on REAL hardware for its OS: --version answers, /api/health reports
   # service+distribution, and the sidecar SPA serves. This is the step that catches the
-  # compiled-only runtime bugs a green cross-compile can't.
+  # compiled-only runtime bugs a green compile can't.
   smoke:
     name: smoke (${{ matrix.os }})
     needs: build
@@ -112,7 +131,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-bundles
+          name: release-${{ matrix.target }}
           path: out
 
       - name: Unpack and boot the real binary
@@ -152,7 +171,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-bundles
+          pattern: release-*
+          merge-multiple: true
           path: out
 
       # DRAFT on purpose: the maintainer writes the Highlights prose and publishes by hand,
