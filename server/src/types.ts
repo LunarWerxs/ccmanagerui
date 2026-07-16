@@ -410,6 +410,10 @@ export interface MonitorStatusRow {
   resumeAttempts: number
   resumeItemId: string | null
   updatedAt: string
+  /** True when the monitor FOUND this session sitting at a limit on disk rather than watching a run
+   *  of its own stop (rate-limit-discovery.ts) — i.e. a session started outside the app entirely.
+   *  Surfaced so a stop the app went looking for never reads as one the user queued. */
+  discovered: boolean
 }
 
 /** The whole monitor view for the UI: settings + tracked stops + per-account overrides. */

@@ -7,6 +7,10 @@
 //   · Detection is FREE + structured: dispatch.ts already sniffs the rate-limit signature and
 //     finalizes such runs with status 'rate_limited' (the primary, reliable signal — not log
 //     scraping). A rate_limited dispatch IS a mid-work stop by definition (it didn't complete).
+//     That covers runs WE started. Sessions the user ran themselves (a bare `claude` in a terminal)
+//     never get a queue row at all, so they were invisible here — the list said "nothing to resume"
+//     with real sessions stuck at the wall. rate-limit-discovery.ts finds those on disk and hands
+//     them over as ordinary stops, so both kinds meet the same gate below.
 //   · Scheduling is FREE: a resume is just a normal queue_item (--resume <session-id> with a locked
 //     prompt) whose `not_before` is set to just after the 5h reset. dispatch.ts already resumes
 //     sessions this exact way, authenticated by the same env-token path (§7-Q1/Q5).
@@ -20,6 +24,7 @@
 import { isDispatchReady } from './boot-state'
 import { db, getSetting, setSetting } from './db'
 import { dispatchItem, isActive, isSessionActive } from './dispatch'
+import { discoverPendingStops, type RateLimitedStop } from './rate-limit-discovery'
 import type {
   MonitorSettings,
   MonitorStateName,
@@ -39,12 +44,28 @@ import { checkUsageAmbient, checkUsageForAccount } from './usage-service'
  */
 export interface MonitorDeps {
   readUsage: (accountId: string | null) => Promise<UsageSnapshot>
+  /**
+   * Rate-limited sessions found on disk that we never dispatched (rate-limit-discovery.ts). Behind
+   * the same seam and for the same reason as readUsage: the real one globs the transcript store and
+   * reads files, which a unit test has no business doing to the developer's actual ~/.claude.
+   */
+  discoverStops: () => Promise<RateLimitedStop[]>
 }
 
 const defaultDeps: MonitorDeps = {
   // A run with no dispatch account is not an unauthenticated run: it uses the ambient CLI login,
   // whose quota is just as readable. See checkUsageAmbient.
   readUsage: (accountId) => (accountId ? checkUsageForAccount(accountId) : checkUsageAmbient()),
+  discoverStops: () =>
+    discoverPendingStops({
+      isBusy: (sessionId) => isSessionActive(sessionId),
+      hasQueueRow: (sessionId) =>
+        !!db
+          .query<{ n: number }, [string]>(
+            'select count(*) as n from queue_items where session_id = ?',
+          )
+          .get(sessionId)?.n,
+    }),
 }
 
 /** The locked resume prompt — a code constant, not a field users casually edit (an advanced
@@ -117,6 +138,9 @@ interface MonitorStateRow {
   message: string | null
   next_check_at: string | null
   updated_at: string
+  /** Set for discovered stops, which have no queue_items row to join a title out of. */
+  title: string | null
+  discovered: number
 }
 
 function getState(itemId: string): MonitorStateRow | null {
@@ -128,7 +152,7 @@ function getState(itemId: string): MonitorStateRow | null {
 }
 
 function upsertState(
-  item: QueueItem,
+  item: RateLimitedStop,
   fields: {
     state: MonitorStateName
     message: string | null
@@ -139,15 +163,17 @@ function upsertState(
 ): void {
   db.query(
     `insert into monitor_state
-       (item_id, session_id, account_id, resume_attempts, state, resume_item_id, message, next_check_at, updated_at)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (item_id, session_id, account_id, resume_attempts, state, resume_item_id, message, next_check_at, updated_at, title, discovered)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict(item_id) do update set
        resume_attempts = excluded.resume_attempts,
        state = excluded.state,
        resume_item_id = excluded.resume_item_id,
        message = excluded.message,
        next_check_at = excluded.next_check_at,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at,
+       title = excluded.title,
+       discovered = excluded.discovered`,
   ).run(
     item.id,
     item.session_id,
@@ -158,6 +184,8 @@ function upsertState(
     fields.message,
     fields.nextCheckAt ?? null,
     new Date().toISOString(),
+    item.discovered ? item.title : null,
+    item.discovered ? 1 : 0,
   )
 }
 
@@ -194,6 +222,8 @@ export function monitorStatus(): MonitorStatusRow[] {
     .query<MonitorStateRow, []>('select * from monitor_state order by updated_at desc')
     .all()
   return rows.map((r) => {
+    // A discovered stop carries its own title (there is no queue_items row to join); a dispatched
+    // one resolves it the way it always has.
     const t = db
       .query<{ title: string }, [string]>('select title from queue_items where id = ?')
       .get(r.item_id)
@@ -201,12 +231,13 @@ export function monitorStatus(): MonitorStatusRow[] {
       itemId: r.item_id,
       sessionId: r.session_id,
       accountId: r.account_id,
-      title: t?.title ?? null,
+      title: r.title ?? t?.title ?? null,
       state: r.state,
       message: r.message,
       resumeAttempts: r.resume_attempts,
       resumeItemId: r.resume_item_id,
       updatedAt: r.updated_at,
+      discovered: r.discovered === 1,
     }
   })
 }
@@ -308,12 +339,21 @@ async function dispatchDueResumes(): Promise<void> {
 async function processRateLimited(deps: MonitorDeps): Promise<void> {
   const settings = getMonitorSettings()
   const now = new Date().toISOString()
-  const limited = db
+  const dispatched: RateLimitedStop[] = db
     .query<QueueItem, []>("select * from queue_items where status = 'rate_limited'")
     .all()
+    .map((raw) => ({ ...coerce(raw), discovered: false }))
+  // Stops we watched happen, plus stops we went and found. From here down they are the same thing:
+  // every rail below (opt-out, attempt cap, usage gate, idempotency) applies to both without a
+  // branch. A discovery failure must never take the dispatched path down with it.
+  let found: RateLimitedStop[] = []
+  try {
+    found = await deps.discoverStops()
+  } catch (err) {
+    console.error('[ccmanagerui] rate-limit discovery failed:', err)
+  }
 
-  for (const raw of limited) {
-    const item = coerce(raw)
+  for (const item of [...dispatched, ...found]) {
     const existing = getState(item.id)
 
     // Already resolved for this exact stop — skip, except a blocked_weekly re-arms once its

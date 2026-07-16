@@ -95,6 +95,20 @@ create table if not exists monitor_accounts (
   if (!cols.includes('instance_ref'))
     db.exec('alter table queue_items add column instance_ref text')
 }
+{
+  const cols = db
+    .query<{ name: string }, []>('pragma table_info(monitor_state)')
+    .all()
+    .map((c) => c.name)
+  // A stop DISCOVERED on disk (rate-limit-discovery.ts) has no queue_items row to join a title
+  // out of — it was never dispatched by us — so the state row carries its own. Nullable: rows
+  // written before this column keep resolving their title through the queue join, as before.
+  if (!cols.includes('title')) db.exec('alter table monitor_state add column title text')
+  // 1 = we found this session sitting at a limit on disk rather than watching it stop. Surfaced in
+  // the UI so "the app went and found this one" never masquerades as something the user queued.
+  if (!cols.includes('discovered'))
+    db.exec('alter table monitor_state add column discovered integer not null default 0')
+}
 
 // --- one-time repair: rate_limited rows the old over-eager detector invented ---
 // Until 2026-07-15 dispatch.ts matched its rate-limit patterns against EVERY event of a run,

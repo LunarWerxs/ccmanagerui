@@ -6,6 +6,40 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **The auto-resume monitor was blind to every session it hadn't launched itself.** It only ever
+  looked at `queue_items` rows with status `rate_limited`, and the only thing that can set that
+  status is a run the daemon spawned and tailed — so a session you started yourself (a bare `claude`
+  in a terminal, or the desktop app) that died on a 5-hour limit had a transcript on disk, no queue
+  row, and no path to the resume list at all. The list said "Nothing to resume right now" while real
+  sessions sat at the wall, and hand-queueing them was the only recourse. The monitor now also
+  *finds* stops on disk (`rate-limit-discovery.ts`): it checks transcripts touched in the last 12
+  hours for the CLI's own limit notice sitting at the tail with nothing after it, which is exactly
+  what "still stopped" looks like. Found stops go through the same rails as any other — the weekly
+  usage gate, the per-session attempt cap, the resume buffer, the idempotency check — and carry a
+  **Found** badge so a session the app went looking for never reads as one you queued. Detection
+  reuses `dispatch.ts`'s existing `isApiErrorEvent` gate unchanged, so the 2026-07-15 false-positive
+  class (a run that merely *mentions* "quota" or "529") cannot come back at machine scale. Still
+  behind the monitor's off-by-default switch.
+- **A downloaded transcript was named after the session's UUID, not the session.** `Save a copy` now
+  writes `<session title>.jsonl` — falling back to the id only when a title has nothing
+  filesystem-safe left in it. One shared `safeTranscriptFilename` (new
+  `@ccmanagerui/server/filenames` export) backs both the download link and the server's
+  `Content-Disposition`, because the browser honours the link's name only same-origin and the header
+  only cross-origin — fixing one alone would have left the other broken. It strips the characters
+  Windows rejects, refuses the reserved device names (`CON`, `COM1`…), trims the trailing dots
+  Windows drops silently, and sends the header as RFC 5987 `filename*` so an emoji or non-Latin
+  title names the file properly instead of throwing on an invalid header value.
+
+### Added
+
+- **A 10-minute stepper in the composer's "queue for later".** The hours stepper now sits next to a
+  minutes one that steps in 10s, and a single button queues the combined delay ("In 1h 30m"). With
+  both, the fixed **In 15 min** and **In 1 hour** presets were redundant — 1h is the stepper's
+  default and anything shorter is a couple of taps — so they are gone; **In 5 hours** and
+  **Tomorrow** remain.
+
 ## [0.3.0] - 2026-07-16
 
 ### Security

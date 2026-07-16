@@ -41,7 +41,9 @@ const RATE_LIMIT_PATTERNS: RegExp[] = [
   /\bquota\b/i,
 ]
 
-function looksRateLimited(text: string): boolean {
+/** Exported: rate-limit-discovery.ts runs this SAME detector over transcripts on disk, so a stop
+ *  the daemon watched live and one it finds after the fact are judged by identical rules. */
+export function looksRateLimited(text: string): boolean {
   return RATE_LIMIT_PATTERNS.some((re) => re.test(text))
 }
 
@@ -62,8 +64,12 @@ function looksRateLimited(text: string): boolean {
  * `isApiErrorMessage: true`, e.g. "You've hit your session limit · resets 5:40am"), as an errored
  * terminal `result`, or on stderr. Note `<synthetic>` alone is not enough: the CLI also emits
  * `<synthetic>` no-op chatter with `isApiErrorMessage: false` ("No response requested.").
+ *
+ * Exported for the same reason as looksRateLimited: the transcript scanner MUST carry this gate
+ * forward unchanged. It is the only thing standing between "found a real stop" and re-running the
+ * 2026-07-15 false-positive fiasco across every project on the machine instead of just our own runs.
  */
-function isApiErrorEvent(ev: any): boolean {
+export function isApiErrorEvent(ev: any): boolean {
   return ev?.isApiErrorMessage === true || ev?.message?.model === '<synthetic>'
 }
 

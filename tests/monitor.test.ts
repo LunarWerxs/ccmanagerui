@@ -24,6 +24,7 @@ import {
   setMonitorForAccount,
   setMonitorSettings,
 } from '../server/src/monitor'
+import type { RateLimitedStop } from '../server/src/rate-limit-discovery'
 import type { UsageSnapshot } from '../server/src/types'
 
 const snapshot = (weekAllPct: number | null): UsageSnapshot => ({
@@ -38,8 +39,15 @@ const snapshot = (weekAllPct: number | null): UsageSnapshot => ({
   capturedAt: new Date().toISOString(),
 })
 
-/** A usage reader that always answers with `snap`, and counts the accountIds it was asked about. */
-function reader(snap: UsageSnapshot): MonitorDeps & { asked: (string | null)[] } {
+/**
+ * A usage reader that always answers with `snap`, and counts the accountIds it was asked about.
+ * `stops` are transcript-discovered stops to hand the monitor — empty by default, so a test that
+ * only cares about dispatched runs never touches the real ~/.claude transcript store.
+ */
+function reader(
+  snap: UsageSnapshot,
+  stops: RateLimitedStop[] = [],
+): MonitorDeps & { asked: (string | null)[] } {
   const asked: (string | null)[] = []
   return {
     asked,
@@ -47,6 +55,35 @@ function reader(snap: UsageSnapshot): MonitorDeps & { asked: (string | null)[] }
       asked.push(accountId)
       return snap
     },
+    discoverStops: async () => stops,
+  }
+}
+
+/** A stop the monitor FOUND on disk: no queue_items row exists for it, by definition. Mirrors what
+ *  rate-limit-discovery.ts builds for a session the user ran in a terminal. */
+function discoveredStop(sessionId: string, title = 'a terminal session'): RateLimitedStop {
+  return {
+    id: `disc:${sessionId}`,
+    session_id: sessionId,
+    title,
+    cwd: 'D:/x',
+    prompt: '',
+    model: null,
+    effort: null,
+    permission_mode: null,
+    account_id: null,
+    instance_ref: null,
+    new_chat: false,
+    fork: false,
+    status: 'rate_limited',
+    pid: null,
+    position: 0,
+    not_before: null,
+    started_at: null,
+    finished_at: new Date().toISOString(),
+    exit_code: null,
+    created_at: Date.now(),
+    discovered: true,
   }
 }
 
@@ -70,8 +107,10 @@ function stateFor(itemId: string) {
 
 afterEach(() => {
   db.query(`delete from monitor_state where item_id like '${PREFIX}%'`).run()
+  db.query(`delete from monitor_state where item_id like 'disc:${PREFIX}%'`).run()
   db.query(`delete from queue_items where id like '${PREFIX}%'`).run()
   db.query(`delete from queue_items where title like 'Auto-resume: test run%'`).run()
+  db.query(`delete from queue_items where title like 'Auto-resume: a terminal session%'`).run()
   db.query(`delete from monitor_accounts where account_id like '${PREFIX}%'`).run()
   setSetting('monitor_enabled', '0')
 })
@@ -156,6 +195,98 @@ describe('monitor gate', () => {
       )
       .get(`${PREFIX}sess-c`)
     expect(resumes?.n).toBe(1)
+  })
+})
+
+// The bug these cover, verbatim: the resume list said "Nothing to resume right now" while two real
+// sessions sat stopped at a session limit, because a session the user ran in a terminal never gets a
+// queue_items row and processRateLimited only ever read that table. Measured on a real machine
+// 2026-07-16 — 2 pending stops on disk, 0 of them reachable by any code path.
+describe('discovered stops (sessions we never dispatched)', () => {
+  test('a rate-limited session with NO queue row still reaches the resume list', async () => {
+    setSetting('monitor_enabled', '1')
+    const stop = discoveredStop(`${PREFIX}sess-d`)
+    const deps = reader(snapshot(10), [stop])
+    await runMonitorOnce(deps)
+    const s = stateFor(`disc:${PREFIX}sess-d`)
+    expect(s).not.toBeNull()
+    expect(s?.state).toBe('scheduled')
+    // it is flagged as found-on-disk, and carries its own title (there is no queue row to join)
+    expect(s?.discovered).toBe(true)
+    expect(s?.title).toBe('a terminal session')
+    // ...and the resume it scheduled is a real queued run against that session
+    const resume = db
+      .query<{ session_id: string; status: string }, [string]>(
+        'select session_id, status from queue_items where id = ?',
+      )
+      .get(s?.resumeItemId as string)
+    expect(resume?.session_id).toBe(`${PREFIX}sess-d`)
+    expect(resume?.status).toBe('queued')
+  })
+
+  test('a discovered stop passes the SAME weekly gate as a dispatched one', async () => {
+    // No special path: a maxed weekly blocks a found session exactly like one of our own runs.
+    setSetting('monitor_enabled', '1')
+    await runMonitorOnce(reader(snapshot(100), [discoveredStop(`${PREFIX}sess-e`)]))
+    expect(stateFor(`disc:${PREFIX}sess-e`)?.state).toBe('blocked_weekly')
+  })
+
+  test('a discovered stop is gated on the ambient login', async () => {
+    // A terminal session has no pasted credential, so account_id is null by construction — which
+    // must mean "read the ambient login's quota", not "refuse for lacking an account".
+    setSetting('monitor_enabled', '1')
+    const deps = reader(snapshot(10), [discoveredStop(`${PREFIX}sess-f`)])
+    await runMonitorOnce(deps)
+    expect(deps.asked).toEqual([null])
+  })
+
+  test('re-running discovery does not double-queue a resume for the same session', async () => {
+    setSetting('monitor_enabled', '1')
+    const stop = discoveredStop(`${PREFIX}sess-g`)
+    await runMonitorOnce(reader(snapshot(10), [stop]))
+    // A real second pass would no longer find it (the transcript has bytes after the notice, and it
+    // now owns a queue row) — but if it DID, the idempotency rails must still hold.
+    await runMonitorOnce(reader(snapshot(10), [stop]))
+    const resumes = db
+      .query<{ n: number }, [string]>(
+        "select count(*) as n from queue_items where session_id = ? and title like 'Auto-resume:%'",
+      )
+      .get(`${PREFIX}sess-g`)
+    expect(resumes?.n).toBe(1)
+  })
+
+  test('discovery is off while the monitor is off', async () => {
+    // The whole feature stays behind the master switch — it auto-prompts sessions while you sleep.
+    setSetting('monitor_enabled', '0')
+    let asked = false
+    await runMonitorOnce({
+      readUsage: async () => snapshot(10),
+      discoverStops: async () => {
+        asked = true
+        return []
+      },
+    })
+    expect(asked).toBe(false)
+  })
+
+  test('a discovery failure never takes the dispatched path down with it', async () => {
+    setSetting('monitor_enabled', '1')
+    insertRateLimited(`${PREFIX}h`, `${PREFIX}sess-h`)
+    await runMonitorOnce({
+      readUsage: async () => snapshot(10),
+      discoverStops: async () => {
+        throw new Error('transcript store unreadable')
+      },
+    })
+    // the run we DID dispatch is still scheduled
+    expect(stateFor(`${PREFIX}h`)?.state).toBe('scheduled')
+  })
+
+  test('a dispatched stop is not flagged as discovered', async () => {
+    setSetting('monitor_enabled', '1')
+    insertRateLimited(`${PREFIX}i`, `${PREFIX}sess-i`)
+    await runMonitorOnce(reader(snapshot(10)))
+    expect(stateFor(`${PREFIX}i`)?.discovered).toBe(false)
   })
 })
 

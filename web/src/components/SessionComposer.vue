@@ -155,8 +155,30 @@ async function submit(mode: 'now' | 'queue', notBefore: string | null = null) {
 // --- queue-for-later popover --------------------------------------------------
 const scheduleOpen = ref(false)
 const scheduleLocal = ref('')
-// the "+ / −" stepper: pick an exact whole-hour delay instead of a fixed preset
+// The two "+ / −" steppers: an exact delay in hours and 10-minute increments. Together they cover
+// every short delay a fixed preset used to (1h = the default; 15-ish min = 0h + 20m), which is why
+// the old "In 15 min" / "In 1 hour" preset buttons are gone.
 const scheduleHours = ref(1)
+const scheduleMinutes = ref(0)
+
+/** Minutes step in 10s and stay inside the hour (0…50) — a 6th step is one hour, so use the hours
+ *  stepper for that rather than silently carrying. Hours have no ceiling (the old stepper had none). */
+function stepHours(delta: number) {
+  scheduleHours.value = Math.max(0, scheduleHours.value + delta)
+}
+function stepMinutes(delta: number) {
+  scheduleMinutes.value = Math.min(50, Math.max(0, scheduleMinutes.value + delta))
+}
+
+const scheduleDelayMin = computed(() => scheduleHours.value * 60 + scheduleMinutes.value)
+// 0h 0m is "now", not a delay — the button is disabled there, so the label never has to say it.
+const scheduleDelayLabel = computed(() => {
+  const h = scheduleHours.value
+  const m = scheduleMinutes.value
+  if (h > 0 && m > 0) return t('composer.presetInHM', { h, m })
+  if (h > 0) return t('composer.presetInHours', { h })
+  return t('composer.presetInMinutes', { m })
+})
 
 // "Tomorrow HH:MM" is a server-side scheduler setting (Settings → Scheduler), not a constant
 const tomorrowTime = computed(() => scheduler.value?.tomorrow_time ?? '09:00')
@@ -317,8 +339,6 @@ function onKeydown(e: KeyboardEvent) {
               <PopoverContent align="end" class="w-64 space-y-2 p-3">
                 <p class="text-xs font-semibold">{{ $t('composer.scheduleTitle') }}</p>
                 <div class="grid grid-cols-2 gap-1.5">
-                  <Button variant="outline" size="xs" @click="queueInMinutes(15)">{{ $t('composer.presetIn15m') }}</Button>
-                  <Button variant="outline" size="xs" @click="queueInMinutes(60)">{{ $t('composer.presetIn1h') }}</Button>
                   <Button variant="outline" size="xs" @click="queueInMinutes(300)">{{ $t('composer.presetIn5h') }}</Button>
                   <!-- the tomorrow time is user-configurable; the tiny gear jumps to where -->
                   <div class="relative">
@@ -336,29 +356,60 @@ function onKeydown(e: KeyboardEvent) {
                     </button>
                   </div>
                 </div>
-                <!-- exact-hours stepper: − / "In N h" (queues on click) / + -->
-                <div class="flex items-center gap-1.5">
-                  <Button
-                    variant="outline"
-                    size="icon-xs"
-                    :disabled="scheduleHours <= 1"
-                    :aria-label="$t('composer.hoursDecrease')"
-                    @click="scheduleHours--"
-                  >
-                    <Minus />
-                  </Button>
-                  <Button variant="outline" size="xs" class="flex-1" @click="queueInMinutes(scheduleHours * 60)">
-                    {{ $t('composer.presetInNHours', { n: scheduleHours }) }}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="icon-xs"
-                    :aria-label="$t('composer.hoursIncrease')"
-                    @click="scheduleHours++"
-                  >
-                    <Plus />
-                  </Button>
+                <!-- exact delay: an hours stepper and a 10-minute stepper side by side, then one
+                     button that queues the combined hours+minutes (replaces the old 15m/1h presets) -->
+                <div class="flex items-center justify-center gap-3">
+                  <div class="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="icon-xs"
+                      :disabled="scheduleHours <= 0"
+                      :aria-label="$t('composer.hoursDecrease')"
+                      @click="stepHours(-1)"
+                    >
+                      <Minus />
+                    </Button>
+                    <span class="w-8 text-center text-xs tabular-nums">{{ $t('composer.hoursValue', { n: scheduleHours }) }}</span>
+                    <Button
+                      variant="outline"
+                      size="icon-xs"
+                      :aria-label="$t('composer.hoursIncrease')"
+                      @click="stepHours(1)"
+                    >
+                      <Plus />
+                    </Button>
+                  </div>
+                  <div class="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="icon-xs"
+                      :disabled="scheduleMinutes <= 0"
+                      :aria-label="$t('composer.minutesDecrease')"
+                      @click="stepMinutes(-10)"
+                    >
+                      <Minus />
+                    </Button>
+                    <span class="w-9 text-center text-xs tabular-nums">{{ $t('composer.minutesValue', { n: scheduleMinutes }) }}</span>
+                    <Button
+                      variant="outline"
+                      size="icon-xs"
+                      :disabled="scheduleMinutes >= 50"
+                      :aria-label="$t('composer.minutesIncrease')"
+                      @click="stepMinutes(10)"
+                    >
+                      <Plus />
+                    </Button>
+                  </div>
                 </div>
+                <Button
+                  variant="default"
+                  size="xs"
+                  class="w-full"
+                  :disabled="scheduleDelayMin <= 0"
+                  @click="queueInMinutes(scheduleDelayMin)"
+                >
+                  {{ scheduleDelayLabel }}
+                </Button>
                 <label class="block text-[11px] text-muted-foreground">{{ $t('composer.schedulePickLabel') }}</label>
                 <Input v-model="scheduleLocal" type="datetime-local" class="text-xs" />
                 <Button size="sm" class="w-full" :disabled="!scheduleLocal" @click="queueAtPicked()">

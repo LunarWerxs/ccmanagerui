@@ -75,6 +75,7 @@ import {
   reattachRuns,
   subscribeRun,
 } from './dispatch'
+import { contentDispositionAttachment, safeTranscriptFilename } from './filenames'
 import { findFreePort } from './find-free-port.mjs'
 import { cleanupStaleUpdateArtifacts } from './github-updater'
 import {
@@ -384,14 +385,21 @@ app.get('/api/sessions/:id', async (c) => {
   const s = await getSession(c.req.param('id'))
   return s ? c.json(s) : c.json({ error: 'session not found' }, 404)
 })
-// Download a copy of the raw transcript (browser save-as; works over remote too).
+// Download a copy of the raw transcript (browser save-as; works over remote too). The filename is
+// the session TITLE, not the raw id — the same safeTranscriptFilename the SPA's <a download> uses,
+// so the two agree in every deployment shape (the browser honors the <a> name only same-origin and
+// this header only cross-origin). getSession re-derives the title (cheap: scanMeta is mtime-cached
+// and the sessions list nearly always warmed it first); fall back to the id if the lookup misses.
 app.get('/api/sessions/:id/file', async (c) => {
-  const tf = findTranscript(c.req.param('id'))
+  const id = c.req.param('id')
+  const tf = findTranscript(id)
   if (!tf) return c.json({ error: 'session not found' }, 404)
+  const session = await getSession(id)
+  const filename = safeTranscriptFilename(session?.title, tf.session_id)
   return new Response(Bun.file(tf.path), {
     headers: {
       'content-type': 'application/jsonl; charset=utf-8',
-      'content-disposition': `attachment; filename="${tf.session_id}.jsonl"`,
+      'content-disposition': contentDispositionAttachment(filename),
     },
   })
 })

@@ -822,6 +822,10 @@ defineExpose({ save })
           <div v-else class="flex flex-col gap-2 px-3.5 py-2.5">
             <div v-for="row in monitorStatus" :key="row.itemId" class="flex items-center gap-2 text-xs">
               <Badge :variant="monitorStateVariant(row.state)">{{ $t(monitorStateLabelKey(row.state)) }}</Badge>
+              <!-- a stop we went and found on disk, vs one of our own runs we watched stop -->
+              <Badge v-if="row.discovered" variant="outline" :title="$t('settings.monitorDiscoveredHint')">
+                {{ $t('settings.monitorDiscovered') }}
+              </Badge>
               <span class="min-w-0 flex-1 truncate text-foreground">{{ row.title ?? row.sessionId }}</span>
               <span v-if="row.message" class="max-w-[14rem] truncate text-muted-foreground">{{ row.message }}</span>
               <span class="shrink-0 text-muted-foreground">

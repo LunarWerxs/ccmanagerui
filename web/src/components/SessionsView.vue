@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { safeTranscriptFilename } from '@ccmanagerui/server/filenames'
 import {
   ArrowLeft,
   Boxes,
@@ -25,7 +26,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import SessionComposer, { type ComposerTarget } from '@/components/SessionComposer.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,6 +45,7 @@ import type { SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
 import * as api from '@/lib/api'
 import { baseName, shortId, timeAgo } from '@/lib/format'
 import { displayName } from '@/lib/instance-appearance'
+import { cn } from '@/lib/utils'
 import IconTooltip from '@/shell/IconTooltip.vue'
 
 const { sessions, sessionsLoading, refreshSessions, queue, sessionInstanceFilter } = useData()
@@ -427,10 +429,19 @@ function copy(text: string) {
           </IconTooltip>
           <DropdownMenu>
             <IconTooltip :label="$t('sessions.filterInstance')" :description="$t('sessions.filterInstanceHint')">
+              <!-- raw <button>, NOT the kit <Button> component: this trigger is wrapped in TWO
+                   as-child layers (IconTooltip's TooltipTrigger + DropdownMenuTrigger), and a
+                   Primitive-based <Button> component doesn't forward the merged open handler across
+                   that double clone, so the menu never opened. A plain element does — same shape the
+                   advanced-search popover trigger above already uses. -->
               <DropdownMenuTrigger as-child>
-                <Button :variant="sessionInstanceFilter ? 'secondary' : 'outline'" size="icon">
+                <button
+                  type="button"
+                  :class="cn(buttonVariants({ variant: sessionInstanceFilter ? 'secondary' : 'outline', size: 'icon' }))"
+                  :aria-label="$t('sessions.filterInstance')"
+                >
                   <Boxes />
-                </Button>
+                </button>
               </DropdownMenuTrigger>
             </IconTooltip>
             <DropdownMenuContent align="end" class="w-52">
@@ -637,7 +648,7 @@ function copy(text: string) {
                   variant="outline"
                   size="sm"
                   :href="sessionFileUrl(selected.session_id)"
-                  :download="`${selected.session_id}.jsonl`"
+                  :download="safeTranscriptFilename(selected.title, selected.session_id)"
                   :aria-label="$t('sessions.saveCopy')"
                 >
                   <Download />
