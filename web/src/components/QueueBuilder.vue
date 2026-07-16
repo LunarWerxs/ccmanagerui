@@ -74,6 +74,11 @@ function toLocalInput(iso: string | null): string {
   return new Date(ms - new Date(ms).getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
 }
 
+/** Raw run-as value seeded from an edit target (instance_ref/account_id) — see the watch below.
+ *  Null outside of editing, or when the edited item runs Ambient. Remembered so accountOptions
+ *  can tell "genuinely Ambient" apart from "was pinned to something that's since disappeared". */
+const seededRunAsRef = ref<string | null>(null)
+
 // keyed on [open, editItem] so switching straight from one card's Edit to another
 // (or Edit → New run) re-prefills even while the dialog is already open
 watch([open, editItem], ([isOpen]) => {
@@ -96,10 +101,12 @@ watch([open, editItem], ([isOpen]) => {
     form.permission_mode = it.permission_mode ?? ''
     // One picker field carries both shapes: a prefixed instance ref wins over a legacy account id.
     form.account_id = it.instance_ref ?? it.account_id ?? ''
+    seededRunAsRef.value = form.account_id || null
     form.fork = it.fork
     form.not_before_local = toLocalInput(it.not_before)
     return
   }
+  seededRunAsRef.value = null
   const p = prefill.value ?? {}
   form.new_chat = p.new_chat ?? false
   form.session_ids = p.session_id ? [p.session_id] : []
@@ -123,7 +130,9 @@ const AMBIENT = '__ambient__'
 // the account rows; a CLI instance LINKED to one is the same account and would be a duplicate
 // entry, so only unlinked CLI logins appear), then any legacy pasted credentials. Instance values
 // are prefixed ('desktop:<dir>' / 'cli:<id>'); a bare uuid is a sqlite accounts row.
-const accountOptions = computed(() => [
+const resolvedAccountOptions = computed<
+  Array<{ value: string; label: string; disabled?: boolean }>
+>(() => [
   { value: AMBIENT, label: t('builder.accountAmbient') },
   ...instances.value
     .filter((i) => i.account?.email)
@@ -142,6 +151,35 @@ const accountOptions = computed(() => [
     label: `${a.label} · ${a.auth_type === 'api_key' ? t('builder.accountAuthApiKey') : t('builder.accountAuthOauth')}`,
   })),
 ])
+
+/** Strip the picker's internal prefix so a dead ref reads as what the user actually set up
+ *  (a folder, an id) rather than leaking the 'desktop:'/'cli:' storage detail. */
+function refDisplay(ref: string): string {
+  if (ref.startsWith('desktop:')) return ref.slice('desktop:'.length)
+  if (ref.startsWith('cli:')) return ref.slice('cli:'.length)
+  return ref
+}
+
+// Editing an item whose pinned instance/account was since deleted: the seeded value has no
+// matching entry above, so the Select would otherwise show nothing selected (reading as the
+// Ambient placeholder) — and hitting Save then quietly switches the run to Ambient with no
+// indication anything changed. Surface it instead: append a disabled option carrying the dead
+// ref, so the picker shows exactly what's selected — and that it's gone — rather than going
+// blank. (If the ref resolves after a later instance refresh, this entry is superseded by the
+// real one above and disappears on its own.)
+const accountOptions = computed(() => {
+  const base = resolvedAccountOptions.value
+  const ref = seededRunAsRef.value
+  if (!ref || base.some((o) => o.value === ref)) return base
+  return [
+    ...base,
+    {
+      value: ref,
+      label: t('builder.accountDeletedInstance', { ref: refDisplay(ref) }),
+      disabled: true,
+    },
+  ]
+})
 
 const canSubmit = computed(() => {
   if (!form.prompt.trim()) return false
@@ -277,7 +315,12 @@ async function submit() {
           <Select v-model="form.account_id">
             <SelectTrigger class="w-full"><SelectValue :placeholder="$t('builder.accountAmbient')" /></SelectTrigger>
             <SelectContent>
-              <SelectItem v-for="o in accountOptions" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
+              <SelectItem
+                v-for="o in accountOptions"
+                :key="o.value"
+                :value="o.value"
+                :disabled="o.disabled"
+              >{{ o.label }}</SelectItem>
             </SelectContent>
           </Select>
         </div>

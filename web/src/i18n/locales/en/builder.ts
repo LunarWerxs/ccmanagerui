@@ -36,6 +36,7 @@ export default {
   accountCliInstance: 'CLI instance',
   accountAuthApiKey: 'API key',
   accountAuthOauth: 'OAuth',
+  accountDeletedInstance: 'Deleted instance (was: {ref})',
   forkLabel: 'Fork into a new session id instead of continuing in place',
   cancel: 'Cancel',
   addToQueue: 'Add to queue',

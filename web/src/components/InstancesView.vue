@@ -187,6 +187,7 @@ const {
   launch: launchCli,
   login: loginCli,
   linkDesktop: linkCliDesktop,
+  remove: removeCli,
 } = useCliInstances()
 onMounted(loadAppSettings)
 
@@ -232,7 +233,8 @@ async function onSignInCli(inst: CMInstance) {
   if (cliSignInBusy.value.has(inst.dir)) return
   cliSignInBusy.value = new Set(cliSignInBusy.value).add(inst.dir)
   try {
-    const created = await createCli(`${displayName(inst)} (CLI)`)
+    const cliName = `${displayName(inst)} (CLI)`
+    const created = await createCli(cliName)
     const id = created?.ok ? (created.data?.id as string | undefined) : undefined
     if (!id) {
       toast.error(created?.message ?? t('instances.toastCliCreateFailed'))
@@ -240,6 +242,10 @@ async function onSignInCli(inst: CMInstance) {
     }
     const linked = await linkCliDesktop(id, inst.dir)
     if (!linked?.ok) {
+      // The link failed, so this CLI instance was created but never linked — leaving it behind
+      // would orphan it in the CLI Instances table. Clean it up (confirmName mirrors the trim
+      // createCliInstance applies to the name server-side) so a failed chain leaves no residue.
+      await removeCli(id, cliName.trim())
       toast.error(linked?.message ?? t('instances.toastCliCreateFailed'))
       return
     }
@@ -407,7 +413,11 @@ async function onDeleteConfirm(confirmName: string) {
 }
 
 function isBusy(inst: CMInstance): boolean {
-  return busyDirs.value.has(inst.dir)
+  // Also busy while a "Sign in CLI" create+link chain is in flight for this row: without this,
+  // Delete/Quit on the same row weren't disabled during the chain, so a race could still delete
+  // the desktop instance out from under a CLI instance that's about to be linked to it — a ghost
+  // in the making even with the create+link double-click guard in place.
+  return busyDirs.value.has(inst.dir) || cliSignInBusy.value.has(inst.dir)
 }
 
 // Windows ships two Claude Desktop builds; only the classic (Squirrel .exe) one can be

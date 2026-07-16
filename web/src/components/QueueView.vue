@@ -1,21 +1,35 @@
 <script setup lang="ts">
 import { ChevronDown, FastForward, ListPlus, Plus, Power, PowerOff } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import QueueItemCard from '@/components/QueueItemCard.vue'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useBuilder } from '@/composables/useBuilder'
+import { useCliInstances } from '@/composables/useCliInstances'
 import { useData } from '@/composables/useData'
+import { useInstances } from '@/composables/useInstances'
 import type { QueueItem } from '@/lib/api'
 import * as api from '@/lib/api'
+import { displayName } from '@/lib/instance-appearance'
 import IconTooltip from '@/shell/IconTooltip.vue'
 import InfoHint from '@/shell/InfoHint.vue'
 
 const { t } = useI18n()
 const { queue, queueLoaded, accounts, scheduler, refreshQueue } = useData()
 const { openBuilder, openEditor } = useBuilder()
+// Run-as resolution mirrors QueueBuilder's accountOptions: an item pinned to a signed-in
+// instance ('desktop:<dir>' / 'cli:<id>') resolves through these live lists; a bare uuid is the
+// legacy sqlite accounts fallback. Refresh here too (silent) — these singletons only
+// self-populate once the Instances tab has been opened, and the queue drawer can be the very
+// first thing a user sees.
+const { instances, refreshInstances } = useInstances()
+const { cliInstances, refreshCliInstances } = useCliInstances()
+onMounted(() => {
+  void refreshInstances({ silent: true })
+  void refreshCliInstances({ silent: true })
+})
 const expanded = ref<string | null>(null)
 
 // A finished run is history, not a to-do. Left in the one flat list they crowd out the handful of
@@ -36,9 +50,29 @@ const dueCount = computed(
     ).length,
 )
 
-function accountLabel(id: string | null): string | null {
-  if (!id) return null
-  return accounts.value.find((a) => a.id === id)?.label ?? 'account'
+/** The login badge for a queue item: an instance-pinned item resolves through the live
+ *  instance lists FIRST (desktop dir -> its displayName, cli id -> its name) — otherwise it
+ *  would render with no account badge at all, since account_id is null on those items. Falls
+ *  back to the legacy sqlite accounts lookup only when no instance_ref is set. A ref that no
+ *  longer resolves (the instance/account was deleted) still gets a clearly-labeled badge rather
+ *  than silently rendering blank. */
+function accountLabel(item: QueueItem): string | null {
+  const ref = item.instance_ref
+  if (ref) {
+    if (ref.startsWith('desktop:')) {
+      const dir = ref.slice('desktop:'.length)
+      const inst = instances.value.find((i) => i.dir === dir)
+      return inst ? displayName(inst) : t('queue.deletedInstance')
+    }
+    if (ref.startsWith('cli:')) {
+      const id = ref.slice('cli:'.length)
+      const inst = cliInstances.value.find((c) => c.id === id)
+      return inst ? inst.name : t('queue.deletedInstance')
+    }
+    return t('queue.deletedInstance')
+  }
+  if (!item.account_id) return null
+  return accounts.value.find((a) => a.id === item.account_id)?.label ?? 'account'
 }
 
 function toggle(id: string) {
@@ -172,7 +206,7 @@ async function remove(item: QueueItem) {
         :key="item.id"
         :item="item"
         :expanded="expanded === item.id"
-        :account-label="accountLabel(item.account_id)"
+        :account-label="accountLabel(item)"
         @toggle="toggle(item.id)"
         @run="run(item)"
         @cancel="cancel(item)"
@@ -206,7 +240,7 @@ async function remove(item: QueueItem) {
             :key="item.id"
             :item="item"
             :expanded="expanded === item.id"
-            :account-label="accountLabel(item.account_id)"
+            :account-label="accountLabel(item)"
             @toggle="toggle(item.id)"
             @run="run(item)"
             @cancel="cancel(item)"

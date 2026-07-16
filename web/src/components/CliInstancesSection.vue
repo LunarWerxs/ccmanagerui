@@ -92,10 +92,21 @@ const usageFor = (inst: CliInstance) => snapshotFor(usageKey(inst))
  * instance's row up in InstancesView (that row IS the account) and is deliberately NOT repeated
  * here — showing it in both places is duplication, not a unified view. "Unlink" on the account row
  * sends it back down here.
+ *
+ * "Unlinked" also covers a CLI instance whose associatedDesktopDir no longer matches any CURRENTLY
+ * existing desktop instance — a ghost link. removeInstance() clears the link server-side when its
+ * desktop instance is deleted (core/lifecycle.ts), but checking desktopInstances here too is a
+ * frontend backstop: if that cleanup were ever bypassed, a CLI instance pointing at a vanished
+ * desktop dir would otherwise stay "linked" forever — hidden from this table with no row left to
+ * show it, and so unmanageable. Comparing against the live desktop list guarantees it always
+ * surfaces somewhere.
  */
-const unlinkedCliInstances = computed(() =>
-  cliInstances.value.filter((c) => !c.associatedDesktopDir),
-)
+const unlinkedCliInstances = computed(() => {
+  const desktopDirs = new Set(desktopInstances.value.map((i) => i.dir))
+  return cliInstances.value.filter(
+    (c) => !c.associatedDesktopDir || !desktopDirs.has(c.associatedDesktopDir),
+  )
+})
 /** How many moved up onto a desktop instance's row (so the header can explain the shortfall). */
 const linkedCount = computed(() => cliInstances.value.length - unlinkedCliInstances.value.length)
 

@@ -26,7 +26,6 @@ export default {
   chipEffort: 'Effort',
   chipPermission: 'Permissions',
   chipAccount: 'Account',
-  chipCwd: 'Working dir',
   cwdPopoverLabel: 'Working directory override',
   cwdPopoverHint: "Leave empty to use the session's own directory.",
   toastStarted: 'Started {n} run(s)',

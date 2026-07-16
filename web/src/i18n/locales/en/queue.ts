@@ -38,4 +38,5 @@ export default {
   exitLost: 'interrupted',
   exitLostHint:
     'The run was cut off before it finished — the process was killed, or CC Manager UI restarted under it. Whatever it had already done is on disk; open the session to see how far it got.',
+  deletedInstance: '(deleted instance)',
 }

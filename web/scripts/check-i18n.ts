@@ -145,11 +145,17 @@ const T_CALL = /(?<![\w.])\$?t\(\s*["']([\w.]+)["']/g
 const KEYPATH = /keypath\s*=\s*["']([\w.]+)["']/g
 const DYNAMIC_T = /(?<![\w.])\$?t\(\s*`/g
 
+// Keys seen through a precise `t("a.b")` / `keypath="a.b"` match. Used by the reverse
+// (unused-key) pass below as a fast-path — anything already proven live here doesn't need
+// the whole-source substring scan.
+const referencedKeys = new Set<string>()
+
 function checkKeyRefs(file: string, source: string) {
   for (const re of [T_CALL, KEYPATH]) {
     re.lastIndex = 0
     for (const m of source.matchAll(re)) {
       const key = m[1]
+      referencedKeys.add(key)
       if (!enKeys.has(key)) {
         const line = source.slice(0, m.index).split('\n').length
         add(file, line, 'error', 'missing-key', `t("${key}") has no entry in en.ts`)
@@ -160,6 +166,51 @@ function checkKeyRefs(file: string, source: string) {
   for (const m of source.matchAll(DYNAMIC_T)) {
     const line = source.slice(0, m.index).split('\n').length
     add(file, line, 'warn', 'dynamic-key', 'dynamic t(`...`) key — not statically verified')
+  }
+}
+
+// Reverse pass: is every catalog key actually referenced somewhere?
+//
+// The precise scan above only sees a key when it's a string literal argument to `t(...)`
+// / `$t(...)` / `keypath="..."` right there in the call. It's blind to INDIRECT reference —
+// a key threaded through a variable or lookup table before it ever reaches `t()`, e.g.
+// `computed(() => ({ titleKey: 'instances.desktopMsixTitle', bodyKey: 'instances.desktopMsixBody' }))`
+// followed by `$t(desktopWarning.titleKey)` elsewhere, or a helper like
+// `usageReasonMessageKey(reason)` that returns a key string via an internal switch/map.
+// Naively treating anything not matched above as "unused" would misreport every one of
+// those as dead (or, in a stricter checker, delete/flag a key that's genuinely load-bearing).
+//
+// The fix: before calling a key unused, check whether its FULL dotted key string appears
+// anywhere in the app's source tree as a quoted string literal — not just inside a `t()`
+// shaped call. That one substring check covers every indirection (lookup table, ternary,
+// helper return, object literal) in a single pass, because the key has to be written down
+// as a literal *somewhere* for any of those patterns to work.
+//
+// Deliberately matched as the FULL "area.name" string, never a bare last segment
+// ("desktopMsixTitle" alone) — matching only the tail would make near enough every key look
+// "used" by coincidence and silently hide real dead keys, defeating the point of the check.
+function findUnusedKeys(): void {
+  let wholeSource = ''
+  for (const path of new Glob('src/**/*.vue').scanSync('.'))
+    wholeSource += readFileSync(path, 'utf8')
+  for (const path of new Glob('src/**/*.ts').scanSync('.'))
+    wholeSource += readFileSync(path, 'utf8')
+
+  const isQuotedLiteral = (key: string) =>
+    wholeSource.includes(`'${key}'`) ||
+    wholeSource.includes(`"${key}"`) ||
+    wholeSource.includes(`\`${key}\``)
+
+  for (const key of [...enKeys].sort()) {
+    if (referencedKeys.has(key)) continue
+    if (isQuotedLiteral(key)) continue
+    add(
+      'src/i18n/locales/en.ts',
+      1,
+      'warn',
+      'unused-key',
+      `"${key}" is defined but never referenced (no t()/keypath call and no matching string literal anywhere in src/)`,
+    )
   }
 }
 
@@ -219,6 +270,7 @@ for (const path of new Glob('src/**/*.ts').scanSync('.')) {
   checkKeyRefs(path, readFileSync(path, 'utf8'))
 }
 await checkLocaleParity()
+findUnusedKeys()
 
 const errors = findings.filter((f) => f.severity === 'error')
 const warns = findings.filter((f) => f.severity === 'warn')
