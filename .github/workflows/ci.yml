@@ -41,6 +41,12 @@ jobs:
       - name: i18n check (web)
         run: bun run --cwd web check:i18n
 
+      # Repo guardrail (Architect custom check, run standalone — no npx/network): fails if a reka
+      # *Trigger wrapped in a tooltip uses the kit <Button> (the double as-child that silently
+      # stopped the Sessions instance-filter dropdown from opening). See the check file's header.
+      - name: Guardrail (reka trigger + tooltip)
+        run: bun .arkitect/your-checks/code/reka-trigger-tooltip-button.mjs
+
       - name: Build (web SPA)
         run: bun run build
 

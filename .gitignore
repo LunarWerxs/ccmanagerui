@@ -5,9 +5,12 @@ data/
 .DS_Store
 .env
 .env.local
-.arkitect/reports/
 .claude/
-.arkitect/
+# Architect: run output stays local; the config + custom checks (your-checks/) are committed
+# owner-owned tooling (the reusable guardrail checks live there). The core is fetched by npx.
+.arkitect/*
+!.arkitect/arkitect.config.json
+!.arkitect/your-checks/
 tmp/
 PLAN.md
 
