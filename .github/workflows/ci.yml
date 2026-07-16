@@ -53,6 +53,12 @@ jobs:
       - name: Guardrail (reka trigger + tooltip)
         run: bun .arkitect/your-checks/code/reka-trigger-tooltip-button.mjs
 
+      # Fails if a WMI `CommandLine LIKE` query forgets to exclude the shell running it — that query
+      # carries the needle in its own command line, so it matches itself and answers "found"
+      # forever. isRunnerAlive() did exactly that for months, silently disabling the stale-pid guard.
+      - name: Guardrail (self-matching WMI query)
+        run: bun .arkitect/your-checks/code/wmi-commandline-query-self-match.mjs
+
       - name: Build (web SPA)
         run: bun run build
 
