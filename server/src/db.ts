@@ -1,6 +1,8 @@
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { DATA_DIR, DB_PATH, RUN_LOG_DIR } from './config'
+import { classifyLimit } from './rate-limit-signal'
+import type { QueueItem } from './types'
 
 mkdirSync(DATA_DIR, { recursive: true })
 mkdirSync(RUN_LOG_DIR, { recursive: true })
@@ -30,7 +32,7 @@ create table if not exists queue_items (
   account_id      text references accounts(id) on delete set null,
   new_chat        integer not null default 0,
   fork            integer not null default 0,
-  status          text not null default 'queued',  -- queued | running | completed | failed | rate_limited | canceled
+  status          text not null default 'queued',  -- queued | running | completed | failed | rate_limited | overloaded | canceled
   pid             integer,
   position        integer not null default 0,
   not_before      text,                 -- ISO timestamp; scheduler won't auto-dispatch before this
@@ -94,6 +96,11 @@ create table if not exists monitor_accounts (
   // constraint (and foreign_keys is ON), so an encoded non-account value can't live there.
   if (!cols.includes('instance_ref'))
     db.exec('alter table queue_items add column instance_ref text')
+  // How many times a transient-overload (529) retry has already re-run this item. In the DB rather
+  // than in memory so a daemon that dies mid-backoff comes back to a queued row it still honours
+  // (dispatch.ts dispatchDueRetries), instead of a timer that died with the process.
+  if (!cols.includes('retry_attempts'))
+    db.exec('alter table queue_items add column retry_attempts integer not null default 0')
 }
 {
   const cols = db
@@ -135,6 +142,56 @@ create table if not exists monitor_accounts (
       `[ccmanagerui] repaired ${bogus.length} run(s) mislabeled 'rate_limited' by the old detector (they exited 0)`,
     )
   }
+}
+
+// --- one-time repair: 529 overloads mislabeled as the user's rate limit -------
+// Until the quota/transient split (rate-limit-signal.ts), dispatch.ts matched ONE pattern list that
+// contained both "session limit" and "529"/"overloaded" — so a run killed by Anthropic's servers
+// being saturated for a few seconds was filed identically to one that had spent its 5-hour window.
+// Observed live: a run whose only two events were "session started" and "API Error: 529 Overloaded.
+// This is a server-side issue, usually temporary" sat in the DB as 'rate_limited'. That is not
+// cosmetic — monitor.ts resumes off exactly this status, so the row is a session the watchdog wants
+// to re-prompt against a reset that was never coming.
+//
+// Reclassify ONLY rows whose recorded events show a transient overload and NO quota signal at all —
+// the same conservative asymmetry classifyLimit() itself uses. A row that mentions both keeps its
+// existing (quota) meaning. Idempotent: after the split nothing new lands in this state.
+{
+  const suspects = db
+    .query<{ id: string }, []>("select id from queue_items where status = 'rate_limited'")
+    .all()
+  const eventsOf = db.query<{ text: string }, [string]>(
+    'select text from run_events where queue_item_id = ?',
+  )
+  const overloads = suspects.filter(
+    (r) =>
+      classifyLimit(
+        eventsOf
+          .all(r.id)
+          .map((e) => e.text)
+          .join('\n'),
+      ) === 'transient',
+  )
+  if (overloads.length) {
+    const fix = db.query("update queue_items set status = 'overloaded' where id = ?")
+    const del = db.query('delete from monitor_state where item_id = ?')
+    for (const r of overloads) {
+      fix.run(r.id)
+      del.run(r.id)
+    }
+    console.log(
+      `[ccmanagerui] repaired ${overloads.length} run(s) mislabeled 'rate_limited' that were really a transient 529 overload`,
+    )
+  }
+}
+
+// --- shared row coercion ------------------------------------------------------
+
+/** sqlite has no booleans — new_chat/fork come back as 0/1. Every reader of queue_items needs this,
+ *  so it lives with the table rather than as a fourth private copy (index/scheduler/monitor/dispatch
+ *  each had their own). db.ts imports nothing of theirs, so this is cycle-free for all of them. */
+export function coerceQueueItem(row: any): QueueItem {
+  return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
 }
 
 // --- settings helpers -------------------------------------------------------

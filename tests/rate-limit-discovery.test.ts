@@ -153,6 +153,25 @@ test('an errored result IS trusted', () => {
   expect(v?.pending).toBe(true)
 })
 
+// --- quota only: a 529 is not a discovery subject ---------------------------------------------
+
+test('a session stopped by a transient 529 is NOT discovered', () => {
+  // Discovery exists to resume sessions waiting on a 5-hour reset. A 529's wall cleared seconds
+  // later, so parking it against the next reset would be exactly the quota/transient conflation
+  // this split exists to kill. Our own runs retry a 529 in-process (dispatch.ts); a terminal
+  // session left sitting on one is abandoned, not queued.
+  const overload = {
+    type: 'assistant',
+    isApiErrorMessage: true,
+    message: {
+      role: 'assistant',
+      model: '<synthetic>',
+      content: [{ type: 'text', text: 'API Error: 529 Overloaded. This is a server-side issue.' }],
+    },
+  }
+  expect(classifyRateLimitTail(jsonl(userTurn('go'), overload))).toBeNull()
+})
+
 // --- tail-reading mechanics -----------------------------------------------------------------
 
 test('a truncated first line (the tail always starts mid-line) is ignored, not fatal', () => {

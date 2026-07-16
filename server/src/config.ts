@@ -42,6 +42,19 @@ export const DB_PATH = process.env.CCMANAGERUI_DB ?? join(DATA_DIR, 'ccmanagerui
  *  portable install) can isolate them from the default data dir. */
 export const RUN_LOG_DIR = process.env.CCMANAGERUI_RUN_LOG_DIR?.trim() || join(DATA_DIR, 'run-logs')
 
+/**
+ * Staging area for "copy the session file to the clipboard".
+ *
+ * The clipboard holds a PATH, not bytes, so the file it points at has to keep existing for as long
+ * as the user might paste — which rules out an OS temp file we delete on the way out. It also has
+ * to carry the session's TITLE as its filename (the real transcript on disk is named by uuid, and
+ * pasting `4f3c…9a.jsonl` into a folder is exactly the thing the title-named download fixed), which
+ * rules out clipboarding the original in place. So: stage a titled copy here and keep it.
+ * The directory holds at most one file — each copy wipes it first, which is honest, because the
+ * clipboard itself only ever holds one thing.
+ */
+export const CLIPBOARD_DIR = join(DATA_DIR, 'clipboard')
+
 export const PORT = Number(process.env.PORT ?? 7787)
 export const HOST = process.env.HOST ?? '127.0.0.1'
 

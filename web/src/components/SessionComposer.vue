@@ -70,6 +70,22 @@ const runningIds = computed(
 )
 const anyBusy = computed(() => props.targets.some((tg) => runningIds.value.has(tg.session_id)))
 
+/**
+ * The busy hint is a warning about the message you are TYPING — so it only shows while there is
+ * one. Without the text gate it fired on your own message the instant you sent it: submit() awaits
+ * refreshQueue(), and the server doesn't answer until dispatchItem has already written
+ * status='running', so `anyBusy` flips true inside the very same click that sent it. The banner
+ * then announced "your message will queue and start on its own" about a message that had just
+ * started running immediately — reading as a flat lie when nothing had been running at all.
+ *
+ * Gating on `text` fixes it because submit() clears the text in the same synchronous stretch as the
+ * refresh, so Vue renders both facts at once and the hint never appears for the message just sent.
+ * (That ordering is load-bearing: clearing `text` earlier — say, optimistically before the awaits —
+ * would let the flash back in.) It still shows in the case that is actually useful: typing a NEW
+ * message while a run really is in flight.
+ */
+const showBusyHint = computed(() => anyBusy.value && !!text.value.trim())
+
 const accountOptions = computed(() => [
   { value: '', label: t('builder.accountAmbient') },
   ...accounts.value.map((a) => ({ value: a.id, label: a.label })),
@@ -224,7 +240,7 @@ function onKeydown(e: KeyboardEvent) {
         <UsersRound class="size-3.5 text-primary" />
         <span class="font-medium text-foreground">{{ $t('composer.sendingToN', { n: targets.length }) }}</span>
       </div>
-      <p v-if="anyBusy" class="mb-2 text-xs text-warning">
+      <p v-if="showBusyHint" class="mb-2 text-xs text-warning">
         {{ scheduler?.enabled ? $t('composer.busyHintAuto') : $t('composer.busyHintManual') }}
       </p>
 

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import net from 'node:net'
-import { join, relative } from 'node:path'
+import { basename, join, relative } from 'node:path'
 import { type Context, Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
 import { cors } from 'hono/cors'
@@ -18,6 +18,7 @@ import {
 } from './auto-update'
 import { markDispatchReady } from './boot-state'
 import {
+  CLIPBOARD_DIR,
   CONFIG_DIR,
   HOST,
   IS_COMPILED,
@@ -63,7 +64,7 @@ import {
 import { createInstance, removeInstance } from './core/lifecycle'
 import { INSTANCE_COLOR_KEYS, INSTANCE_ICON_KEYS } from './core/shared'
 import { createInstanceShortcut } from './core/shortcut'
-import { db, getSetting, setSetting } from './db'
+import { coerceQueueItem, db, getSetting, setSetting } from './db'
 import {
   activeCount,
   cancelItem,
@@ -73,6 +74,7 @@ import {
   isSessionActive,
   type RunMessage,
   reattachRuns,
+  startRetrySweep,
   subscribeRun,
 } from './dispatch'
 import { contentDispositionAttachment, safeTranscriptFilename } from './filenames'
@@ -166,10 +168,6 @@ function hideTrayIconEnabled(): boolean {
 function setHideTrayIcon(value: boolean): void {
   setSetting('hide_tray_icon', value ? '1' : '0')
   updateInstanceInfo({ hideTrayIcon: value })
-}
-
-function coerceItem(row: any): QueueItem {
-  return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
 }
 
 // Dispatch-argv enums, validated SERVER-SIDE (the MCP/web schemas are advisory only). permission_mode
@@ -421,6 +419,69 @@ app.post('/api/sessions/:id/open-file', (c) => {
     return c.json({ ok: false }, 500)
   }
 })
+/**
+ * Copy the transcript FILE ITSELF to the OS clipboard — so Ctrl+V in Explorer, Slack or a mail
+ * client pastes the .jsonl, not its text.
+ *
+ * This has to be the daemon's job: a web page cannot do it at all. `navigator.clipboard.write()`
+ * only accepts blobs the page itself constructs (text/html/png and friends); no ClipboardItem type
+ * maps to a native file-drop (Windows CF_HDROP / macOS NSFilenamesPasteboardType), because letting
+ * a page assert "there is a file at this path on your disk" is a filesystem-disclosure primitive.
+ * The daemon is already local and already shells out for the sibling open-file route, so it can.
+ *
+ * The path reaches PowerShell through the ENVIRONMENT, never string-interpolated into -Command: a
+ * session title can legally contain a quote or a `$`, and building a script out of one would be
+ * both fragile and an injection seam.
+ */
+app.post('/api/sessions/:id/copy-file', async (c) => {
+  const id = c.req.param('id')
+  const tf = findTranscript(id)
+  if (!tf) return c.json({ error: 'session not found' }, 404)
+  if (process.platform !== 'win32' && process.platform !== 'darwin')
+    // Linux has no cross-desktop file-clipboard convention (GNOME and KDE disagree on the private
+    // MIME type), so there is nothing honest to spawn. Say so rather than silently no-op.
+    return c.json({ ok: false, reason: 'unsupported' }, 501)
+
+  const session = await getSession(id)
+  const staged = join(CLIPBOARD_DIR, safeTranscriptFilename(session?.title, tf.session_id))
+  try {
+    rmSync(CLIPBOARD_DIR, { recursive: true, force: true })
+    mkdirSync(CLIPBOARD_DIR, { recursive: true })
+    await Bun.write(staged, Bun.file(tf.path))
+  } catch {
+    return c.json({ ok: false, reason: 'stage-failed' }, 500)
+  }
+
+  const cmd =
+    process.platform === 'win32'
+      ? [
+          'powershell',
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          // -LiteralPath: a title may contain [ ] which -Path would read as a wildcard.
+          'Set-Clipboard -LiteralPath $env:CCMANAGERUI_CLIP_PATH',
+        ]
+      : [
+          'osascript',
+          '-e',
+          'set the clipboard to (POSIX file (system attribute "CCMANAGERUI_CLIP_PATH"))',
+        ]
+  try {
+    const proc = Bun.spawn(cmd, {
+      env: { ...process.env, CCMANAGERUI_CLIP_PATH: staged },
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    // Awaited, unlike open-file's fire-and-forget: the button reports whether the copy landed, and
+    // "it's on your clipboard" is a claim we should only make once the exit code says so.
+    const code = await proc.exited
+    return code === 0
+      ? c.json({ ok: true, filename: basename(staged) })
+      : c.json({ ok: false }, 500)
+  } catch {
+    return c.json({ ok: false }, 500)
+  }
+})
 app.get('/api/sessions/:id/tail', async (c) => {
   const limit = c.req.query('limit')
   const textOnly = c.req.query('textOnly')
@@ -478,7 +539,7 @@ app.get('/api/queue', (c) =>
     db
       .query<QueueItem, []>('select * from queue_items order by position asc, created_at asc')
       .all()
-      .map(coerceItem),
+      .map(coerceQueueItem),
   ),
 )
 app.post('/api/queue', async (c) => {
@@ -535,7 +596,7 @@ app.post('/api/queue', async (c) => {
     notBefore,
     Date.now(),
   )
-  return c.json(coerceItem(db.query('select * from queue_items where id = ?').get(id)))
+  return c.json(coerceQueueItem(db.query('select * from queue_items where id = ?').get(id)))
 })
 app.patch('/api/queue/:id', async (c) => {
   const id = c.req.param('id')
@@ -594,7 +655,7 @@ app.patch('/api/queue/:id', async (c) => {
     values.push(id)
     db.query(`update queue_items set ${fields.join(', ')} where id = ?`).run(...(values as any[]))
   }
-  return c.json(coerceItem(db.query('select * from queue_items where id = ?').get(id)))
+  return c.json(coerceQueueItem(db.query('select * from queue_items where id = ?').get(id)))
 })
 app.delete('/api/queue/:id', (c) => {
   const id = c.req.param('id')
@@ -607,7 +668,7 @@ app.post('/api/queue/:id/run', (c) => {
   const row = db.query('select * from queue_items where id = ?').get(id)
   if (!row) return c.json({ error: 'queue item not found' }, 404)
   if (isActive(id)) return c.json({ error: 'already running' }, 409)
-  const item = coerceItem(row)
+  const item = coerceQueueItem(row)
   if (isSessionActive(item.session_id))
     return c.json({ error: 'another run is already active for this session' }, 409)
   void dispatchItem(item)
@@ -628,7 +689,7 @@ app.post('/api/queue/run-due', (c) => {
   let started = 0
   let skipped = 0
   for (const row of due) {
-    const item = coerceItem(row)
+    const item = coerceQueueItem(row)
     // dispatchItem registers the session synchronously before its first await, so a
     // second due item for the same session correctly lands in the skipped bucket
     if (isActive(item.id) || isSessionActive(item.session_id)) {
@@ -1232,10 +1293,18 @@ void reattachRuns().finally(markDispatchReady)
 
 startAutoUpdate()
 
+// --- transient-overload retry sweep (ALWAYS ON; see server/src/dispatch.ts) --------------------
+// Re-fires runs that died on a 529 once their few-second backoff elapses. Not behind the scheduler
+// or monitor switches on purpose: those govern hours-scale autonomy ("run my queue", "prompt my
+// sessions while I sleep"), whereas this just finishes the run the user started by hand seconds
+// ago and which died on someone else's server hiccup.
+startRetrySweep()
+
 // --- auto-resume monitor loop (opt-in; OFF by default; see server/src/monitor.ts) -------------
 // The poll loop always runs; each tick is a no-op unless `monitor_enabled` is set. It watches for
-// dispatch runs that stopped 'rate_limited', gates each on the weekly cap via checkUsage, and
-// schedules a `claude --resume` for just after the 5-hour reset.
+// dispatch runs that stopped 'rate_limited' (their QUOTA is spent — a 529 is handled by the retry
+// sweep above, not here), gates each on the weekly cap via checkUsage, and schedules a
+// `claude --resume` for just after the 5-hour reset.
 startMonitor()
 
 // --- background usage refresh (ON by default; see server/src/usage-refresh.ts) -----------------

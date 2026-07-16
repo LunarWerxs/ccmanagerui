@@ -35,7 +35,15 @@ const expanded = ref<string | null>(null)
 // A finished run is history, not a to-do. Left in the one flat list they crowd out the handful of
 // items that still need something to happen, and the panel reads as a pile of work rather than a
 // queue. Split by "is this still going to do something?" — everything else folds away behind a count.
-const TERMINAL: QueueItem['status'][] = ['completed', 'failed', 'canceled', 'rate_limited']
+// 'overloaded' belongs here: by the time a run reads it, the automatic retries are already spent
+// (dispatch.ts), so nothing further will happen to it on its own.
+const TERMINAL: QueueItem['status'][] = [
+  'completed',
+  'failed',
+  'canceled',
+  'rate_limited',
+  'overloaded',
+]
 const isFinished = (q: QueueItem) => TERMINAL.includes(q.status)
 
 const active = computed(() => queue.value.filter((q) => !isFinished(q)))

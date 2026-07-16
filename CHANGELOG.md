@@ -8,6 +8,29 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Fixed
 
+- **A 529 overload was treated as your rate limit, so the run died instead of retrying.** `529
+  Overloaded` means Anthropic's servers are saturated and it clears in seconds; a session limit
+  means your own 5-hour allowance is spent and only time fixes it. Both wear the word "limit", and
+  `dispatch.ts` matched them with ONE pattern list — so a run killed by a few-second server hiccup
+  was filed `rate_limited` and parked against a reset that had nothing to do with it, while the same
+  message sent from the desktop app (which just retries) went straight through. They are now told
+  apart (`rate-limit-signal.ts`), and a transient overload is **retried automatically** — three
+  tries over ~35s, backing off — before it gives up as its own new `overloaded` status, which is
+  neither `failed` (nothing is wrong with the run) nor `rate_limited` (your quota is fine). The
+  retry only fires when the run produced no output first, so it can never silently re-do work you
+  already paid for; it is DB-backed, so a daemon restart mid-backoff resumes rather than forgets;
+  and it is deliberately not behind the scheduler or monitor switches, which are off by default and
+  govern hours-scale autonomy — this just finishes the run you started ten seconds ago.
+  Ambiguous text still classifies as a quota wall, the conservative default. A migration relabels
+  rows already mis-filed by the old detector. The auto-resume monitor now only ever sees a genuine
+  quota stop, so it can no longer park a 529 against a five-hour reset that was never coming.
+- **The composer claimed "this session is busy" the moment you hit send, with nothing running.**
+  `submit()` awaits a queue refresh, and the server doesn't answer until the run is already marked
+  `running` — so sending a message flipped the banner on within the very same click, and it then
+  announced that the message "will queue and start on its own" about one that had just started
+  running immediately. The hint now only shows while there is actually a draft it could apply to,
+  which is the only time it says anything useful.
+
 - **The auto-resume monitor was blind to every session it hadn't launched itself.** It only ever
   looked at `queue_items` rows with status `rate_limited`, and the only thing that can set that
   status is a run the daemon spawned and tailed — so a session you started yourself (a bare `claude`
@@ -34,6 +57,11 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
+- **Copy the session file to the clipboard.** A new button beside "save a copy" puts the `.jsonl`
+  FILE on the clipboard — not its text — so Ctrl+V into a folder, a chat or an email pastes the
+  actual file, named after the session rather than its uuid. A web page cannot do this at all (no
+  clipboard type maps to a native file-drop, by design), so the daemon does it; Windows and macOS
+  only, since Linux has no cross-desktop convention for it.
 - **A 10-minute stepper in the composer's "queue for later".** The hours stepper now sits next to a
   minutes one that steps in 10s, and a single button queues the combined delay ("In 1h 30m"). With
   both, the fixed **In 15 min** and **In 1 hour** presets were redundant — 1h is the stepper's

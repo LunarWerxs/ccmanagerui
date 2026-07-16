@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Boxes,
   Check,
+  ClipboardCopy,
   Clock,
   Copy,
   Download,
@@ -78,6 +79,24 @@ async function openFile(id: string) {
     if (!r.ok) toast.error(t('sessions.openFileFailed'))
   } catch {
     toast.error(t('sessions.openFileFailed'))
+  }
+}
+
+// Puts the FILE on the clipboard, not its text — which only the daemon can do (see api.copySessionFile).
+// It reports the name it staged, because that name (the session title, not the uuid) is the whole
+// point and is worth confirming before the user pastes somewhere.
+const copyingFile = ref(false)
+async function copyFile(id: string) {
+  copyingFile.value = true
+  try {
+    const r = await api.copySessionFile(id)
+    if (r.ok) toast.success(t('sessions.copyFileDone', { name: r.filename ?? '' }))
+    else if (r.reason === 'unsupported') toast.error(t('sessions.copyFileUnsupported'))
+    else toast.error(t('sessions.copyFileFailed'))
+  } catch {
+    toast.error(t('sessions.copyFileFailed'))
+  } finally {
+    copyingFile.value = false
   }
 }
 
@@ -652,6 +671,20 @@ function copy(text: string) {
                   :aria-label="$t('sessions.saveCopy')"
                 >
                   <Download />
+                </Button>
+              </IconTooltip>
+              <IconTooltip
+                :label="$t('sessions.copyFile')"
+                :description="$t('sessions.copyFileHint')"
+              >
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :disabled="copyingFile"
+                  :aria-label="$t('sessions.copyFile')"
+                  @click="copyFile(selected.session_id)"
+                >
+                  <ClipboardCopy />
                 </Button>
               </IconTooltip>
               <IconTooltip :label="$t('sessions.copySessionId')">

@@ -53,7 +53,12 @@ export type QueueStatus =
   | 'running'
   | 'completed'
   | 'failed'
+  /** YOUR allowance is spent (session/weekly). Only time fixes it — monitor.ts resumes off this. */
   | 'rate_limited'
+  /** ANTHROPIC'S servers were saturated (529). Nothing is wrong with the run; it is retried
+   *  automatically a few times first, and only lands here if the overload outlasted the backoff.
+   *  Deliberately NOT 'rate_limited': that would park a seconds-long blip against a 5-hour reset. */
+  | 'overloaded'
   | 'canceled'
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
 
@@ -137,6 +142,10 @@ export interface QueueItem {
   position: number
   /** ISO timestamp; the scheduler won't auto-dispatch before this (manual Run ignores it). */
   not_before: string | null
+  /** How many times a transient-overload (529) retry has already re-run this item. >0 with a
+   *  not_before in the future means "waiting out a backoff", which the always-on retry sweep in
+   *  dispatch.ts fires — no scheduler or monitor opt-in involved. */
+  retry_attempts: number
   started_at: string | null
   finished_at: string | null
   exit_code: number | null

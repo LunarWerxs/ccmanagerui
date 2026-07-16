@@ -16,8 +16,8 @@
 // through the EXISTING rails unchanged: the weekly-usage gate, the per-session attempt cap, the
 // idempotency check, the resume buffer. Nothing here schedules or dispatches anything itself.
 
-import { isApiErrorEvent, looksRateLimited } from './dispatch'
 import { instanceSessionMap } from './instance-sessions'
+import { classifyLimit, isApiErrorEvent } from './rate-limit-signal'
 import { getSession } from './sessions'
 import { listTranscriptFiles } from './transcript'
 import type { QueueItem } from './types'
@@ -81,7 +81,11 @@ export function classifyRateLimitTail(jsonl: string): RateLimitVerdict | null {
     // that merely TALKS about rate limits is not rate-limited). Same rule dispatch.ts applies live.
     const trusted = isApiErrorEvent(ev) || (type === 'result' && ev?.is_error === true)
     const text = eventText(ev)
-    if (trusted && looksRateLimited(text)) {
+    // QUOTA only. A session stopped by a transient 529 is NOT a discovery subject: its wall cleared
+    // seconds later, so parking it against the next 5-hour reset would be exactly the conflation
+    // this whole split exists to kill. Our own runs retry a 529 in-process (dispatch.ts); a
+    // terminal session that hit one and was left sitting is an abandoned session, not a queue.
+    if (trusted && classifyLimit(text) === 'quota') {
       notice = compact(text)
       pending = true // a later notice supersedes an earlier one and re-opens the stop
       continue
@@ -180,6 +184,7 @@ export async function discoverPendingStops(
       pid: null,
       position: 0,
       not_before: null,
+      retry_attempts: 0,
       started_at: null,
       finished_at: new Date(tf.mtime_ms).toISOString(),
       exit_code: null,

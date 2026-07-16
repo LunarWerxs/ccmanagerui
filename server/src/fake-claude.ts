@@ -10,6 +10,20 @@ function emit(obj: unknown) {
   process.stdout.write(`${JSON.stringify(obj)}\n`)
 }
 
+/**
+ * Die the way the real CLI dies, so the failure paths can be driven end to end.
+ *
+ * `overloaded` reproduces the exact shape of the incident that motivated the quota/transient split:
+ * a `system/init`, then the CLI's own synthetic error notice carrying a 529, then a non-zero exit —
+ * and critically NO model turn in between, which is what makes an automatic retry safe.
+ * `session_limit` is its opposite number: the user's own wall, which must never be retried.
+ */
+const ERROR_NOTICES: Record<string, string> = {
+  overloaded:
+    'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com.',
+  session_limit: "You've hit your session limit · resets 9:10am (America/Chicago)",
+}
+
 export async function runFakeClaude(promptArg: string | undefined): Promise<void> {
   const prompt = promptArg ?? '(no prompt)'
   const sessionId = process.env.FAKE_SESSION_ID ?? '00000000-0000-0000-0000-000000000000'
@@ -19,6 +33,23 @@ export async function runFakeClaude(promptArg: string | undefined): Promise<void
 
   emit({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-fake' })
   await Bun.sleep(SLEEP)
+
+  const notice = ERROR_NOTICES[process.env.FAKE_ERROR_MODE ?? '']
+  if (notice) {
+    // The CLI reports a limit as a SYNTHETIC assistant message flagged isApiErrorMessage — that
+    // pair is precisely what the detector trusts (see rate-limit-signal.ts isApiErrorEvent).
+    emit({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      message: {
+        role: 'assistant',
+        model: '<synthetic>',
+        content: [{ type: 'text', text: notice }],
+      },
+    })
+    process.exit(1)
+  }
+
   emit({
     type: 'assistant',
     message: {

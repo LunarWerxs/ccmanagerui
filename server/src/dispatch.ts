@@ -10,10 +10,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
+import { isDispatchReady } from './boot-state'
 import { DB_PATH, IS_COMPILED, RUN_LOG_DIR, resolveClaudeExe } from './config'
 import { getCliInstance } from './core/cli-instances'
-import { db } from './db'
+import { coerceQueueItem, db } from './db'
 import { buildDetachedSpawn } from './detached-spawn.mjs'
+import { classifyLimit, isApiErrorEvent, type LimitKind } from './rate-limit-signal'
 import { eventToTailEvents } from './transcript'
 import type { QueueItem, RunEvent } from './types'
 
@@ -25,52 +27,30 @@ import type { QueueItem, RunEvent } from './types'
 // completion; the next daemon reattaches by re-reading the log (reattachRuns). Design verified
 // end-to-end 2026-07-12 (see dispatch-runner.ts header + server-lib/detached-spawn.mjs).
 
-// --- rate-limit detection (ported from the Python smart-loop pattern list) ---
+// --- transient-overload retry ------------------------------------------------
+//
+// A 529 is NOT a rate limit (see rate-limit-signal.ts): Anthropic's servers are saturated and it
+// clears in seconds. The CLI reports it and exits; the daemon used to file that as 'rate_limited'
+// and park the run for a 5-hour reset that had nothing to do with it. The right answer is the one
+// the desktop app effectively performs by hand — back off and try again.
+//
+// Backoff spans ~35s over three tries, which is the shape of a real overload; past that it is an
+// outage, not a blip, so the run finalizes 'overloaded' and waits for a human. State lives in the
+// DB (queue_items.retry_attempts + not_before), never only in memory: this codebase went to WMI
+// lengths so a run survives a daemon restart, and an in-memory-only timer would regress that.
+const MAX_TRANSIENT_RETRIES = 3
+const RETRY_BACKOFF_MS = [5_000, 10_000, 20_000]
+/** How often the always-on sweep looks for a due retry. Tighter than the scheduler's poll because
+ *  these backoffs are counted in seconds, not minutes. */
+const RETRY_SWEEP_MS = 2_000
 
-const RATE_LIMIT_PATTERNS: RegExp[] = [
-  /\byou['’]?ve hit your session limit\b/i,
-  /\bsession limit\b/i,
-  /\busage limit\b/i,
-  /\brate[- ]?limit(?:ed|ing)?\b/i,
-  /\btoo many requests\b/i,
-  /\b429\b/,
-  /\b529\b/,
-  /\btemporarily unavailable\b/i,
-  /\btry again later\b/i,
-  /\boverloaded\b/i,
-  /\bquota\b/i,
-]
-
-/** Exported: rate-limit-discovery.ts runs this SAME detector over transcripts on disk, so a stop
- *  the daemon watched live and one it finds after the fact are judged by identical rules. */
-export function looksRateLimited(text: string): boolean {
-  return RATE_LIMIT_PATTERNS.some((re) => re.test(text))
-}
-
-/**
- * WHERE a rate-limit pattern is allowed to match — the other half of the detector, and the more
- * important one.
- *
- * The patterns above are deliberately loose (`\b529\b`, `\bquota\b`), which is fine for text the
- * CLI itself emits about its own state and catastrophic for anything else. Matching them against
- * every event marked EVERY run that merely TALKED about rate limits as rate-limited: an agent
- * grepping for "session limit", a Read whose output happened to contain line number 529, an Edit
- * touching this very file. Both `rate_limited` rows in the shipped DB were exactly that — false
- * positives on runs that exited 0 with the job done (2026-07-15), which then fed the auto-resume
- * monitor a queue of phantom stops to babysit.
- *
- * So: model prose, tool inputs, and tool results are NEVER evidence — only the CLI's own report is.
- * A genuine limit surfaces as a SYNTHETIC assistant message (`message.model === '<synthetic>'` with
- * `isApiErrorMessage: true`, e.g. "You've hit your session limit · resets 5:40am"), as an errored
- * terminal `result`, or on stderr. Note `<synthetic>` alone is not enough: the CLI also emits
- * `<synthetic>` no-op chatter with `isApiErrorMessage: false` ("No response requested.").
- *
- * Exported for the same reason as looksRateLimited: the transcript scanner MUST carry this gate
- * forward unchanged. It is the only thing standing between "found a real stop" and re-running the
- * 2026-07-15 false-positive fiasco across every project on the machine instead of just our own runs.
- */
-export function isApiErrorEvent(ev: any): boolean {
-  return ev?.isApiErrorMessage === true || ev?.message?.model === '<synthetic>'
+function retryAttemptsOf(id: string): number {
+  const row = db
+    .query<{ n: number | null }, [string]>(
+      'select retry_attempts as n from queue_items where id = ?',
+    )
+    .get(id)
+  return row?.n ?? 0
 }
 
 // --- pub/sub for live run streaming (SSE) ------------------------------------
@@ -121,7 +101,21 @@ const insertEvent = db.query(
   'insert into run_events (queue_item_id, seq, ts, role, kind, text, tool_name) values (?, ?, ?, ?, ?, ?, ?)',
 )
 
-const runtime = new Map<string, { seq: number; rateLimited: boolean }>()
+/**
+ * Per-run in-memory state.
+ *
+ * `limitKind` replaces the old single `rateLimited` boolean: a quota wall and a transient overload
+ * are different failures and finalize() now sends them different places (rate-limit-signal.ts).
+ * `sawOutput` gates the retry — see shouldRetryTransient.
+ */
+interface RunRuntime {
+  seq: number
+  limitKind: LimitKind | null
+  /** True once the run produced a real conversational turn (not just CLI meta/errors). */
+  sawOutput: boolean
+}
+const freshRuntime = (): RunRuntime => ({ seq: 0, limitKind: null, sawOutput: false })
+const runtime = new Map<string, RunRuntime>()
 
 function recordEvent(
   id: string,
@@ -130,7 +124,7 @@ function recordEvent(
   text: string,
   toolName: string | null,
 ) {
-  const rt = runtime.get(id) ?? { seq: 0, rateLimited: false }
+  const rt = runtime.get(id) ?? freshRuntime()
   rt.seq += 1
   runtime.set(id, rt)
   const ts = new Date().toISOString()
@@ -210,7 +204,10 @@ function handleLine(id: string, line: string) {
     // tool inputs, or tool results, which is what a run about rate limits is full of.
     const trusted = isApiErrorEvent(ev)
     for (const te of eventToTailEvents(ev)) {
-      if (rt && trusted && looksRateLimited(te.text)) rt.rateLimited = true
+      if (rt && trusted) rt.limitKind = classifyLimit(te.text) ?? rt.limitKind
+      // A real turn from the model. This is what makes a retry unsafe (see shouldRetryTransient):
+      // the CLI's own error notice is synthetic and carries no work, so it never counts.
+      if (rt && !trusted) rt.sawOutput = true
       recordEvent(id, te.role, te.kind, te.text, te.tool_name)
     }
   } else if (t === 'result') {
@@ -218,7 +215,7 @@ function handleLine(id: string, line: string) {
     // A `result` mirrors the model's final summary, so its text is only evidence when the CLI also
     // flagged the turn as errored — otherwise a run that ANSWERS a question about rate limits
     // (this repo's own bread and butter) reports itself rate-limited.
-    if (rt && ev.is_error && looksRateLimited(text)) rt.rateLimited = true
+    if (rt && ev.is_error) rt.limitKind = classifyLimit(text) ?? rt.limitKind
     recordEvent(id, 'system', 'meta', text, null)
   } else if (t === 'system' && ev.subtype === 'init') {
     recordEvent(id, 'system', 'meta', `session started (${ev.model ?? 'model'})`, null)
@@ -370,6 +367,50 @@ export function isSessionActive(sessionId: string): boolean {
   return false
 }
 
+// --- the transient-retry sweep -----------------------------------------------
+
+let retryTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * Re-dispatch runs whose transient-overload backoff has elapsed.
+ *
+ * ALWAYS ON, and deliberately gated on NEITHER `scheduler_enabled` NOR `monitor_enabled`. Both
+ * default off, and both are the wrong consent: they govern "run my queue for me" and "auto-prompt
+ * my sessions while I sleep" — hours-scale autonomy. This is a run the user started, seconds ago,
+ * by hand, which died on someone else's server hiccup. Finishing it is what they already asked for,
+ * so hiding it behind an opt-in most people never enable would leave the bug fixed on paper only.
+ *
+ * `isDispatchReady()` IS honoured: the boot window is exactly when a reattaching run isn't in
+ * `active` yet, and dispatching then could put two `claude --resume` on one transcript.
+ */
+export async function dispatchDueRetries(): Promise<void> {
+  if (!isDispatchReady()) return
+  const rows = db
+    .query<QueueItem, [string]>(
+      `select * from queue_items
+       where status = 'queued' and retry_attempts > 0 and not_before is not null and not_before <= ?
+       order by position asc`,
+    )
+    .all(new Date().toISOString())
+  for (const raw of rows) {
+    const item = coerceQueueItem(raw)
+    if (isActive(item.id) || isSessionActive(item.session_id)) continue
+    void dispatchItem(item)
+  }
+}
+
+export function startRetrySweep(): void {
+  if (retryTimer) return
+  retryTimer = setInterval(() => void dispatchDueRetries().catch(() => {}), RETRY_SWEEP_MS)
+}
+
+export function stopRetrySweep(): void {
+  if (retryTimer) {
+    clearInterval(retryTimer)
+    retryTimer = null
+  }
+}
+
 /** Liveness probe (signal 0 never actually signals — Node/Bun convention on every OS). */
 function isAlive(pid: number): boolean {
   try {
@@ -449,18 +490,75 @@ function cleanupRunFiles(id: string): void {
   // The log file ({id}.stream.jsonl) is kept — it's the raw record, same as before.
 }
 
+/**
+ * May we transparently re-run this? Only when BOTH hold:
+ *
+ *  · the stop was an unmistakable server-side overload, not the user's quota (rate-limit-signal.ts);
+ *  · the run produced NO real turn before dying.
+ *
+ * The second condition is the one that matters. A retry re-sends the ORIGINAL prompt through
+ * `claude --resume`, which appends it to the transcript again — harmless when the overload landed
+ * before the model ever answered (the observed case: the run's only events were "session started"
+ * and the 529), but a duplicated instruction if real work had already happened. Re-running work the
+ * user already paid for, unasked, is worse than making them press Run. So: retry the blip, hand
+ * back the ambiguous case.
+ */
+function shouldRetryTransient(rt: RunRuntime | undefined, attempts: number): boolean {
+  if (rt?.limitKind !== 'transient' || rt.sawOutput) return false
+  return attempts < MAX_TRANSIENT_RETRIES
+}
+
+/** Park the run as 'queued' with a due time, so the sweep re-dispatches it after the backoff. The
+ *  state is entirely in the DB: a daemon that dies mid-backoff comes back to a queued row the sweep
+ *  (or the Run button) still honours, rather than a timer that died with it. */
+function scheduleTransientRetry(id: string, attempts: number): void {
+  const waitMs =
+    RETRY_BACKOFF_MS[attempts] ?? RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1] ?? 20_000
+  const next = attempts + 1
+  // Recorded BEFORE the re-dispatch wipes run_events, so the reason is on screen during the wait.
+  recordEvent(
+    id,
+    'system',
+    'meta',
+    `Overloaded (server-side, not your usage limit) — retrying in ${Math.round(waitMs / 1000)}s (attempt ${next} of ${MAX_TRANSIENT_RETRIES}).`,
+    null,
+  )
+  db.query(
+    "update queue_items set status = 'queued', pid = null, started_at = null, finished_at = null, exit_code = null, not_before = ?, retry_attempts = ? where id = ?",
+  ).run(new Date(Date.now() + waitMs).toISOString(), next, id)
+  publish(id, { type: 'status', data: { id, status: 'queued', exit_code: null, pid: null } })
+  runtime.delete(id)
+  active.delete(id)
+  cleanupRunFiles(id)
+}
+
 /** Persist the terminal status + notify subscribers, exactly once per run. A cancel wins over the
  *  process's own exit code so a killed run reads as 'canceled', not 'failed'. */
 function finalize(id: string, exitCode: number, opts: { canceled?: boolean } = {}): void {
   if (!active.has(id)) return // already finalized (defensive)
   const rt = runtime.get(id)
+
+  // A transient overload is not a terminal state until we've actually tried again.
+  if (!opts.canceled && exitCode !== 0) {
+    const attempts = retryAttemptsOf(id)
+    if (shouldRetryTransient(rt, attempts)) {
+      scheduleTransientRetry(id, attempts)
+      return
+    }
+  }
+
   const status: QueueItem['status'] = opts.canceled
     ? 'canceled'
-    : rt?.rateLimited
+    : rt?.limitKind === 'quota'
       ? 'rate_limited'
-      : exitCode === 0
-        ? 'completed'
-        : 'failed'
+      : // Distinct from 'failed': nothing is wrong with the run or the prompt, Anthropic's servers
+        // were saturated. Deliberately NOT 'rate_limited' — monitor.ts would park it against a
+        // 5-hour reset that has nothing to do with a 529.
+        rt?.limitKind === 'transient'
+        ? 'overloaded'
+        : exitCode === 0
+          ? 'completed'
+          : 'failed'
   db.query(
     'update queue_items set status = ?, finished_at = ?, exit_code = ?, pid = null where id = ?',
   ).run(status, new Date().toISOString(), exitCode, id)
@@ -545,7 +643,7 @@ async function tailRun(id: string, entry: ActiveEntry): Promise<void> {
           }
           if (marker?.kind === 'stderr') {
             const rt = runtime.get(id)
-            if (rt && looksRateLimited(marker.text)) rt.rateLimited = true
+            if (rt) rt.limitKind = classifyLimit(marker.text) ?? rt.limitKind
             recordEvent(id, 'system', 'meta', `stderr: ${marker.text.slice(0, 2000)}`, null)
           } else {
             handleLine(id, line)
@@ -628,7 +726,7 @@ export async function dispatchItem(item: QueueItem): Promise<void> {
 
   // fresh run: clear prior events + any stale files from an earlier run of this item.
   db.query('delete from run_events where queue_item_id = ?').run(item.id)
-  runtime.set(item.id, { seq: 0, rateLimited: false })
+  runtime.set(item.id, freshRuntime())
   try {
     rmSync(logPathFor(item.id), { force: true })
   } catch {
@@ -694,6 +792,9 @@ export async function dispatchItem(item: QueueItem): Promise<void> {
       // FAKE_SLEEP_MS is a test-only knob; forward it so a fake run launched via WMI (which does
       // NOT inherit the daemon's env) can still be slowed down for the survive/reattach tests.
       ...(process.env.FAKE_SLEEP_MS ? { FAKE_SLEEP_MS: process.env.FAKE_SLEEP_MS } : {}),
+      // Same deal: makes the stand-in fail the way the real CLI does, so the 529 retry path can be
+      // driven end to end rather than unit-tested around.
+      ...(process.env.FAKE_ERROR_MODE ? { FAKE_ERROR_MODE: process.env.FAKE_ERROR_MODE } : {}),
     },
     logPath: logPathFor(item.id),
     statusPath: statusPathFor(item.id),
@@ -776,7 +877,7 @@ export async function reattachRuns(): Promise<void> {
     const id = row.id
     // Rebuild events from whatever the runner has written so far (delete-then-replay = idempotent).
     db.query('delete from run_events where queue_item_id = ?').run(id)
-    runtime.set(id, { seq: 0, rateLimited: false })
+    runtime.set(id, freshRuntime())
 
     const st = readStatus(id)
     const hasLog = existsSync(logPathFor(id))

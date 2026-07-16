@@ -9,6 +9,7 @@ import { expect, test } from 'bun:test'
 import { existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { markDispatchReady } from '../src/boot-state'
 import { db } from '../src/db'
 import * as dispatch from '../src/dispatch'
 
@@ -238,4 +239,125 @@ test('reattachRuns: a run that finished while the daemon was down is recovered f
 
   const events = dispatch.getRunEvents(item.id)
   expect(events.some((e) => e.text.includes('recovered work'))).toBe(true) // events rebuilt from the log
+})
+
+// --- transient overload (529) vs the user's quota ---------------------------------------------
+//
+// The incident (2026-07-16): a real run whose only two events were "session started" and
+// "API Error: 529 Overloaded... usually temporary" was finalized status='rate_limited' — parked as
+// though the user's 5-hour window were spent. It wasn't; the same message went through from the
+// desktop app moments later, because a 529 clears in seconds. One pattern list covered both walls,
+// so the daemon could not tell them apart. These drive the real pipeline (fake CLI dying the way
+// the real one does, via FAKE_ERROR_MODE) and pin that they now finalize to different places.
+
+/** The attempt/backoff bookkeeping the retry sweep reads. */
+const retryStateOf = (id: string) =>
+  db
+    .query<{ retry_attempts: number; not_before: string | null }, [string]>(
+      'select retry_attempts, not_before from queue_items where id = ?',
+    )
+    .get(id)
+
+test('a 529 is NOT filed as the user hitting a rate limit — it schedules a retry instead', async () => {
+  process.env.FAKE_ERROR_MODE = 'overloaded'
+  try {
+    const item = makeItem()
+    await dispatch.dispatchItem(item)
+
+    // The whole point: NOT 'rate_limited'. It goes back to 'queued' to be re-run shortly.
+    const row = statusOf(item.id)
+    expect(row?.status).toBe('queued')
+
+    const retry = retryStateOf(item.id)
+    expect(retry?.retry_attempts).toBe(1)
+    // ...and it waits out a backoff rather than hammering the overloaded server immediately.
+    expect(retry?.not_before).not.toBeNull()
+    expect(Date.parse(retry?.not_before as string)).toBeGreaterThan(Date.now())
+
+    // The reason is on screen during the wait, recorded before the re-dispatch wipes the events.
+    const events = dispatch.getRunEvents(item.id)
+    expect(events.some((e) => /retrying in \d+s/i.test(e.text))).toBe(true)
+  } finally {
+    delete process.env.FAKE_ERROR_MODE
+  }
+})
+
+test("a spent quota is NOT retried — it parks as 'rate_limited' for the monitor", async () => {
+  // The opposite wall. Retrying this would hammer a door that will not open for hours; parking it
+  // is what lets monitor.ts resume it after the reset.
+  process.env.FAKE_ERROR_MODE = 'session_limit'
+  try {
+    const item = makeItem()
+    await dispatch.dispatchItem(item)
+    const row = statusOf(item.id)
+    expect(row?.status).toBe('rate_limited')
+    expect(retryStateOf(item.id)?.retry_attempts).toBe(0) // never entered the retry path
+  } finally {
+    delete process.env.FAKE_ERROR_MODE
+  }
+})
+
+test('an overload that outlasts the backoff gives up as its own status, never as a rate limit', async () => {
+  // Seed the row at the cap so the next failure is the last one, without waiting out real backoffs.
+  process.env.FAKE_ERROR_MODE = 'overloaded'
+  try {
+    const item = makeItem()
+    db.query('update queue_items set retry_attempts = 3 where id = ?').run(item.id)
+    await dispatch.dispatchItem(item)
+    const row = statusOf(item.id)
+    // 'overloaded', not 'rate_limited' (monitor.ts would park it against an unrelated 5-hour reset)
+    // and not 'failed' (nothing is wrong with the run or the prompt).
+    expect(row?.status).toBe('overloaded')
+    expect(row?.exit_code).toBe(1)
+  } finally {
+    delete process.env.FAKE_ERROR_MODE
+  }
+})
+
+// ORDER MATTERS: this must stay ABOVE the test that calls markDispatchReady() — the flag is a
+// one-way latch with no un-set, so once any test flips it, "not ready yet" is unobservable.
+test('the retry sweep stays parked until reattach settles (it must not double-dispatch)', async () => {
+  // The one gate the sweep DOES honour: during the boot window a surviving run isn't back in
+  // `active` yet, so dispatching would put a second `claude --resume` on a live transcript.
+  const item = makeItem()
+  db.query(
+    "update queue_items set status = 'queued', retry_attempts = 1, not_before = ? where id = ?",
+  ).run(new Date(Date.now() - 1000).toISOString(), item.id) // due, but boot hasn't settled
+  await dispatch.dispatchDueRetries()
+  expect(statusOf(item.id)?.status).toBe('queued') // untouched
+})
+
+test('the retry sweep re-dispatches a run whose backoff has elapsed', async () => {
+  // The sweep is what actually finishes the job, and it is deliberately gated on NEITHER the
+  // scheduler nor the monitor switch (both off by default) — a 529 retry is finishing the run the
+  // user already started, not hours-scale autonomy.
+  markDispatchReady() // stand in for index.ts's post-reattach flip
+  const item = makeItem()
+  db.query(
+    "update queue_items set status = 'queued', retry_attempts = 1, not_before = ? where id = ?",
+  ).run(new Date(Date.now() - 1000).toISOString(), item.id) // due a second ago
+  await dispatch.dispatchDueRetries()
+  // no FAKE_ERROR_MODE this time: the retry succeeds, which is the happy path a 529 should reach
+  expect(await waitForStatus(item.id, 'completed')).toBe('completed')
+})
+
+test('the retry sweep leaves a run whose backoff has NOT elapsed alone', async () => {
+  const item = makeItem()
+  db.query(
+    "update queue_items set status = 'queued', retry_attempts = 1, not_before = ? where id = ?",
+  ).run(new Date(Date.now() + 60_000).toISOString(), item.id) // due in a minute
+  await dispatch.dispatchDueRetries()
+  expect(statusOf(item.id)?.status).toBe('queued') // untouched
+})
+
+test('the retry sweep ignores ordinary queued items — it only fires its own retries', async () => {
+  // retry_attempts = 0 means "the user queued this", which is the scheduler's business, not ours.
+  // Without this the sweep would quietly become an always-on scheduler nobody opted into.
+  const item = makeItem()
+  db.query("update queue_items set status = 'queued', not_before = ? where id = ?").run(
+    new Date(Date.now() - 1000).toISOString(),
+    item.id,
+  )
+  await dispatch.dispatchDueRetries()
+  expect(statusOf(item.id)?.status).toBe('queued')
 })

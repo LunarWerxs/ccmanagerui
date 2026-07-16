@@ -112,6 +112,14 @@ export const sessionFileUrl = (id: string) =>
 /** Open the transcript on the daemon's machine with the OS default handler. */
 export const openSessionFile = (id: string) =>
   j<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/open-file`, { method: 'POST' })
+/** Put the transcript FILE (not its text) on the clipboard of the daemon's machine, named after the
+ *  session. The browser cannot do this — no ClipboardItem type maps to a native file-drop — so it's
+ *  a daemon round-trip. `reason: 'unsupported'` comes back on Linux, which has no such convention. */
+export const copySessionFile = (id: string) =>
+  j<{ ok: boolean; filename?: string; reason?: string }>(
+    `/api/sessions/${encodeURIComponent(id)}/copy-file`,
+    { method: 'POST' },
+  )
 export const getTail = (id: string, opts: { limit?: number; textOnly?: boolean } = {}) =>
   j<TailResult>(
     `/api/sessions/${id}/tail?limit=${opts.limit ?? 40}&textOnly=${opts.textOnly ? '1' : '0'}`,

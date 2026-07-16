@@ -79,6 +79,7 @@ function discoveredStop(sessionId: string, title = 'a terminal session'): RateLi
     pid: null,
     position: 0,
     not_before: null,
+    retry_attempts: 0,
     started_at: null,
     finished_at: new Date().toISOString(),
     exit_code: null,

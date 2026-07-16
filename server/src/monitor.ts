@@ -22,7 +22,7 @@
 // "needs human"; idempotent (never double-queues a resume for a session that already has one).
 
 import { isDispatchReady } from './boot-state'
-import { db, getSetting, setSetting } from './db'
+import { coerceQueueItem, db, getSetting, setSetting } from './db'
 import { dispatchItem, isActive, isSessionActive } from './dispatch'
 import { discoverPendingStops, type RateLimitedStop } from './rate-limit-discovery'
 import type {
@@ -244,10 +244,6 @@ export function monitorStatus(): MonitorStatusRow[] {
 
 // --- resume enqueue ----------------------------------------------------------
 
-function coerce(row: any): QueueItem {
-  return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
-}
-
 /** Enqueue a resume of the rate-limited item's session, scheduled for `notBefore`. Returns its id. */
 function enqueueResume(item: QueueItem, notBefore: string): string {
   const id = crypto.randomUUID()
@@ -328,7 +324,7 @@ async function dispatchDueResumes(): Promise<void> {
     if (!r.resume_item_id) continue
     const raw = db.query('select * from queue_items where id = ?').get(r.resume_item_id)
     if (!raw) continue
-    const q = coerce(raw)
+    const q = coerceQueueItem(raw)
     const due = !q.not_before || q.not_before <= now
     if (q.status === 'queued' && due && !isActive(q.id) && !isSessionActive(q.session_id)) {
       void dispatchItem(q)
@@ -342,7 +338,7 @@ async function processRateLimited(deps: MonitorDeps): Promise<void> {
   const dispatched: RateLimitedStop[] = db
     .query<QueueItem, []>("select * from queue_items where status = 'rate_limited'")
     .all()
-    .map((raw) => ({ ...coerce(raw), discovered: false }))
+    .map((raw) => ({ ...coerceQueueItem(raw), discovered: false }))
   // Stops we watched happen, plus stops we went and found. From here down they are the same thing:
   // every rail below (opt-out, attempt cap, usage gate, idempotency) applies to both without a
   // branch. A discovery failure must never take the dispatched path down with it.

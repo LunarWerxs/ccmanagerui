@@ -1,5 +1,5 @@
 import { isDispatchReady } from './boot-state'
-import { db, getSetting, setSetting } from './db'
+import { coerceQueueItem, db, getSetting, setSetting } from './db'
 import { activeCount, dispatchItem, isSessionActive } from './dispatch'
 import type { QueueItem, SchedulerState } from './types'
 
@@ -44,14 +44,10 @@ function tick() {
 
   lastDispatchAt = Date.now()
   // fire-and-forget; dispatchItem persists status transitions itself
-  void dispatchItem(coerce(next))
+  void dispatchItem(coerceQueueItem(next))
 }
 
 // bun:sqlite returns integers for our boolean columns; coerce to real booleans
-function coerce(row: any): QueueItem {
-  return { ...row, new_chat: !!row.new_chat, fork: !!row.fork }
-}
-
 export function startScheduler() {
   if (timer) return
   const pollSeconds = Math.max(1, num('poll_seconds', 5))

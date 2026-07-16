@@ -26,11 +26,11 @@
 ## What you get
 
 - 🎛️ &nbsp;**Multi-instance manager** — every isolated Claude Desktop instance on the machine, its account (email + plan), live memory and uptime, in one sortable table. Open / quit / create / delete / rename, and drop a per-instance desktop shortcut.
-- 🧵 &nbsp;**Sessions across every instance** — browse and live-tail your Claude Code transcripts (`~/.claude/projects`), filtered by instance, with "thinking" hidden by default. Open or download the raw `.jsonl` (saved under the session's own title).
+- 🧵 &nbsp;**Sessions across every instance** — browse and live-tail your Claude Code transcripts (`~/.claude/projects`), filtered by instance, with "thinking" hidden by default. Open the raw `.jsonl`, download it, or copy the file itself to the clipboard — both named after the session, not its uuid.
 - 💬 &nbsp;**Chat composer** — type at the bottom of a transcript and dispatch straight to that session; queue it, or schedule for later (an exact hours + 10-minute delay, 5 h, or tomorrow). Multi-select to message many sessions at once.
 - ⏱️ &nbsp;**Queue + scheduler** — build a queue of `claude` runs (prompt, model, effort, permission mode, account) and dispatch on demand, or let the scheduler run them with concurrency + spacing controls. Off by default.
 - ♻️ &nbsp;**Runs that survive a restart** — dispatched runs run under a detached supervisor and reattach after a quit or an auto-update, instead of dying mid-flight.
-- 🌙 &nbsp;**Auto-resume past a rate limit** — sessions stopped by a 5-hour limit are picked back up once the window resets, including ones you started yourself in a terminal (found by checking recent transcripts, not just runs the app launched). Gated on your weekly usage, capped per session. Off by default — it prompts sessions while you sleep.
+- 🌙 &nbsp;**Auto-resume past a rate limit** — sessions stopped by a 5-hour limit are picked back up once the window resets, including ones you started yourself in a terminal (found by checking recent transcripts, not just runs the app launched). Gated on your weekly usage, capped per session. Off by default — it prompts sessions while you sleep. A 529 overload is a different animal and is handled separately: those retry in seconds, automatically, with no opt-in.
 - 🏠 &nbsp;**Local & private** — one daemon on your machine + your regular browser + a tray icon. No cloud, no account needed to run it.
 
 ## Quick start
