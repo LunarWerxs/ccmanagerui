@@ -128,11 +128,13 @@ async function open(dir: string): Promise<api.CMActionResult | undefined> {
   }
 }
 
-/** Quit a running instance. Returns true on success. */
-async function quit(dir: string): Promise<boolean> {
+/** Quit a running instance. Returns true on success. Quitting the External (default, non-isolated)
+ *  Claude Desktop needs `confirmExternal: true` — the server refuses it otherwise, and the UI only
+ *  passes it from an explicit confirmation dialog. */
+async function quit(dir: string, opts: { confirmExternal?: boolean } = {}): Promise<boolean> {
   setBusy(dir, true)
   try {
-    const result = await guard(api.quitInstance(dir))
+    const result = await guard(api.quitInstance(dir, opts))
     if (result?.ok) await refreshInstances()
     return result?.ok ?? false
   } finally {

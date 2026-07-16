@@ -26,6 +26,7 @@ import CliInstancesSection from '@/components/CliInstancesSection.vue'
 import CreateInstanceDialog from '@/components/CreateInstanceDialog.vue'
 import DeleteInstanceDialog from '@/components/DeleteInstanceDialog.vue'
 import EditInstanceDialog from '@/components/EditInstanceDialog.vue'
+import QuitExternalInstanceDialog from '@/components/QuitExternalInstanceDialog.vue'
 import UsageBadge from '@/components/UsageBadge.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -182,6 +183,7 @@ const { showDesktopInstances, showCliInstances, load: loadAppSettings } = useApp
 const {
   cliInstances,
   checkUsage: checkCliUsage,
+  create: createCli,
   launch: launchCli,
   login: loginCli,
   linkDesktop: linkCliDesktop,
@@ -199,6 +201,10 @@ onMounted(loadAppSettings)
 function linkedClis(dir: string): CliInstance[] {
   return cliInstances.value.filter((c) => c.associatedDesktopDir === dir)
 }
+/** The 0-or-1 linked CLI login as a nullable, for `v-if` branching in the actions menu. */
+function linkedCliFor(dir: string): CliInstance | null {
+  return linkedClis(dir)[0] ?? null
+}
 
 async function onLaunchCli(cli: CliInstance) {
   const result = await launchCli(cli.id)
@@ -215,6 +221,36 @@ async function onUnlinkCli(cli: CliInstance) {
   const result = await linkCliDesktop(cli.id, null)
   if (result?.ok) toast.success(t('instances.toastCliUnlinked'))
   else toast.error(result?.message ?? t('instances.toastCliUnlinkFailed'))
+}
+
+// "Sign in CLI" on a row with NO linked CLI login yet: create one on demand, link it to this
+// desktop instance, then open the /login terminal — the same three building blocks the CLI table
+// uses, chained. The busy-set guards a double-click: two concurrent create+link chains for one row
+// would orphan a CLI instance (the second link silently steals the association from the first).
+const cliSignInBusy = ref(new Set<string>())
+async function onSignInCli(inst: CMInstance) {
+  if (cliSignInBusy.value.has(inst.dir)) return
+  cliSignInBusy.value = new Set(cliSignInBusy.value).add(inst.dir)
+  try {
+    const created = await createCli(`${displayName(inst)} (CLI)`)
+    const id = created?.ok ? (created.data?.id as string | undefined) : undefined
+    if (!id) {
+      toast.error(created?.message ?? t('instances.toastCliCreateFailed'))
+      return
+    }
+    const linked = await linkCliDesktop(id, inst.dir)
+    if (!linked?.ok) {
+      toast.error(linked?.message ?? t('instances.toastCliCreateFailed'))
+      return
+    }
+    const result = await loginCli(id)
+    if (result?.ok) toast.success(t('instances.toastCliLoginOpened'))
+    else toast.error(result?.message ?? t('instances.toastCliLoginFailed'))
+  } finally {
+    const next = new Set(cliSignInBusy.value)
+    next.delete(inst.dir)
+    cliSignInBusy.value = next
+  }
 }
 
 // Check every instance's usage concurrently — desktop AND CLI. Each check is a single ~300ms read of
@@ -237,15 +273,45 @@ async function onRefreshAllUsage() {
 
 async function onOpen(inst: CMInstance) {
   const result = await open(inst.dir)
-  if (result?.ok) toast.success(t('instances.toastOpened'))
+  if (result?.ok) {
+    toast.success(t('instances.toastOpened'))
+    // A successful isolated launch is live proof the install is manageable — re-check so a stale
+    // "MSIX-only / not installed" banner clears itself instead of waiting on a manual Refresh.
+    if (desktopWarning.value) void refreshDesktopInstall(true)
+  }
   // Prefer the server's failure message — it explains the MSIX-only case (same convention
   // as the create dialog surfacing result.message).
   else toast.error(result?.message ?? t('instances.toastOpenFailed'))
 }
+
+// Quit: the External row is the user's REAL Claude Desktop (maybe mid-conversation) — route it
+// through an explicit confirmation dialog; the server independently refuses it without the flag.
+const quitExternalOpen = ref(false)
+const quitExternalTarget = ref<CMInstance | null>(null)
+const quittingExternal = ref(false)
 async function onQuit(inst: CMInstance) {
+  if (inst.isExternal) {
+    quitExternalTarget.value = inst
+    quitExternalOpen.value = true
+    return
+  }
   const ok = await quit(inst.dir)
   if (ok) toast.success(t('instances.toastQuit'))
   else toast.error(t('instances.toastQuitFailed'))
+}
+async function onQuitExternalConfirm() {
+  const inst = quitExternalTarget.value
+  if (!inst) return
+  quittingExternal.value = true
+  try {
+    const ok = await quit(inst.dir, { confirmExternal: true })
+    if (ok) toast.success(t('instances.toastQuit'))
+    else toast.error(t('instances.toastQuitFailed'))
+  } finally {
+    quittingExternal.value = false
+    quitExternalOpen.value = false
+    quitExternalTarget.value = null
+  }
 }
 async function onFocus(inst: CMInstance) {
   if (!inst.isRunning || isBusy(inst)) return
@@ -278,6 +344,8 @@ async function onCreateSubmit(name: string) {
       toast.success(t('instances.toastCreated'))
       createOpen.value = false
       if (result.needsBrowserDance) toast.info(t('instances.browserDanceBody'))
+      // Same self-heal as onOpen: a successful create disproves a stale "not manageable" verdict.
+      if (desktopWarning.value) void refreshDesktopInstall(true)
     } else {
       createError.value = result?.message ?? t('instances.toastCreateFailed')
     }
@@ -362,14 +430,23 @@ async function refreshDesktopInstall(fresh = false) {
   }
 }
 
+// While the warning banner is up, re-verify the verdict every 60s (fresh, bypassing the server's
+// 5-minute cache): the banner's own instruction is "install the classic build", and following it
+// used to leave the stale banner pinned until a manual Refresh. No banner → no polling cost.
+let desktopInstallTimer: number | null = null
+
 onMounted(() => {
   startPolling()
   startUsagePolling()
   refreshDesktopInstall()
+  desktopInstallTimer = window.setInterval(() => {
+    if (desktopWarning.value) void refreshDesktopInstall(true)
+  }, 60_000)
 })
 onUnmounted(() => {
   stopPolling()
   stopUsagePolling()
+  if (desktopInstallTimer !== null) window.clearInterval(desktopInstallTimer)
 })
 </script>
 
@@ -579,40 +656,10 @@ onUnmounted(() => {
               <div class="mono max-w-[22rem] truncate text-[0.625rem] text-muted-foreground">
                 {{ inst.dir }}
               </div>
-              <!-- The linked CLI login, shown as part of THIS account rather than in a second table:
-                   same account, second sign-in. v-for over a 0-or-1 array is how we get a typed
-                   local binding without a non-null assertion. -->
-              <div
-                v-for="cli in linkedClis(inst.dir)"
-                :key="cli.id"
-                class="mt-1 flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground"
-              >
-                <Terminal class="size-3 shrink-0" />
-                <span class="truncate font-medium">{{ cli.name }}</span>
-                <span
-                  class="inline-block size-1.5 shrink-0 rounded-full"
-                  :class="cli.loggedIn ? 'bg-success' : 'bg-muted-foreground/40'"
-                  :title="cli.loggedIn ? $t('cliInstances.loggedIn') : $t('cliInstances.loggedOut')"
-                />
-                <Button
-                  v-if="cli.loggedIn"
-                  variant="ghost"
-                  size="xs"
-                  class="h-5 px-1.5 text-[0.6875rem]"
-                  @click="onLaunchCli(cli)"
-                >
-                  {{ $t('instances.launchCli') }}
-                </Button>
-                <Button
-                  v-else
-                  variant="ghost"
-                  size="xs"
-                  class="h-5 px-1.5 text-[0.6875rem]"
-                  @click="onLoginCli(cli)"
-                >
-                  {{ $t('instances.loginCli') }}
-                </Button>
-              </div>
+              <!-- No inline CLI sub-line here anymore: it made one row taller than the rest and
+                   only ever showed for whichever account happened to be linked. The linked CLI
+                   login (and CLI sign-in for rows without one) lives in the actions menu, where
+                   EVERY row gets it without cluttering the table. -->
             </TableCell>
             <TableCell>
               <!-- No "Resolve" button: every instance resolves itself (see
@@ -693,20 +740,31 @@ onUnmounted(() => {
                     >
                       <Gauge /> {{ $t('instances.checkUsage') }}
                     </DropdownMenuItem>
-                    <!-- The linked CLI's actions, right here on the account's own row. Unlink sends
-                         it back to the CLI table, which is where rename/delete/associate live. -->
-                    <template v-for="cli in linkedClis(inst.dir)" :key="`cli-${cli.id}`">
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem v-if="cli.loggedIn" @click="onLaunchCli(cli)">
-                        <Terminal /> {{ $t('instances.launchCli') }}
-                      </DropdownMenuItem>
-                      <DropdownMenuItem v-else @click="onLoginCli(cli)">
-                        <LogIn /> {{ $t('instances.loginCli') }}
-                      </DropdownMenuItem>
-                      <DropdownMenuItem @click="onUnlinkCli(cli)">
-                        <Unlink /> {{ $t('instances.unlinkCli') }}
-                      </DropdownMenuItem>
+                    <!-- CLI section, on EVERY row: a desktop instance and its CLI login are the
+                         same Anthropic account signed in twice. With a linked CLI instance the
+                         items act on it (Launch / Sign in + Unlink); without one, "Sign in CLI"
+                         creates + links one on demand and opens the /login terminal. -->
+                    <DropdownMenuSeparator />
+                    <template v-if="linkedCliFor(inst.dir)">
+                      <template v-for="cli in linkedClis(inst.dir)" :key="`cli-${cli.id}`">
+                        <DropdownMenuItem v-if="cli.loggedIn" @click="onLaunchCli(cli)">
+                          <Terminal /> {{ $t('instances.launchCli') }}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem v-else @click="onLoginCli(cli)">
+                          <LogIn /> {{ $t('instances.loginCli') }}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem @click="onUnlinkCli(cli)">
+                          <Unlink /> {{ $t('instances.unlinkCli') }}
+                        </DropdownMenuItem>
+                      </template>
                     </template>
+                    <DropdownMenuItem
+                      v-else
+                      :disabled="cliSignInBusy.has(inst.dir)"
+                      @click="onSignInCli(inst)"
+                    >
+                      <LogIn /> {{ $t('instances.loginCli') }}
+                    </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <!-- Edit (name + icon + color) is pure UI metadata, so it stays enabled even
                          while the instance runs (unlike Delete, which touches the folder) -->
@@ -746,6 +804,12 @@ onUnmounted(() => {
       :submitting="deleting"
       :error-message="deleteError"
       @confirm="onDeleteConfirm"
+    />
+    <QuitExternalInstanceDialog
+      v-model:open="quitExternalOpen"
+      :instance-name="quitExternalTarget ? displayName(quitExternalTarget) : null"
+      :submitting="quittingExternal"
+      @confirm="onQuitExternalConfirm"
     />
     <EditInstanceDialog
       v-model:open="editOpen"

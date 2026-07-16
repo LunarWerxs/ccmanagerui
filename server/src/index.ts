@@ -468,8 +468,8 @@ app.post('/api/queue', async (c) => {
   const position = (posRow?.m ?? 0) + 1
   db.query(
     `insert into queue_items
-       (id, session_id, title, cwd, prompt, model, effort, permission_mode, account_id, new_chat, fork, status, position, not_before, created_at)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+       (id, session_id, title, cwd, prompt, model, effort, permission_mode, account_id, instance_ref, new_chat, fork, status, position, not_before, created_at)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
   ).run(
     id,
     sessionId,
@@ -480,6 +480,7 @@ app.post('/api/queue', async (c) => {
     body.effort ?? null,
     body.permission_mode ?? null,
     body.account_id ?? null,
+    body.instance_ref ?? null,
     body.new_chat ? 1 : 0,
     body.fork ? 1 : 0,
     position,
@@ -514,6 +515,7 @@ app.patch('/api/queue/:id', async (c) => {
     effort: (v) => (v == null ? null : String(v)),
     permission_mode: (v) => (v == null ? null : String(v)),
     account_id: (v) => (v == null ? null : String(v)),
+    instance_ref: (v) => (v == null ? null : String(v)),
     status: String,
     position: Number,
     // normalized to UTC ISO (unparseable → null); scheduler compares these as text

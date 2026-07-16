@@ -11,6 +11,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { DB_PATH, IS_COMPILED, RUN_LOG_DIR, resolveClaudeExe } from './config'
+import { getCliInstance } from './core/cli-instances'
 import { db } from './db'
 import { buildDetachedSpawn } from './detached-spawn.mjs'
 import { eventToTailEvents } from './transcript'
@@ -616,11 +617,46 @@ export async function dispatchItem(item: QueueItem): Promise<void> {
     /* best-effort */
   }
 
+  // Instance-derived run identity (instance_ref = 'desktop:<dir>' | 'cli:<id>'): the spec carries
+  // only PATHS — the runner extracts the instance's OAuth token value-blind at spawn time
+  // (core/accounts.ts), so no credential ever touches the spec file, same discipline as accountId.
+  // The cli id → configDir lookup happens HERE because the store read is daemon state; the dir is
+  // not a secret.
+  let desktopDir: string | null = null
+  let cliConfigDir: string | null = null
+  if (item.instance_ref?.startsWith('desktop:')) {
+    desktopDir = item.instance_ref.slice('desktop:'.length) || null
+  } else if (item.instance_ref?.startsWith('cli:')) {
+    cliConfigDir = getCliInstance(item.instance_ref.slice('cli:'.length))?.configDir ?? null
+    if (!cliConfigDir) {
+      // Fail loudly, pre-launch. finalize() can't be used here — it no-ops before active.set —
+      // so write the terminal state directly (same fields finalize sets).
+      recordEvent(
+        item.id,
+        'system',
+        'meta',
+        `run-as CLI instance not found (${item.instance_ref}) — it may have been deleted`,
+        null,
+      )
+      db.query(
+        'update queue_items set status = ?, finished_at = ?, exit_code = ?, pid = null where id = ?',
+      ).run('failed', new Date().toISOString(), -1, item.id)
+      publish(item.id, {
+        type: 'status',
+        data: { id: item.id, status: 'failed', exit_code: -1, pid: null },
+      })
+      runtime.delete(item.id)
+      return
+    }
+  }
+
   const spec = {
     itemId: item.id,
     childArgv: buildArgv(item),
     cwd: item.cwd,
     accountId: item.account_id ?? null,
+    desktopDir,
+    cliConfigDir,
     dbPath: DB_PATH,
     envExtra: {
       ...(process.env.CCMANAGERUI_FAKE ? { FAKE_SESSION_ID: item.session_id } : {}),

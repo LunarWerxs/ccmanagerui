@@ -15,7 +15,6 @@ import {
   LogOut,
   MessageCircleQuestion,
   Monitor,
-  Plus,
   Power,
   RefreshCw,
   ShieldCheck,
@@ -32,20 +31,13 @@ import { toast } from 'vue-sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { USAGE_REFRESH_INTERVALS, useAppSettings } from '@/composables/useAppSettings'
 import { useData } from '@/composables/useData'
 import { useMonitor } from '@/composables/useMonitor'
 import { usePanels } from '@/composables/usePanels'
 import { useUpdates } from '@/composables/useUpdates'
-import type { AuthType, MonitorStateName, SyncStatus } from '@/lib/api'
+import type { MonitorStateName, SyncStatus } from '@/lib/api'
 import * as api from '@/lib/api'
 import type { BadgeVariant } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
@@ -96,6 +88,9 @@ const noUpdateSource = computed(() => !!updateStatus.value && !updateStatus.valu
 // dirty working tree, since the updater refuses to overwrite uncommitted local edits) is
 // visible at a glance instead of requiring a hover.
 const updateBlockedReason = computed(() => updateStatus.value?.reason ?? undefined)
+// A packaged (compiled) build can't git-pull: no check button, no auto-update toggle — one row
+// pointing at GitHub Releases (the server's own reason string carries the URL).
+const isCompiledBuild = computed(() => updateStatus.value?.distribution === 'compiled')
 const applyMessage = ref<string | null>(null)
 const applyError = ref<string | null>(null)
 const restartRequired = ref(false)
@@ -361,30 +356,11 @@ async function toggleAutoUpdate(enabled: boolean) {
   }
 }
 
-// --- accounts ---
-const newAccount = reactive({ label: '', auth_type: 'oauth_token' as AuthType, secret: '' })
-const addingError = ref<string | null>(null)
-const authOptions = [
-  { value: 'oauth_token', label: t('settings.authOauthOption') },
-  { value: 'api_key', label: t('settings.authApiKeyOption') },
-]
-
-async function addAccount() {
-  addingError.value = null
-  if (!newAccount.label.trim() || !newAccount.secret.trim()) return
-  try {
-    await api.createAccount({
-      label: newAccount.label.trim(),
-      auth_type: newAccount.auth_type,
-      secret: newAccount.secret.trim(),
-    })
-    newAccount.label = ''
-    newAccount.secret = ''
-    await refreshAccounts()
-  } catch (e) {
-    addingError.value = e instanceof Error ? e.message : String(e)
-  }
-}
+// --- accounts (legacy pasted credentials) ---
+// LIST + DELETE only, deliberately: accounts are added by signing an instance in on the
+// Instances tab (the queue's run-as picker lists every signed-in instance). The old
+// paste-a-token form lived here and confused people into thinking a secret was required —
+// the raw POST /api/accounts route remains for the rare headless/API-key case.
 async function removeAccount(id: string) {
   try {
     await api.deleteAccount(id)
@@ -439,7 +415,6 @@ async function saveScheduler() {
 // progressive disclosure state
 const schedAdvancedOpen = ref(false)
 const monitorAdvancedOpen = ref(false)
-const addAccountOpen = ref(false)
 
 // --- auto-resume monitor ---
 const {
@@ -637,13 +612,24 @@ defineExpose({ save })
           <span v-if="updateStatus?.currentCommit">· {{ updateStatus.currentCommit.slice(0, 7) }}</span>
         </template>
         <template #control>
-          <Button size="sm" variant="outline" :disabled="updateChecking" @click="onCheckForUpdate">
+          <Button
+            v-if="!isCompiledBuild"
+            size="sm"
+            variant="outline"
+            :disabled="updateChecking"
+            @click="onCheckForUpdate"
+          >
             <RefreshCw :class="updateChecking ? 'animate-spin' : ''" />
             {{ updateChecking ? $t('settings.checkingForUpdates') : $t('settings.checkForUpdates') }}
           </Button>
         </template>
       </SettingsRow>
-      <SettingsRow v-if="updateStatus?.updateAvailable && updateStatus?.canApply" :label="$t('settings.updateAvailable')">
+      <SettingsRow
+        v-if="isCompiledBuild"
+        :label="$t('settings.packagedBuild')"
+        :description="updateBlockedReason"
+      />
+      <SettingsRow v-else-if="updateStatus?.updateAvailable && updateStatus?.canApply" :label="$t('settings.updateAvailable')">
         <template #description>
           {{ updateStatus.remoteCommit?.slice(0, 7) }}
         </template>
@@ -675,7 +661,7 @@ defineExpose({ save })
            Single toggle (family-standard "Auto-update" - no separate interval control; the
            daemon checks on a sensible fixed cadence internally). Grays out when there is no
            update source, since it could never fire. -->
-      <SettingsRow :icon="CloudCog" :label="$t('settings.autoUpdate')">
+      <SettingsRow v-if="!isCompiledBuild" :icon="CloudCog" :label="$t('settings.autoUpdate')">
         <template #info>
           <InfoHint :text="$t('settings.autoUpdateDescription')" />
         </template>
@@ -900,53 +886,9 @@ defineExpose({ save })
         {{ $t('settings.noAccountsYet') }}
       </p>
 
-      <SettingsRow :icon="Plus" :label="$t('settings.addAccount')" clickable @click="addAccountOpen = !addAccountOpen">
-        <template #control>
-          <ChevronDown
-            class="size-4 transition-transform duration-200"
-            :class="addAccountOpen ? 'rotate-180' : ''"
-          />
-        </template>
-      </SettingsRow>
-      <ExpandTransition :open="addAccountOpen">
-        <div class="space-y-3 px-3.5 pb-3.5 pt-2.5">
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div class="space-y-1.5">
-              <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.labelField') }}</label>
-              <Input v-model="newAccount.label" :placeholder="$t('settings.labelPlaceholder')" />
-            </div>
-            <div class="space-y-1.5">
-              <label class="text-xs font-medium text-muted-foreground">{{ $t('settings.authTypeField') }}</label>
-              <Select v-model="newAccount.auth_type">
-                <SelectTrigger class="w-full"
-                  ><SelectValue :placeholder="$t('settings.authTypeDefaultPlaceholder')"
-                /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem v-for="o in authOptions" :key="o.value" :value="o.value">{{ o.label }}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div class="space-y-1.5">
-            <label class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              {{ $t('settings.secretField') }}
-              <InfoHint :text="$t('settings.plaintextStorageWarning')" />
-            </label>
-            <Input
-              v-model="newAccount.secret"
-              type="password"
-              :placeholder="$t('settings.secretPlaceholder')"
-              class="font-mono text-xs"
-            />
-          </div>
-          <p v-if="addingError" class="text-xs text-destructive">{{ addingError }}</p>
-          <div class="flex justify-end">
-            <Button size="sm" :disabled="!newAccount.label.trim() || !newAccount.secret.trim()" @click="addAccount">
-              <Plus /> {{ $t('settings.addAccount') }}
-            </Button>
-          </div>
-        </div>
-      </ExpandTransition>
+      <!-- No add-a-token form here anymore (it read as "adding an account needs a secret" and
+           sent people hunting for tokens): accounts are added by signing an instance in on the
+           Instances tab. This list only manages leftover pasted credentials. -->
     </SettingsGroup>
   </div>
 </template>

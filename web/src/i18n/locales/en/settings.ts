@@ -123,23 +123,16 @@ export default {
   monitorToastDisabled: 'Auto-resume monitor disabled.',
   monitorToastFailed: 'Failed to save auto-resume monitor settings.',
 
-  // accounts section
+  // accounts section — LIST + REMOVE of legacy pasted credentials only. Accounts are ADDED by
+  // signing an instance in on the Instances tab; the queue's run-as picker lists every
+  // signed-in instance automatically.
   accounts: 'Accounts',
   accountsIntro:
-    'Each run can spawn under a chosen credential (injected into that child process only). OAuth tokens spend the Max subscription; API keys spend separate Console credits.',
-  noAccountsYet: 'No accounts yet.',
-  labelField: 'Label',
-  labelPlaceholder: '6claude',
-  authTypeField: 'Auth type',
-  authTypeDefaultPlaceholder: 'Default',
-  secretField: 'Secret',
-  secretPlaceholder: 'token or key value',
-  plaintextStorageWarning:
-    "Stored in plaintext in this tool's local SQLite db (same trust level as your CLI credentials file).",
-  addAccount: 'Add account',
+    'Accounts are added by signing in on the Instances tab — every signed-in instance can run queued work under its own login, no token-pasting involved. Listed below are leftover manually-pasted credentials (a legacy path); they still work for dispatch and can be removed here.',
+  noAccountsYet: 'No pasted credentials — add accounts by signing in on the Instances tab.',
   removeAction: 'Remove',
   apiKeyBadge: 'API key',
   oauthBadge: 'OAuth',
-  authOauthOption: 'OAuth token (Max subscription — claude setup-token)',
-  authApiKeyOption: 'API key (Console — separate API credits)',
+  // packaged (compiled release) builds — shown in the Updates group instead of the git-based rows
+  packagedBuild: 'Packaged build',
 }

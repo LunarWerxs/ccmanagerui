@@ -147,6 +147,8 @@ export interface NewQueueItem {
   effort?: EffortLevel | null
   permission_mode?: PermissionMode | null
   account_id?: string | null
+  /** Run under a signed-in instance's login: 'desktop:<dir>' or 'cli:<id>' (see server types.ts). */
+  instance_ref?: string | null
   new_chat: boolean
   fork: boolean
   /** ISO timestamp; the scheduler won't auto-dispatch before this. */
@@ -185,8 +187,13 @@ export const getInstanceAccount = (dir: string, opts: { noNetwork?: boolean } = 
   )
 export const openInstance = (dir: string) =>
   j<CMActionResult>(`/api/instances/${encodeURIComponent(dir)}/open`, { method: 'POST' })
-export const quitInstance = (dir: string) =>
-  j<CMActionResult>(`/api/instances/${encodeURIComponent(dir)}/quit`, { method: 'POST' })
+/** `confirmExternal` is the explicit opt-in required to quit the DEFAULT (non-isolated) Claude
+ *  Desktop — the server refuses that dir without it (see core/instances.ts quitInstance guard). */
+export const quitInstance = (dir: string, opts: { confirmExternal?: boolean } = {}) =>
+  j<CMActionResult>(`/api/instances/${encodeURIComponent(dir)}/quit`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  })
 export const focusInstance = (dir: string) =>
   j<CMActionResult>(`/api/instances/${encodeURIComponent(dir)}/focus`, { method: 'POST' })
 export const revealInstanceFolder = (dir: string) =>
@@ -230,7 +237,12 @@ export const CLASSIC_DESKTOP_INSTALLER_URL =
 export const DESKTOP_DOWNLOAD_PAGE_URL = 'https://claude.com/download'
 
 // --- self-update --------------------------------------------------------------
-export const checkUpdate = () => j<UpdateStatus>('/api/update')
+/** /api/update returns the engine status PLUS the daemon's distribution: a 'compiled' (packaged
+ *  release) build can't git-pull, so the UI hides the update controls and points at Releases. */
+export type UpdateStatusWithDistribution = UpdateStatus & {
+  distribution?: 'source' | 'compiled'
+}
+export const checkUpdate = () => j<UpdateStatusWithDistribution>('/api/update')
 export const applyUpdate = () => j<UpdateApplyResult>('/api/update/apply', { method: 'POST' })
 
 export interface AutoUpdateSettings {

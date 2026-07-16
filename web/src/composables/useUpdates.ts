@@ -1,9 +1,9 @@
-import type { UpdateApplyResult, UpdateStatus } from '@/lib/api'
+import type { UpdateApplyResult, UpdateStatusWithDistribution } from '@/lib/api'
 import * as api from '@/lib/api'
 import { useSelfUpdate } from '@/lib/useSelfUpdate'
 
 const { updateStatus, updateChecking, updateApplying, checkForUpdate, applyUpdate } = useSelfUpdate<
-  UpdateStatus,
+  UpdateStatusWithDistribution,
   UpdateApplyResult
 >({
   checkUpdate: api.checkUpdate,

@@ -23,6 +23,7 @@
 
 import { Database } from 'bun:sqlite'
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { resolveCliConfigDirToken, resolveInstanceToken } from './core/accounts'
 import { DEFAULT_OAUTH_SCOPES } from './usage'
 
 // The runner is launched DETACHED via WMI (Win32_Process.Create — see dispatch.ts) so it escapes the
@@ -37,6 +38,13 @@ interface RunSpec {
   cwd: string
   /** Account whose credential to inject (secret read from the DB here, not carried in the spec). */
   accountId: string | null
+  /** Run under a signed-in DESKTOP instance: its --user-data-dir. The runner extracts that
+   *  instance's OAuth token value-blind at spawn time (core/accounts.ts resolveInstanceToken) —
+   *  the spec carries only the path, never a credential. Wins over accountId when both are set. */
+  desktopDir: string | null
+  /** Run under a signed-in CLI instance: its CLAUDE_CONFIG_DIR (same value-blind discipline,
+   *  via resolveCliConfigDirToken). Wins over accountId when both are set. */
+  cliConfigDir: string | null
   /** Absolute path to the sqlite DB, so the runner can read the account secret without the daemon's env. */
   dbPath: string
   /** Non-secret env overrides (e.g. FAKE_SESSION_ID / FAKE_SLEEP_MS for the test stand-in). */
@@ -63,13 +71,54 @@ function writeStatus(spec: RunSpec, extra: Record<string, unknown>): void {
   }
 }
 
+/** Injects an OAuth token + its scopes, clearing any ambient credential first so the run never
+ *  silently falls back to whatever the profile env happened to carry. */
+function injectOauth(env: Record<string, string>, token: string, scopes: string | null): void {
+  delete env.ANTHROPIC_API_KEY
+  delete env.ANTHROPIC_AUTH_TOKEN
+  delete env.CLAUDE_CODE_OAUTH_TOKEN
+  env.CLAUDE_CODE_OAUTH_TOKEN = token
+  // Scopes MUST ride along or `claude` silently stops handling slash-command prompts (exit 0,
+  // nothing useful) — see DEFAULT_OAUTH_SCOPES in ./usage.ts for the full write-up.
+  env.CLAUDE_CODE_OAUTH_SCOPES = scopes?.trim() || DEFAULT_OAUTH_SCOPES
+}
+
 /** Build the child env: the runner's inherited env (the daemon's env at spawn), the non-secret
- *  overrides, then the account credential looked up from the DB. Mirrors dispatch.ts buildEnv so a
- *  run behaves identically whether launched fresh or (historically) inline. */
-function buildChildEnv(spec: RunSpec): Record<string, string> {
+ *  overrides, then the run's credential. Instance-derived identity (desktopDir / cliConfigDir)
+ *  resolves the token value-blind from that instance's own storage and FAILS THE RUN when it
+ *  can't (a signed-out instance must surface as "signed out", never silently run as Ambient);
+ *  the sqlite accountId path keeps its historical lenient behavior. */
+async function buildChildEnv(
+  spec: RunSpec,
+): Promise<{ env: Record<string, string> } | { error: string }> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     ...spec.envExtra,
+  }
+  if (spec.desktopDir) {
+    const resolved = await resolveInstanceToken(spec.desktopDir).catch(() => null)
+    if (!resolved) {
+      return {
+        error: `couldn't resolve a login token from the desktop instance at ${spec.desktopDir} — is it still signed in?`,
+      }
+    }
+    injectOauth(env, resolved.token, resolved.scopes)
+    return { env }
+  }
+  if (spec.cliConfigDir) {
+    let resolved: { token: string; scopes: string } | null = null
+    try {
+      resolved = resolveCliConfigDirToken(spec.cliConfigDir)
+    } catch {
+      resolved = null
+    }
+    if (!resolved) {
+      return {
+        error: `couldn't resolve a login token from the CLI instance at ${spec.cliConfigDir} — run its sign-in (/login) again?`,
+      }
+    }
+    injectOauth(env, resolved.token, resolved.scopes)
+    return { env }
   }
   if (spec.accountId) {
     let acct: { auth_type: string; secret: string } | null = null
@@ -85,23 +134,17 @@ function buildChildEnv(spec: RunSpec): Record<string, string> {
       acct = null // DB unreadable — run without the account credential rather than abort
     }
     if (acct) {
-      delete env.ANTHROPIC_API_KEY
-      delete env.ANTHROPIC_AUTH_TOKEN
-      delete env.CLAUDE_CODE_OAUTH_TOKEN
       if (acct.auth_type === 'api_key') {
+        delete env.ANTHROPIC_API_KEY
+        delete env.ANTHROPIC_AUTH_TOKEN
+        delete env.CLAUDE_CODE_OAUTH_TOKEN
         env.ANTHROPIC_API_KEY = acct.secret
       } else {
-        env.CLAUDE_CODE_OAUTH_TOKEN = acct.secret
-        // An injected OAuth token needs its SCOPES beside it or `claude` silently stops handling
-        // SLASH-COMMAND prompts (it runs them as plain text and returns nothing useful — exit 0, no
-        // error). Ordinary prompts work either way, but a queued "/usage"-style prompt would not.
-        // See DEFAULT_OAUTH_SCOPES in ./usage.ts for the full write-up. Set it explicitly so a run
-        // never depends on the daemon's ambient environment (the tray's is empty).
-        env.CLAUDE_CODE_OAUTH_SCOPES = DEFAULT_OAUTH_SCOPES
+        injectOauth(env, acct.secret, null)
       }
     }
   }
-  return env
+  return { env }
 }
 
 async function main(specPath: string | undefined): Promise<void> {
@@ -109,11 +152,25 @@ async function main(specPath: string | undefined): Promise<void> {
   const spec: RunSpec = JSON.parse(readFileSync(specPath, 'utf8'))
   const startedAt = new Date().toISOString()
 
+  // Resolve the run's credential BEFORE spawning: an instance-derived identity that can't
+  // resolve (signed out, deleted profile) fails the run loudly here, with the reason in the
+  // log — it must never silently run as Ambient instead.
+  const built = await buildChildEnv(spec)
+  if ('error' in built) {
+    logLine(spec.logPath, JSON.stringify({ __dispatch: 'stderr', text: built.error }))
+    logLine(
+      spec.logPath,
+      JSON.stringify({ __dispatch: 'exit', code: -1, at: new Date().toISOString() }),
+    )
+    writeStatus(spec, { childPid: null, startedAt, state: 'exited', code: -1 })
+    process.exit(0)
+  }
+
   let proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
   try {
     proc = Bun.spawn(spec.childArgv, {
       cwd: spec.cwd,
-      env: buildChildEnv(spec),
+      env: built.env,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',

@@ -89,6 +89,11 @@ create table if not exists monitor_accounts (
     .all()
     .map((c) => c.name)
   if (!cols.includes('not_before')) db.exec('alter table queue_items add column not_before text')
+  // Run-as an already-signed-in instance ('desktop:<dir>' | 'cli:<id>') instead of a pasted
+  // credential. Separate column from account_id because that one carries a REFERENCES accounts(id)
+  // constraint (and foreign_keys is ON), so an encoded non-account value can't live there.
+  if (!cols.includes('instance_ref'))
+    db.exec('alter table queue_items add column instance_ref text')
 }
 
 // --- one-time repair: rate_limited rows the old over-eager detector invented ---

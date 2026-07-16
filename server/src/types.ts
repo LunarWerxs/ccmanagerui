@@ -125,6 +125,11 @@ export interface QueueItem {
   effort: EffortLevel | null
   permission_mode: PermissionMode | null
   account_id: string | null
+  /** Run under an already-signed-in instance's login: 'desktop:<dir>' or 'cli:<id>'. The runner
+   *  extracts that instance's OAuth token value-blind at spawn time (core/accounts.ts) — no
+   *  pasted credential involved. Mutually exclusive with account_id in practice; when both are
+   *  set the instance ref wins (dispatch-runner checks it first). */
+  instance_ref: string | null
   new_chat: boolean
   fork: boolean
   status: QueueStatus

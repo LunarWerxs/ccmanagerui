@@ -42,6 +42,12 @@ export default {
   toastCliLoginFailed: 'Failed to open a terminal for the CLI sign-in.',
   toastCliUnlinked: 'Unlinked. It is back in the CLI instances table below.',
   toastCliUnlinkFailed: 'Failed to unlink the CLI instance.',
+  toastCliCreateFailed: 'Failed to create a CLI instance for this account.',
+  quitExternalDialogTitle: 'Quit your regular Claude Desktop?',
+  quitExternalDialogDescription:
+    'This is your real, non-isolated Claude Desktop — not an instance created here. Quitting it closes any conversation in progress.',
+  quitExternalDialogSubmit: 'Quit it anyway',
+  quitExternalDialogQuitting: 'Quitting…',
   refreshAllUsage: 'Refresh all usage',
   refreshAllUsageHint:
     'Re-check every instance now. Reading your quota does not use any of it, and takes about a third of a second per instance.',
@@ -91,9 +97,11 @@ export default {
     'Instances need the classic Claude Desktop for Windows installer (~217 MB). Install it, then refresh this tab.',
   desktopWarnDownload: 'Download the classic installer',
   desktopWarnAllDownloads: 'All downloads',
+  // Names ISOLATED instances explicitly: the old copy said "every other running instance", and a
+  // user dutifully following it one-click-quit their REAL (External) Claude Desktop mid-chat.
   browserDanceTitle: 'One-time sign-in required',
   browserDanceBody:
-    'Quit every other running instance before signing in for the first time, or the login may attach to the wrong profile.',
+    'Before signing in for the first time, quit the other ISOLATED instances created here (the login can attach to the wrong isolated profile). Your regular Claude Desktop is not affected — leave it open.',
   toastOpened: 'Instance opened.',
   toastOpenFailed: 'Failed to open instance.',
   toastQuit: 'Instance quit.',

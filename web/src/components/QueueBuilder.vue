@@ -22,9 +22,12 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { useBuilder } from '@/composables/useBuilder'
+import { useCliInstances } from '@/composables/useCliInstances'
 import { useData } from '@/composables/useData'
+import { useInstances } from '@/composables/useInstances'
 import * as api from '@/lib/api'
 import { EFFORTS, MODELS, PERMISSION_MODES } from '@/lib/format'
+import { displayName } from '@/lib/instance-appearance'
 import ExpandTransition from '@/shell/ExpandTransition.vue'
 import InfoHint from '@/shell/InfoHint.vue'
 
@@ -35,6 +38,10 @@ const emit = defineEmits<{ created: [] }>()
 
 const { t } = useI18n()
 const { accounts, sessions, refreshQueue } = useData()
+// Run-as candidates are the instances the user has ALREADY signed in (Instances tab) — that's
+// where accounts get added; the sqlite `accounts` rows are a legacy/headless fallback.
+const { instances, refreshInstances } = useInstances()
+const { cliInstances, refreshCliInstances } = useCliInstances()
 
 const form = reactive({
   new_chat: false,
@@ -73,6 +80,10 @@ watch([open, editItem], ([isOpen]) => {
   if (!isOpen) return
   error.value = null
   advancedOpen.value = false
+  // The run-as options come from the live instance lists, which only self-populate on the
+  // Instances tab — refresh here so the picker is complete even if that tab was never opened.
+  void refreshInstances()
+  void refreshCliInstances({ silent: true })
   const it = editItem.value
   if (it) {
     form.new_chat = it.new_chat
@@ -83,7 +94,8 @@ watch([open, editItem], ([isOpen]) => {
     form.model = it.model ?? ''
     form.effort = it.effort ?? ''
     form.permission_mode = it.permission_mode ?? ''
-    form.account_id = it.account_id ?? ''
+    // One picker field carries both shapes: a prefixed instance ref wins over a legacy account id.
+    form.account_id = it.instance_ref ?? it.account_id ?? ''
     form.fork = it.fork
     form.not_before_local = toLocalInput(it.not_before)
     return
@@ -102,8 +114,24 @@ watch([open, editItem], ([isOpen]) => {
   form.not_before_local = ''
 })
 
+// Run-as options, in preference order: Ambient, then every signed-in instance (Desktop rows are
+// the account rows; a CLI instance LINKED to one is the same account and would be a duplicate
+// entry, so only unlinked CLI logins appear), then any legacy pasted credentials. Instance values
+// are prefixed ('desktop:<dir>' / 'cli:<id>'); a bare uuid is a sqlite accounts row.
 const accountOptions = computed(() => [
   { value: '', label: t('builder.accountAmbient') },
+  ...instances.value
+    .filter((i) => i.account?.email)
+    .map((i) => ({
+      value: `desktop:${i.dir}`,
+      label: `${displayName(i)} · ${t('builder.accountDesktopInstance')}`,
+    })),
+  ...cliInstances.value
+    .filter((c) => c.loggedIn && !c.associatedDesktopDir)
+    .map((c) => ({
+      value: `cli:${c.id}`,
+      label: `${c.name} · ${t('builder.accountCliInstance')}`,
+    })),
   ...accounts.value.map((a) => ({
     value: a.id,
     label: `${a.label} · ${a.auth_type === 'api_key' ? t('builder.accountAuthApiKey') : t('builder.accountAuthOauth')}`,
@@ -132,12 +160,16 @@ async function submit() {
   submitting.value = true
   error.value = null
   const not_before = form.not_before_local ? new Date(form.not_before_local).toISOString() : null
+  // Split the one picker value back into its two storage shapes (see accountOptions).
+  const runAs = form.account_id
+  const isInstanceRef = runAs.startsWith('desktop:') || runAs.startsWith('cli:')
   const shared = {
     prompt: form.prompt,
     model: form.model || null,
     effort: (form.effort || null) as api.EffortLevel | null,
     permission_mode: (form.permission_mode || null) as api.PermissionMode | null,
-    account_id: form.account_id || null,
+    account_id: !runAs || isInstanceRef ? null : runAs,
+    instance_ref: isInstanceRef ? runAs : null,
     not_before,
   }
   try {
@@ -230,8 +262,8 @@ async function submit() {
         </div>
 
         <!-- Account stays in the core view (not Advanced): it's the "which login this run uses"
-             choice and people want it up front. "Default" = whatever the CLI is already signed
-             into; specific accounts are added in Settings → Accounts. -->
+             choice and people want it up front. "Ambient" = whatever the CLI is already signed
+             into; specific accounts are the instances signed in via the Instances tab. -->
         <div class="space-y-1.5">
           <label class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             {{ $t('builder.accountLabel') }}

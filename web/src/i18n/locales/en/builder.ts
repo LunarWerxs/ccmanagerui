@@ -29,9 +29,11 @@ export default {
   permissionLabel: 'Permission',
   accountLabel: 'Run as (account)',
   accountHint:
-    'Which login this run uses. "Ambient" = whatever the claude CLI is already signed into (the default). Add named accounts (an OAuth token or API key) in Settings → Accounts to run under a specific one.',
+    'Which login this run uses. "Ambient" = whatever the claude CLI is already signed into (the default). To run as a specific account, sign it into an instance on the Instances tab — every signed-in instance is listed here.',
   defaultPlaceholder: 'Default',
   accountAmbient: 'Ambient (whatever the CLI is logged into)',
+  accountDesktopInstance: 'Desktop instance',
+  accountCliInstance: 'CLI instance',
   accountAuthApiKey: 'API key',
   accountAuthOauth: 'OAuth',
   forkLabel: 'Fork into a new session id instead of continuing in place',
