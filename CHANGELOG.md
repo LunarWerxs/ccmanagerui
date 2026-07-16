@@ -6,7 +6,38 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-07-16
+## [0.3.0] - 2026-07-16
+
+### Security
+
+- **Fixed a drive-by remote-code-execution hole in the local API.** The daemon binds localhost and
+  its API had no cross-site protection, so any web page you visited while it was running could quietly
+  POST to it — queuing a `claude` run with `--permission-mode bypassPermissions`, an attacker-chosen
+  prompt and directory, using your own logged-in credentials with no approval prompt — or read your
+  session transcripts. The daemon now rejects browser cross-site requests (via `Sec-Fetch-Site` /
+  `Origin` / `Host`, which also defeats the "simple request" CORS bypass and DNS rebinding) while
+  still allowing the app's own UI, the dev server, and non-browser tools (the tray, MCP clients).
+  `permission_mode` is now validated server-side before it can ever reach the CLI.
+
+### Added
+
+- **Real executables on every release.** A tag push cross-compiles self-contained binaries (Bun
+  embedded — no install step) for Windows x64, Linux x64/arm64, and macOS x64/arm64, smoke-tests each
+  on real hardware for its OS, and attaches them to a draft GitHub release. The binary carries every
+  process mode as a subcommand (`--version`, `--mcp`, the detached dispatch runner), keeps state under
+  `~/.ccmanagerui/`, serves the SPA from a sidecar `web/dist/`, and the Windows zip ships the tray
+  toolkit (no Bun on PATH required).
+- **Packaged builds now self-update.** A compiled build checks GitHub Releases, downloads the newer
+  platform bundle, verifies the new binary runs before swapping it in place, and relaunches — the
+  same Settings check/apply/auto-update controls the source build has. (Source builds still self-update
+  via `git`.)
+- **Run queued work as any signed-in instance — no token pasting.** The queue's "Run as" picker lists
+  every signed-in desktop/CLI instance; the runner extracts that instance's own OAuth token at spawn
+  time and fails the run with a clear "signed out?" message rather than silently falling back to the
+  ambient login. Signing in on the Instances tab is now how accounts get added — the Settings
+  paste-a-token form is gone (existing credentials still work; the raw API remains for headless use).
+- **CLI sign-in on every instance row**, from the row's actions menu (create-on-demand when no CLI
+  login is linked yet), replacing the single inline table sub-line.
 
 ### Fixed
 
@@ -24,6 +55,19 @@ All notable changes to CC Manager UI are documented here. The format is based on
   stable Squirrel stub first (versioned `app-<ver>` dirs are replaced on every update), and the
   banner re-verifies fresh after any successful open/create and every 60s while visible — so
   "install the classic build" actually clears it once you do.
+- **A run pinned to a specific account could silently run as the wrong one.** A queued run pinned to
+  an instance whose sign-in had expired, been deleted, or whose reference was malformed used to fall
+  back to the ambient login without a word; auto-resuming such a run dropped the pin entirely. Both
+  now fail loudly (or carry the pin forward) instead of quietly using different credentials.
+- **A queued run's account wasn't shown on its card**, and editing a run whose pinned account had been
+  deleted silently reverted it to ambient on save. The card now shows the instance it will run as (or
+  "deleted instance"), and the editor shows a clear disabled "deleted instance" option instead of
+  quietly changing the run.
+- **Deleting a desktop instance could orphan its linked CLI login** into an invisible, unmanageable
+  state; a failed "Sign in CLI" left a stray CLI instance behind. Both are cleaned up now.
+- **A run recovered after a restart could briefly be double-dispatched** — the scheduler and
+  auto-resume monitor could fire before the daemon finished re-adopting runs that survived the
+  restart. They now wait for that to complete.
 
 - **A run that merely TALKED about rate limits was marked rate-limited.** The detector matched its
   patterns against every event of a run — tool inputs and tool results included — so an agent that
@@ -91,26 +135,6 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
-- **Real executables on every release.** A tag push now cross-compiles self-contained binaries
-  (Bun runtime embedded — no install step) for Windows x64, Linux x64/arm64, and macOS x64/arm64,
-  smoke-tests each one on real hardware for its OS (`--version`, `/api/health`, the served SPA),
-  and attaches them to a draft GitHub release. The compiled binary carries every process mode as a
-  subcommand (`--version`, `--mcp`, the detached dispatch runner), keeps its state under
-  `~/.ccmanagerui/`, serves the SPA from a sidecar `web/dist/` next to the exe, and the Windows
-  zip ships the tray toolkit (the tray detects the compiled layout — no Bun on PATH required).
-  Packaged builds report `distribution: "compiled"` and honestly disable the git-based
-  self-update, pointing at the Releases page instead.
-- **Run queued work as any signed-in instance — no token pasting.** The queue's "Run as" picker
-  now lists every signed-in desktop instance and (unlinked) CLI instance; the detached runner
-  extracts that instance's own OAuth token value-blind at spawn time, and fails the run with a
-  clear "signed out?" message instead of silently running as Ambient. Signing in on the
-  Instances tab is now the one way accounts get added — the Settings paste-a-token "Add account"
-  form is gone (existing pasted credentials still work and can be removed; the raw
-  `POST /api/accounts` route remains for headless/API-key setups).
-- **CLI sign-in on every instance row.** Each row's actions menu now carries the CLI section:
-  Launch / Sign in + Unlink when a CLI login is linked, and a create-on-demand "Sign in CLI"
-  (creates the CLI instance, links it, opens the `/login` terminal) when none is. The inline
-  table sub-line is gone — the table stays one row tall per instance.
 - **A quota percentage is now quantified into something you can plan with.** "98% used" is not a
   decision: 98% with a reset in 20 minutes is fine, while 98% with a reset in four days at 1%/hour
   means being cut off mid-task in about two hours. Same number, opposite action. Anthropic publishes
