@@ -19,8 +19,14 @@ import { basename } from 'node:path'
 import { buildDetachedSpawn } from '../detached-spawn.mjs'
 import { detectDesktopInstall } from './desktop-install'
 import { readInstanceMetaMap } from './instance-meta'
-import { instancesRoot, launchArgs, normalizePath, resolveLaunchBinary } from './paths'
-import { type CMProcessInfo, listClaudeProcesses } from './process'
+import {
+  defaultClaudeDir,
+  instancesRoot,
+  launchArgs,
+  normalizePath,
+  resolveLaunchBinary,
+} from './paths'
+import { type CMProcessInfo, type ListClaudeProcessesOptions, listClaudeProcesses } from './process'
 import type { CMActionResult, CMInstance } from './shared'
 
 // ----------------------------------------------------------------------------
@@ -328,6 +334,21 @@ export interface QuitInstanceOptions {
   force?: boolean
   /** How long to wait for a graceful exit before force-killing (ms). Default 5000. */
   gracefulTimeoutMs?: number
+  /**
+   * Explicit confirmation required to quit the DEFAULT (non-isolated) Claude Desktop profile —
+   * the user's real, externally-managed Claude Desktop (the "External" instance row). Without
+   * this, quitInstance refuses up front, before any process is even enumerated: unlike an
+   * isolated instance dir this app created, that profile may have a real, in-progress
+   * conversation. Mirrors removeInstance()'s Guard 1 in core/lifecycle.ts — same protection,
+   * quit-side. Ignored (no effect) for any other dir.
+   */
+  confirmExternal?: boolean
+  /**
+   * Process-list source, injected so tests can exercise the guard/kill path deterministically
+   * without spawning real OS process enumeration or risking a real kill (mirrors
+   * ListInstancesOptions.resolveAccount's injection style). Defaults to listClaudeProcesses.
+   */
+  listProcesses?: (options: ListClaudeProcessesOptions) => Promise<CMProcessInfo[]>
 }
 
 /** True once none of `pids` are alive anymore (best-effort liveness probe). */
@@ -397,9 +418,39 @@ export async function quitInstance(
   const normDir = normalizePath(dir)
   const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 5000
 
+  // --- Guard: never quit the default (non-isolated) Claude Desktop profile without explicit
+  // confirmation. This is the quit-side analog of removeInstance()'s Guard 1 (core/lifecycle.ts):
+  // that dir is the user's REAL, externally-managed Claude Desktop, not an isolated instance this
+  // app created, and may have a real conversation in progress. Checked (and refused) BEFORE any
+  // process enumeration, so an unconfirmed quit of the default dir never even lists processes.
+  let defaultDir = ''
+  try {
+    defaultDir = normalizePath(defaultClaudeDir())
+  } catch {
+    defaultDir = ''
+  }
+  // normalizePath() already lowercases, but compare defensively via .toLowerCase() too, matching
+  // removeInstance()'s exact idiom — belt-and-suspenders against any future normalizePath change.
+  if (
+    defaultDir &&
+    normDir.toLowerCase() === defaultDir.toLowerCase() &&
+    options.confirmExternal !== true
+  ) {
+    return {
+      ok: false,
+      action: 'quit',
+      dir: normDir,
+      message:
+        'Refusing to quit the regular (non-isolated) Claude Desktop without explicit confirmation: it may have a real conversation in progress. Pass confirmExternal to proceed.',
+      data: { killedCount: 0 },
+    }
+  }
+
+  const listProcesses = options.listProcesses ?? listClaudeProcesses
+
   let matched: CMProcessInfo[]
   try {
-    const all = await listClaudeProcesses({ includeChildren: true })
+    const all = await listProcesses({ includeChildren: true })
     matched = all.filter((p) => p.dir && normalizePath(p.dir) === normDir)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
