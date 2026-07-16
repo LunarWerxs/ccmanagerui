@@ -87,11 +87,13 @@ jobs:
           cp LICENSE CHANGELOG.md "${stage}/"
           cp .github/RELEASE-README.md "${stage}/README.md"
           if [ "$target" = "windows-x64" ]; then
-            # No --windows-icon/--windows-title: BOTH panic Bun 1.3.14 ("Crashed while printing
-            # main.ts", reproduced locally and on this runner, 2026-07-16). Patch the PE
-            # resources post-compile with electron/rcedit instead — verified the patched exe
-            # still boots and serves (Bun's bundled data survives the resource rewrite).
-            bun build --compile --minify --sourcemap=none --target="bun-${target}" \
+            # No --minify and no --windows-icon/--windows-title: on a WINDOWS compile host each
+            # of the three panics Bun 1.3.14 outright ("Crashed while printing main.ts" —
+            # reproduced locally and on this runner, 2026-07-16; the same --minify works fine on
+            # the Linux legs). Unminified costs a few MB; the icon/version info is patched
+            # post-compile with electron/rcedit instead — verified the patched exe still boots
+            # and serves (Bun's bundled data survives the resource rewrite).
+            bun build --compile --sourcemap=none --target="bun-${target}" \
               --outfile="${stage}/CCManagerUI.exe" server/src/main.ts
             gh release download -R electron/rcedit -p "rcedit-x64.exe" -O rcedit.exe --skip-existing
             ./rcedit.exe "${stage}/CCManagerUI.exe" \
