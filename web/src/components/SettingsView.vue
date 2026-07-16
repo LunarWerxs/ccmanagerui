@@ -88,9 +88,6 @@ const noUpdateSource = computed(() => !!updateStatus.value && !updateStatus.valu
 // dirty working tree, since the updater refuses to overwrite uncommitted local edits) is
 // visible at a glance instead of requiring a hover.
 const updateBlockedReason = computed(() => updateStatus.value?.reason ?? undefined)
-// A packaged (compiled) build can't git-pull: no check button, no auto-update toggle — one row
-// pointing at GitHub Releases (the server's own reason string carries the URL).
-const isCompiledBuild = computed(() => updateStatus.value?.distribution === 'compiled')
 const applyMessage = ref<string | null>(null)
 const applyError = ref<string | null>(null)
 const restartRequired = ref(false)
@@ -612,24 +609,13 @@ defineExpose({ save })
           <span v-if="updateStatus?.currentCommit">· {{ updateStatus.currentCommit.slice(0, 7) }}</span>
         </template>
         <template #control>
-          <Button
-            v-if="!isCompiledBuild"
-            size="sm"
-            variant="outline"
-            :disabled="updateChecking"
-            @click="onCheckForUpdate"
-          >
+          <Button size="sm" variant="outline" :disabled="updateChecking" @click="onCheckForUpdate">
             <RefreshCw :class="updateChecking ? 'animate-spin' : ''" />
             {{ updateChecking ? $t('settings.checkingForUpdates') : $t('settings.checkForUpdates') }}
           </Button>
         </template>
       </SettingsRow>
-      <SettingsRow
-        v-if="isCompiledBuild"
-        :label="$t('settings.packagedBuild')"
-        :description="updateBlockedReason"
-      />
-      <SettingsRow v-else-if="updateStatus?.updateAvailable && updateStatus?.canApply" :label="$t('settings.updateAvailable')">
+      <SettingsRow v-if="updateStatus?.updateAvailable && updateStatus?.canApply" :label="$t('settings.updateAvailable')">
         <template #description>
           {{ updateStatus.remoteCommit?.slice(0, 7) }}
         </template>
@@ -661,7 +647,7 @@ defineExpose({ save })
            Single toggle (family-standard "Auto-update" - no separate interval control; the
            daemon checks on a sensible fixed cadence internally). Grays out when there is no
            update source, since it could never fire. -->
-      <SettingsRow v-if="!isCompiledBuild" :icon="CloudCog" :label="$t('settings.autoUpdate')">
+      <SettingsRow :icon="CloudCog" :label="$t('settings.autoUpdate')">
         <template #info>
           <InfoHint :text="$t('settings.autoUpdateDescription')" />
         </template>

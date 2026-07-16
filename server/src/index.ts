@@ -74,6 +74,7 @@ import {
   subscribeRun,
 } from './dispatch'
 import { findFreePort } from './find-free-port.mjs'
+import { cleanupStaleUpdateArtifacts } from './github-updater'
 import {
   clearInstanceInfo,
   findLiveInstance,
@@ -211,17 +212,27 @@ app.get('/api/health', (c) =>
   }),
 )
 
-// --- self-update (git-based; see updater-engine.mjs via server/src/updater.ts) ---------------
+// --- self-update (source: git engine; compiled: GitHub Releases — see server/src/updater.ts) --
 app.get('/api/update', async (c) =>
   c.json({
     ...(await checkForUpdate()),
-    // 'compiled' = a packaged release build: git-based self-update can't apply there, so the web
-    // UI hides the auto-update controls and points at the Releases page instead.
+    // Informational: which mechanism is live. Both compiled + source support check/apply now, so
+    // the UI drives the same controls for either; this just lets a caller distinguish them.
     distribution: IS_COMPILED ? 'compiled' : 'source',
     autoUpdate: { enabled: autoUpdateEnabled(), intervalSecs: getAutoUpdateIntervalSecs() },
   }),
 )
-app.post('/api/update/apply', async (c) => c.json(await applyUpdate()))
+app.post('/api/update/apply', async (c) => {
+  const result = await applyUpdate()
+  // A compiled apply swapped the binary on disk; the running process is still the OLD one, so it
+  // MUST relaunch for the update to take effect (a source apply leaves the daemon to be restarted
+  // manually — restartGuidance in the UI — matching its historical behavior). Fire after the
+  // response is sent so the client sees the result before the port drops.
+  if (IS_COMPILED && result.ok && result.restartRequired) {
+    setTimeout(() => relaunchDaemon(), 250)
+  }
+  return c.json(result)
+})
 
 // --- auto-update settings (background loop; see server/src/auto-update.ts) -------------------
 app.get('/api/update/settings', (c) =>
@@ -1099,48 +1110,55 @@ console.log(`[ccmanagerui] http://${HOST}:${boundPort}${moved}`)
 // Load the persisted session/sync state into memory before the server starts accepting requests.
 initConnections()
 
+// Restart the daemon so a freshly-applied update takes over. The tray is a bare supervisor that
+// never relaunches us, so the daemon must relaunch ITSELF: spawn a DETACHED copy of this exact
+// launch command (CCMANAGERUI_RELAUNCH=1 so the successor waits for our port), then gracefully
+// shut THIS daemon down to free the port. Shared by the auto-update loop AND the manual
+// /api/update/apply route (a compiled apply swapped the binary on disk — process.execPath now
+// points at the NEW exe, so respawning it boots the updated build). Returns false (no shutdown)
+// if the successor couldn't be spawned, so we never exit without one.
+function relaunchDaemon(): boolean {
+  try {
+    // In a compiled binary process.argv is ['bun', '<virtual embedded path>', ...realArgs] — a
+    // placeholder pair, NOT respawnable. process.execPath + (real script in source mode) + the
+    // real args (argv.slice(2)) is the one shape that relaunches correctly in both modes.
+    const relaunchArgs = IS_COMPILED
+      ? process.argv.slice(2)
+      : [process.argv[1]!, ...process.argv.slice(2)]
+    const child = spawn(process.execPath, relaunchArgs, {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, CCMANAGERUI_RELAUNCH: '1', PORT: String(PORT) },
+    })
+    child.unref()
+  } catch (e) {
+    console.error('[ccmanagerui] relaunch failed to spawn; staying on the running version.', e)
+    return false
+  }
+  console.log('[ccmanagerui] update applied, relaunching the daemon…')
+  setTimeout(() => {
+    clearInstanceInfo()
+    stopAutoUpdate()
+    process.exit(0)
+  }, 800) // let the successor start, then free the port
+  return true
+}
+
 // --- auto-update loop (opt-in; see server/src/auto-update.ts) ---------------
 // Prime the runtime flags from persisted settings now; the timer itself only starts after boot
 // (startAutoUpdate below), one interval out, so a fresh launch is never interrupted.
 loadAutoUpdateSettings()
-// When it applies an update it must restart the daemon ITSELF; the tray is a bare supervisor
-// that never relaunches us. So hand it a relaunch that spawns a DETACHED copy of this exact
-// launch command (CCMANAGERUI_RELAUNCH=1 so the successor waits for our port), then gracefully
-// shuts THIS daemon down to free the port.
 setAutoUpdateHooks({
   // Don't auto-update (which relaunches the daemon) while dispatch runs are in flight.
   hasActiveRuns: () => activeCount() > 0,
-  relaunch: () => {
-    try {
-      // In a compiled binary process.argv is ['bun', '<virtual embedded path>', ...realArgs] — a
-      // placeholder pair, NOT respawnable. process.execPath + (real script in source mode) + the
-      // real args (argv.slice(2)) is the one shape that relaunches correctly in both modes.
-      const relaunchArgs = IS_COMPILED
-        ? process.argv.slice(2)
-        : [process.argv[1]!, ...process.argv.slice(2)]
-      const child = spawn(process.execPath, relaunchArgs, {
-        cwd: process.cwd(),
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-        env: { ...process.env, CCMANAGERUI_RELAUNCH: '1', PORT: String(PORT) },
-      })
-      child.unref()
-    } catch (e) {
-      console.error(
-        '[ccmanagerui] auto-update relaunch failed to spawn; staying on the running version.',
-        e,
-      )
-      return // never shut down without a successor
-    }
-    console.log('[ccmanagerui] auto-update applied, relaunching the daemon…')
-    setTimeout(() => {
-      clearInstanceInfo()
-      stopAutoUpdate()
-      process.exit(0)
-    }, 800) // let the successor start, then free the port
-  },
+  relaunch: relaunchDaemon,
 })
+
+// A compiled build's self-updater renames the old exe + web/dist aside during a swap; sweep any
+// such leftovers from a previous update now (best-effort, compiled-only). See github-updater.ts.
+if (IS_COMPILED) cleanupStaleUpdateArtifacts()
 
 // --- reattach in-flight dispatch runs (they OUTLIVE the daemon; see dispatch.ts) --------------
 // A tray Quit / auto-update relaunch / crash leaves detached `claude` runs still executing. Recover

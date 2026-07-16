@@ -133,6 +133,4 @@ export default {
   removeAction: 'Remove',
   apiKeyBadge: 'API key',
   oauthBadge: 'OAuth',
-  // packaged (compiled release) builds — shown in the Updates group instead of the git-based rows
-  packagedBuild: 'Packaged build',
 }
