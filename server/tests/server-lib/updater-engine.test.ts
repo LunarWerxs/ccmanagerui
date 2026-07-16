@@ -130,7 +130,10 @@ test("checkForUpdate + applyUpdate happy path: pulls, installs, builds, HEAD adv
   const after = await updater.checkForUpdate();
   expect(after.updateAvailable).toBe(false);
   expect(after.dirty).toBe(false);
-});
+  // 30s: this exercises REAL git pull + install + build in a scratch repo, which runs ~5s locally
+  // and repeatedly hit the 5s default timeout on a cold Windows CI runner (2026-07-16). Widen the
+  // allowance rather than let a timing flake gate the suite. (Push upstream to the kit source.)
+}, 30_000);
 
 test("applyUpdate rolls back the checkout when build fails after the code swap", async () => {
   const remote = await remoteRepo();
@@ -159,7 +162,7 @@ test("applyUpdate rolls back the checkout when build fails after the code swap",
   const status = await updater.checkForUpdate();
   expect(status.currentCommit).toBe(preUpdateCommit);
   expect(status.dirty).toBe(false);
-});
+}, 30_000); // real git+install+build — see the happy-path test's note on the widened timeout.
 
 test("rollback message distinguishes a clean revert from a revert whose reinstall also fails", async () => {
   const remote = await remoteRepo();
@@ -188,4 +191,4 @@ test("rollback message distinguishes a clean revert from a revert whose reinstal
   const head = (await $`git -C ${local} rev-parse HEAD`.text()).trim();
   expect(head).toBe(preUpdateCommit);
   expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["install", "build", "install"]);
-});
+}, 30_000); // real git+install+build — see the happy-path test's note on the widened timeout.
