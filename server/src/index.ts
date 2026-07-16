@@ -22,6 +22,7 @@ import {
   HOST,
   IS_COMPILED,
   PORT,
+  PORTABLE_WINDOW_SIZE,
   SERVICE_NAME,
   VERSION,
   WEB_DIST_CANDIDATES,
@@ -1033,7 +1034,10 @@ app.post('/api/portable-window', async (c) => {
   // accepting requests, so it always reflects the port we actually bound; PORT is just a
   // last-resort fallback for an unusual boot order.
   const url = readInstanceInfo()?.url ?? `http://${HOST}:${PORT}`
-  return c.json(await openPortableWindow(url, { profileDir: join(CONFIG_DIR, 'portable-profile') }))
+  const profileDir = join(CONFIG_DIR, 'portable-profile')
+  // First-run size only — openPortableWindow yields to the profile's saved placement once
+  // the user has resized the window themselves (see PORTABLE_WINDOW_SIZE in config.ts).
+  return c.json(await openPortableWindow(url, { profileDir, initialSize: PORTABLE_WINDOW_SIZE }))
 })
 
 // --- graceful shutdown (tray Quit calls this before falling back to taskkill) ---

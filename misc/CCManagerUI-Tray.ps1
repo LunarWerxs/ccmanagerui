@@ -72,6 +72,15 @@ $TrayConfig = @{
   # (which stands the watchdog down for an attached instance owned by another session) to preserve
   # that parity: an attached daemon crashing still gets revived by this tray.
   WatchdogRequiresOwnership = $false
+  # Portable-window sizing (engine: Open-AppUi). First-run size = the daemon's measured
+  # PORTABLE_WINDOW_SIZE (server/src/config.ts — the sessions sidebar rail-collapses below a
+  # 1024px viewport, so 1060 outer clears it with slack; 800 tall ≈ the header + ~10 session
+  # rows), so a COLD tray start (tray boots the daemon and opens the window itself, before
+  # the daemon's own POST /api/portable-window path exists) stops opening a never-seen
+  # profile at ~the whole work area. NO PortableWindowSizeHint: this web build has no
+  # ?window-size applier (no resizeTo anywhere in web/src), so the hint would ride every URL
+  # as an inert param — enable it only after porting devwebui's web/src/lib/window-size-hint.ts.
+  PortableWindowSize   = @{ Width = 1060; Height = 800 }
   SelfTestMarker       = "CCMANAGERUI_TRAY_SELFTEST"
   MenuOpenLabel        = "Open CC Manager UI"
   MutexName            = "CCManagerUITrayHost"

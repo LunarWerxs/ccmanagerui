@@ -53,6 +53,26 @@ export const SERVICE_NAME = 'ccmanagerui'
 export const WEB_DIST_CANDIDATES = [join(APP_ROOT, 'web', 'dist')]
 
 /**
+ * First-run outer size of the portable app window (what Chromium's `--window-size` takes).
+ * Only applies to a window the dedicated profile has NEVER seen — the kit's
+ * openPortableWindow probes the profile's saved placement first, so a size the user picked
+ * themselves (or a maximize) wins on every later launch. Without it a never-seen window
+ * opens at Chromium's default of ~the whole work area (~1905x2092 on a 4K display).
+ *
+ * Measured against the real UI, not guessed. Width: the fixed-viewport shell caps at
+ * SHELL_BASE_MAX = 1000px (web/src/composables/useShellWidth.ts) and the page never
+ * scrolls, but the binding constraint is the sessions sidebar, which rail-collapses below a
+ * `(min-width: 1024px)` viewport (web/src/components/SessionsView.vue) — 1024 + ~16px frame
+ * = 1040 outer is the floor below which a first-run window opens onto the collapsed rail;
+ * 1060 clears it with slack for frame variance. Height is a density pick: a 758px viewport
+ * fits the ~48px header, the sidebar's search toolbar and ~10 session rows, with matching
+ * reading room in the transcript pane — 800 outer (outer = viewport + ~34 title + ~8 frame;
+ * Chromium draws its title bar inside the client area). The tray's cold start carries the
+ * same numbers (misc/CCManagerUI-Tray.ps1 PortableWindowSize) — keep them in step.
+ */
+export const PORTABLE_WINDOW_SIZE = { width: 1060, height: 800 }
+
+/**
  * Resolve the `claude` executable, mirroring the Python `claude_command()`:
  * prefer the npm-global install, else fall back to PATH resolution ("claude").
  */
