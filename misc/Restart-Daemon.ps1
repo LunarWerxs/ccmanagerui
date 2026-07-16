@@ -1,4 +1,4 @@
-# misc/Restart-Daemon.ps1 — kill this app's daemon, no exceptions, then relaunch it.
+# misc/Restart-Daemon.ps1 — kill this app's daemon AND its tray host, no exceptions, then relaunch.
 #
 # CONTRACT (owner directive, 2026-07-15): a rebuild must NEVER leave you on old code.
 # If something of OURS is running, it dies. There is no "left alone", no advisory note,
@@ -27,20 +27,48 @@
 # ruthless (anything that IS us dies, including an orphan the pointer forgot) and safe (a
 # Vite dev server, a sibling app, or any unrelated node process can never match).
 #
-# WHY WE ONLY KILL PROCESSES OLDER THAN THIS RUN:
-# The tray host runs an auto-restart watchdog. Killing the daemon is expected to bring a
-# NEW one back within seconds, and that new one is the whole point -- so the kill targets
-# are restricted to processes that started BEFORE this script did. A daemon younger than
-# our start stamp is the fresh build arriving, not a survivor. This is also what makes the
-# verify loop terminate instead of fighting the watchdog forever.
+# WHY THE OLD TRAY HOST DIES TOO (2026-07-15, the zero-instance incident):
+# This script used to kill only the daemon and then fire the app shortcut. But taskkill /T
+# kills a tree DOWNWARD from the daemon -- never its PARENT, the hidden powershell running
+# "<App>-Tray.ps1". That old tray host survived, its ~5s watchdog revived a daemon of its
+# own, and the shortcut launch raced it with a SECOND tray host. The loser of that mutex
+# race blocks forever on an "already starting" MessageBox nobody will ever dismiss (a
+# zombie whose open handle also keeps the named mutex alive, poisoning every later launch
+# into the loser path). Observed end state: within ~90 seconds the daemon, BOTH tray
+# hosts, and everything else were gone -- zero instances, nothing left to revive anything.
+# So tray hosts are first-class kill targets now, found by the app's unique "<App>-Tray.ps1"
+# adapter filename in powershell/pwsh command lines, and they die in the same sweep BEFORE
+# the daemons so no watchdog can fight the restart. Tree-killing a tray host usually reaps
+# its cmd->bun daemon in the same stroke; the identity sweep still catches adopted strays,
+# orphans, and headless daemons.
 #
-# App-agnostic on purpose: everything derives from package.json `name`, so the same file
-# works in ccmanagerui / redesign / repoyeti / devwebui. Keep the four copies identical.
+# WHY THE RELAUNCH GOES THROUGH WMI:
+# Start-Process parents the new tray host under THIS console's process tree, so closing the
+# terminal (or the tool/job that ran the rebuild) can tear the whole app down minutes later
+# -- silent, nothing in the daemon log, exactly the hard-kill signature of the incident's
+# endgame. Win32_Process.Create parents it to WmiPrvSE instead, outside this tree and job
+# (the same isolation trick ccmanagerui uses to keep dispatch supervisors alive across a
+# daemon restart), so the app outlives whatever ran this script.
+#
+# WHY WE ONLY KILL PROCESSES OLDER THAN THIS RUN:
+# Kill targets are restricted to processes that started BEFORE this script did. A daemon or
+# tray host younger than our start stamp is the fresh build arriving -- our own relaunch
+# below, or a dying watchdog getting one last spawn in -- not a survivor. Sparing it is
+# also what makes the verify loop terminate instead of fighting a fresh replacement
+# forever. Wait-Daemon.ps1 reads the same stamp to prove the daemon that ends up answering
+# is younger than the restart, i.e. that it really is a new process.
+#
+# App-agnostic on purpose: everything derives from package.json `name` and the sibling
+# "*-Tray.ps1" adapter, so the same file works in ccmanagerui / redesign / repoyeti /
+# devwebui. Keep the four copies identical.
 
 [CmdletBinding()]
 param(
-  # Repo root. Defaults to the parent of misc/, i.e. the app root.
-  [string]$Root = (Split-Path -Parent $PSScriptRoot),
+  # Repo root. Defaults to the parent of misc/, i.e. the app root. Resolved in the body, NOT
+  # here: under Windows PowerShell 5.1 a [CmdletBinding()] script evaluates param defaults
+  # BEFORE $PSScriptRoot is populated, so a default of (Split-Path $PSScriptRoot) dies with
+  # "empty string" the moment the script starts. (pwsh 7 populates it either way.)
+  [string]$Root = '',
   # Stop the daemon but don't relaunch the app afterwards.
   [switch]$NoLaunch,
   # How long to keep killing before admitting defeat.
@@ -48,6 +76,8 @@ param(
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
+
+if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
 
 $pkgPath = Join-Path $Root 'package.json'
 if (-not (Test-Path $pkgPath)) {
@@ -86,6 +116,31 @@ function Test-PredatesRestart {
   $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
   if (-not $proc) { return $false }
   try { return ($proc.StartTime -lt $restartStart) } catch { return $true }
+}
+
+# --- Tray hosts ------------------------------------------------------------------------------------
+# The daemon's supervisor: a hidden powershell running the sibling "<App>-Tray.ps1" adapter
+# (launched by Tray-Launch.vbs / the app shortcut). Its watchdog revives a killed daemon within
+# ~5 seconds, so a restart that leaves it alive restarts NOTHING durably -- see the zero-instance
+# incident in the header. The adapter filename is unique per app (RepoYeti-Tray.ps1,
+# DevWebUI-Tray.ps1, ...), so a command-line match on that name alone can only ever hit THIS
+# app's tray hosts -- including a mutex-loser zombie stuck on its "already starting" MessageBox.
+$trayAdapter = Get-ChildItem -LiteralPath (Join-Path $Root 'misc') -Filter '*-Tray.ps1' -ErrorAction SilentlyContinue |
+  Select-Object -First 1
+
+function Get-TrayHostPids {
+  param([switch]$IncludeFresh)   # default: only hosts that predate this run (the kill targets)
+  if (-not $trayAdapter) { return @() }
+  $found = @()
+  $procs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction SilentlyContinue
+  foreach ($p in $procs) {
+    if ([int]$p.ProcessId -eq $PID) { continue }
+    if (-not $p.CommandLine) { continue }
+    if ($p.CommandLine.IndexOf($trayAdapter.Name, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+    if (-not $IncludeFresh -and -not (Test-PredatesRestart -ProcessId ([int]$p.ProcessId))) { continue }
+    $found += [int]$p.ProcessId
+  }
+  return $found
 }
 
 # Every process that identifies as this app AND predates this run. Recomputed each pass so the
@@ -150,26 +205,39 @@ $deadline = (Get-Date).AddSeconds($KillTimeoutSeconds)
 $survivors = @{}
 
 while ($true) {
-  $targets = Get-StaleTargets -PointerPort $pointerPort
+  # Ordered kill list: tray hosts FIRST -- each carries a watchdog that would revive the daemon
+  # mid-sweep, and tree-killing the host usually reaps its cmd->bun daemon in the same stroke.
+  $targets = @{}
+  $order = New-Object System.Collections.Generic.List[int]
+  foreach ($trayPid in @(Get-TrayHostPids)) {
+    $targets[[int]$trayPid] = "old tray host (its watchdog would revive the daemon we're stopping)"
+    $order.Add([int]$trayPid)
+  }
+  foreach ($entry in (Get-StaleTargets -PointerPort $pointerPort).GetEnumerator()) {
+    if (-not $targets.ContainsKey([int]$entry.Key)) {
+      $targets[[int]$entry.Key] = $entry.Value
+      $order.Add([int]$entry.Key)
+    }
+  }
   $hungPid = Get-HungPointerTarget -Info $info
   if ($hungPid -and -not $targets.ContainsKey([int]$hungPid)) {
     $targets[[int]$hungPid] = "recorded in runtime.json but not answering /api/health (hung)"
+    $order.Add([int]$hungPid)
   }
 
   if ($targets.Count -eq 0) { break }   # nothing of ours from before this run is left: verified.
 
   if ((Get-Date) -gt $deadline) { $survivors = $targets; break }
 
-  foreach ($procId in $targets.Keys) {
-    # /T reaps whatever the daemon actually parented. Note what it does NOT reach, and must not:
-    # work the app has already dispatched. ccmanagerui launches a run's supervisor through WMI
-    # (Win32_Process.Create) precisely so it is parented to WmiPrvSE, outside this tree AND outside
-    # the daemon's job object -- restarting the app is not a reason to destroy a run in flight.
-    # (The old comment here claimed the opposite -- "so the dispatch runner and its claude go with
-    # it" -- which contradicts dispatch.ts's contract and, read literally, describes a bug.
-    # Verified 2026-07-15: a run survives this exact taskkill with no daemon alive at all, and the
-    # reopened app reattaches and finalizes it 'completed'. ccmanagerui guards the property with the
-    # WmiPrvSE-parent test in server/tests/dispatch.test.ts.)
+  foreach ($procId in $order) {
+    # /T reaps whatever the target actually parented (a tray host's cmd->bun daemon; a daemon's
+    # children). Note what it does NOT reach, and must not: work the app has already dispatched.
+    # ccmanagerui launches a run's supervisor through WMI (Win32_Process.Create) precisely so it is
+    # parented to WmiPrvSE, outside this tree AND outside the daemon's job object -- restarting the
+    # app is not a reason to destroy a run in flight. (Verified 2026-07-15: a run survives this
+    # exact taskkill with no daemon alive at all, and the reopened app reattaches and finalizes it
+    # 'completed'. ccmanagerui guards the property with the WmiPrvSE-parent test in
+    # server/tests/dispatch.test.ts.)
     taskkill /PID $procId /T /F *> $null
     if (-not $killed.ContainsKey($procId)) {
       $killed[$procId] = $targets[$procId]
@@ -181,21 +249,21 @@ while ($true) {
 
 if ($survivors.Count -gt 0) {
   Write-Host ""
-  Write-Host "  ! COULD NOT KILL the old '$name' daemon within $KillTimeoutSeconds seconds:" -ForegroundColor Red
+  Write-Host "  ! COULD NOT KILL everything of '$name' within $KillTimeoutSeconds seconds:" -ForegroundColor Red
   foreach ($procId in $survivors.Keys) {
     Write-Host ("    pid {0} - {1}" -f $procId, $survivors[$procId]) -ForegroundColor Red
   }
-  Write-Host "    It is still serving the OLD code. Kill it by hand, then re-run." -ForegroundColor Red
+  Write-Host "    The OLD code (or its supervisor) is still alive. Kill it by hand, then re-run." -ForegroundColor Red
   exit 1
 }
 
 if ($killed.Count -eq 0) {
-  Write-Host "  Nothing of '$name' was running (verified via /api/health identity, not a guess)."
+  Write-Host "  Nothing of '$name' was running (verified via /api/health identity + tray-host scan, not a guess)."
 }
 
 # A pointer that outlives its daemon is a landmine for the NEXT restart, so clear it -- but only if
-# it still describes a process that's gone. A daemon revived by the tray watchdog during the kill
-# loop has already rewritten this file, and deleting ITS pointer would strand the launcher.
+# it still describes a process that's gone. A fresh daemon that appeared during the kill loop has
+# already rewritten this file, and deleting ITS pointer would strand the launcher.
 if (Test-Path $runtimeFile) {
   $current = $null
   try { $current = Get-Content $runtimeFile -Raw | ConvertFrom-Json } catch { }
@@ -206,13 +274,39 @@ if (Test-Path $runtimeFile) {
 # --- Relaunch ------------------------------------------------------------------------------------
 if ($NoLaunch) { exit 0 }
 
-# The tray's watchdog may already have revived the daemon (that's the fresh build, and it's fine):
-# launching the shortcut then loses the single-instance mutex and exits harmlessly.
+# Anything still standing after the sweep is FRESH by construction (stale hosts were kill targets
+# above): a tray host someone started while we were sweeping. Launching another would only mint a
+# mutex loser that blocks forever on an "already starting" MessageBox. One supervisor, ever.
+$freshTray = @(Get-TrayHostPids -IncludeFresh)
+if ($freshTray.Count -gt 0) {
+  Write-Host "  A fresh tray host is already up (pid $($freshTray -join ', ')) - not starting a second."
+  exit 0
+}
+
+# Launch DETACHED via WMI: Win32_Process.Create parents the new tray host to WmiPrvSE, outside
+# this console's tree and job object, so closing the terminal (or the tool run that invoked this
+# script) can no longer tear the whole app down minutes later. See the header for the incident
+# this prevents. Tray-Launch.vbs is what the app shortcut points at anyway -- launching it
+# directly just removes the .lnk dependency.
+$launcherVbs = if ($trayAdapter) { Join-Path $trayAdapter.DirectoryName 'Tray-Launch.vbs' } else { $null }
+if ($launcherVbs -and (Test-Path $launcherVbs)) {
+  $spawn = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine      = "wscript.exe `"$launcherVbs`""
+    CurrentDirectory = $Root
+  } -ErrorAction SilentlyContinue
+  if ($spawn -and $spawn.ReturnValue -eq 0) {
+    Write-Host "  Relaunched the tray host, detached (WMI), so it survives this console closing."
+    exit 0
+  }
+}
+
+# Fallback: the app shortcut. Works, but the new host is parented under THIS console -- if the
+# terminal closes soon after, the app may silently die with it.
 $lnk = Get-ChildItem -LiteralPath $Root -Filter *.lnk -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($lnk) {
   Start-Process -FilePath $lnk.FullName
-  Write-Host "  Relaunched via the desktop shortcut."
+  Write-Host "  Relaunched via the desktop shortcut (WMI launch unavailable; keep this console open)."
 } else {
-  Write-Host "  No .lnk shortcut in the repo root - launch the app manually."
+  Write-Host "  No misc\Tray-Launch.vbs and no .lnk shortcut in the repo root - launch the app manually."
 }
 exit 0

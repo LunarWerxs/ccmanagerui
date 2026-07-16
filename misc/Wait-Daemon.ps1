@@ -1,12 +1,18 @@
-# misc/Wait-Daemon.ps1 — confirm the daemon came back, and PROVE it is serving the code we just built.
+# misc/Wait-Daemon.ps1 — confirm the daemon came back, PROVE it serves the code we just built,
+# and PROVE it stays up.
 #
 # WHY: the failure this guards against is silent. On 2026-07-14 a daemon served 10h39m-old code
 # while every `Rebuild.bat` run printed "Done." The build was genuinely fresh on disk; the process
 # serving it simply never restarted. Nothing in the flow ever looked, so nothing ever complained.
 #
 # So a rebuild is not "done" when the script ends. It is done when a daemon answers /api/health as
-# THIS app AND that process started AFTER we stopped the old one. The second half is the whole point:
-# a daemon that is merely UP proves nothing, because the stale one was up the entire time too.
+# THIS app AND that process started AFTER we stopped the old one AND it is still that same process,
+# still answering, a stability hold later. Each clause earned its place the hard way:
+#   * merely UP proves nothing -- the stale daemon was up the entire time too (2026-07-14);
+#   * answering ONCE proves liveness, not stability -- on 2026-07-15 this script printed "OK" one
+#     second after boot, and within ~90 seconds the daemon, two fighting tray hosts, and everything
+#     else were dead (the zero-instance incident; see Restart-Daemon.ps1's header). A supervisor
+#     race or a console teardown kills AFTER first health, so the hold is where it gets caught.
 #
 # HOW THIS SCRIPT ITSELF LIED (2026-07-15), and the rule that fixes it:
 # The old Find-Daemon accepted any responder that didn't contradict us --
@@ -26,16 +32,23 @@
 # How it knows when the rebuild started: Restart-Daemon.ps1 drops a timestamp file when it runs.
 # If that stamp is present and recent, the daemon must be younger than it. If there is no stamp
 # (someone ran this script on its own), there is nothing to compare against, so this degrades to a
-# plain "is it up?" check rather than inventing a threshold and crying wolf.
+# plain "is it up (and does it stay up)?" check rather than inventing a threshold and crying wolf.
 
 [CmdletBinding()]
 param(
-  [string]$Root = (Split-Path -Parent $PSScriptRoot),
+  # Repo root; resolved in the body, NOT here — under Windows PowerShell 5.1 a [CmdletBinding()]
+  # script evaluates param defaults BEFORE $PSScriptRoot is populated (pwsh 7 is fine either way).
+  [string]$Root = '',
   # How long to give the tray to bring the daemon back up.
-  [int]$TimeoutSeconds = 30
+  [int]$TimeoutSeconds = 30,
+  # How long the daemon must then STAY up -- same pid, still answering -- before the restart is
+  # called good. 0 skips the hold (old fire-and-forget behavior; you lose the 2026-07-15 guard).
+  [int]$StabilitySeconds = 30
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
+
+if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
 
 $name = (Get-Content (Join-Path $Root 'package.json') -Raw | ConvertFrom-Json).name
 $stampFile = Join-Path $env:TEMP "$name-restart.stamp"
@@ -109,7 +122,7 @@ if (-not $found) {
 
 $age = (Get-Date) - $found.Started
 
-# The proof that matters. Allow a couple of seconds of slack for clock/handoff jitter.
+# The freshness proof. Allow a couple of seconds of slack for clock/handoff jitter.
 if ($restartedAt -and $found.Started -lt $restartedAt.AddSeconds(-2)) {
   Write-Host ""
   Write-Host "  ! STALE DAEMON: '$name' answers on port $($found.Port) (pid $($found.Pid))," -ForegroundColor Red
@@ -119,11 +132,50 @@ if ($restartedAt -and $found.Started -lt $restartedAt.AddSeconds(-2)) {
   Remove-Item $stampFile -Force -ErrorAction SilentlyContinue
   exit 1
 }
-
 Remove-Item $stampFile -Force -ErrorAction SilentlyContinue
+
+# --- Stability hold --------------------------------------------------------------------------------
+# The daemon must keep answering -- as the SAME process -- for $StabilitySeconds before the rebuild
+# is called good. A pid change mid-hold is a failure even though something is serving: the daemon we
+# just blessed died and a second supervisor replaced it, which is exactly the fighting-supervisors
+# class (two tray hosts, a watchdog race, a console teardown) this hold exists to expose.
+if ($StabilitySeconds -gt 0) {
+  $holdStart = Get-Date
+  $misses = 0
+  while (((Get-Date) - $holdStart).TotalSeconds -lt $StabilitySeconds) {
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process -Id $found.Pid -ErrorAction SilentlyContinue)) {
+      $lived = [int]((Get-Date) - $found.Started).TotalSeconds
+      Write-Host ""
+      Write-Host "  ! UNSTABLE: '$name' (pid $($found.Pid), port $($found.Port)) DIED about $lived seconds after boot," -ForegroundColor Red
+      Write-Host "    during the $StabilitySeconds-second stability hold. Something killed it AFTER it came up:" -ForegroundColor Red
+      Write-Host "    the classic causes are a second supervisor (an old tray host's watchdog fighting the" -ForegroundColor Red
+      Write-Host "    relaunch) or the console that launched it being closed. Check ~\.$name\logs\daemon.log," -ForegroundColor Red
+      Write-Host "    look for stray '*-Tray.ps1' powershell processes, then re-run misc\Restart-Daemon.ps1." -ForegroundColor Red
+      exit 1
+    }
+    # Tolerate a transient flake (a busy box can miss one 2s probe); three consecutive misses
+    # (~6s unresponsive) while the process is still alive means it has hung -- fail loudly.
+    if ((Get-HealthService -Port $found.Port) -ne $name) {
+      $misses++
+      if ($misses -ge 3) {
+        Write-Host ""
+        Write-Host "  ! UNSTABLE: '$name' (pid $($found.Pid)) is still alive but stopped answering /api/health" -ForegroundColor Red
+        Write-Host "    on port $($found.Port) during the stability hold -- it has hung." -ForegroundColor Red
+        Write-Host "    Re-run:  powershell -ExecutionPolicy Bypass -File misc\Restart-Daemon.ps1" -ForegroundColor Yellow
+        exit 1
+      }
+    } else {
+      $misses = 0
+    }
+  }
+}
+
+$age = (Get-Date) - $found.Started
+$held = if ($StabilitySeconds -gt 0) { ", held stable for ${StabilitySeconds}s" } else { "" }
 if ($restartedAt) {
-  Write-Host ("  OK: '{0}' is live on port {1} (pid {2}), started {3:N0}s ago - it IS the fresh build." -f $name, $found.Port, $found.Pid, $age.TotalSeconds)
+  Write-Host ("  OK: '{0}' is live on port {1} (pid {2}), started {3:N0}s ago{4} - it IS the fresh build." -f $name, $found.Port, $found.Pid, $age.TotalSeconds, $held)
 } else {
-  Write-Host ("  '{0}' is live on port {1} (pid {2}), up for {3:hh\:mm\:ss}. (No restart stamp, so freshness was not asserted.)" -f $name, $found.Port, $found.Pid, $age)
+  Write-Host ("  '{0}' is live on port {1} (pid {2}), up for {3:hh\:mm\:ss}{4}. (No restart stamp, so freshness was not asserted.)" -f $name, $found.Port, $found.Pid, $age, $held)
 }
 exit 0

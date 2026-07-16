@@ -10,23 +10,40 @@
  *
  * The catch (all empirically verified 2026-07-12): on Windows neither `.unref()` nor Node/Bun
  * `detached:true` removes a child from the parent's process tree — a direct spawn is still reaped by
- * `taskkill /T`. The only reliable detach is a hand-off through a transient `cmd`:
- *   · win32:  `cmd /c start "" <command> <args>`. The transient cmd fires `start` (CreateProcess +
- *             return) then exits, re-parenting the real child to an orphan OUTSIDE the tree. The
- *             empty `""` is the MANDATORY `start` window-title placeholder — without it `start`
- *             treats the quoted, space-bearing <command> as a title and launches nothing. The detach
- *             comes from this hand-off, NOT from a spawn flag, so `detached` is false on win32.
+ * `taskkill /T`. So the launch must be handed to a DIFFERENT process creator:
+ *   · win32:  WMI `Win32_Process.Create`, driven through a transient `powershell`. The WMI service
+ *             creates the process, so it is born outside our tree (detach) AND inherits none of our
+ *             handles (see the port-leak note below). `detached` stays false on win32: the detach is
+ *             the hand-off, never a spawn flag.
  *   · POSIX:  spawn the command directly with `detached:true` (a genuine setsid session detach).
+ *
+ * WHY NOT `cmd /c start ""` (what this used to do, 2026-07-12 → 2026-07-15): it detached correctly,
+ * but CreateProcess passes bInheritHandles=TRUE, so the launched app inherited every inheritable
+ * handle the daemon held — INCLUDING THE DAEMON'S LISTENING SOCKET. The child then pinned the
+ * daemon's port for its own lifetime: restart the daemon while a portable window was open and the
+ * successor found its port still bound by the dead daemon's ghost socket and hopped to port+1.
+ * Verified 2026-07-15 with a real msedge --app window: `cmd /c start` leaked the port, WMI released
+ * it while the window stayed open. (A trivial `node -e` child does NOT reproduce it — Chromium's
+ * process fleet is what holds the handle. Use a real browser if you ever re-test this.)
+ *
+ * WMI's own quirks, so nobody re-learns them:
+ *   · Win32_Process.Create takes ONE CommandLine string, so argv is quoted back into a command line
+ *     with the CommandLineToArgvW rules ({@link quoteWinArg}) rather than passed as an array.
+ *   · It launches with a default STARTUPINFO, which means a CONSOLE program gets a VISIBLE console
+ *     window. Every caller here launches a GUI app (browser, editor); do NOT route a console program
+ *     (bun/node) through this without a Win32_ProcessStartup ShowWindow=0 — and note that setting
+ *     ShowWindow=0 can also hide a GUI app's window, which is why it isn't set here.
+ *   · If WMI is unavailable/blocked, the fallback below is the old `cmd /c start` hand-off: a leaked
+ *     port beats a window that never opens.
  *
  * CALLER RESPONSIBILITIES (this primitive is deliberately dumb about them; each caller keeps its own
  * guard where it matters):
- *   · `cmd /c start` re-parses every arg through cmd.exe: it EXPANDS `%VAR%` (even inside quotes) and
- *     STRIPS `^`. A caller routing an untrusted/confined path through the win32 hand-off must refuse
- *     `%`/`^` up front, or the child receives a different path (a confinement bypass). See RepoYeti's
- *     cmdReparseHazard.
- *   · `start` cannot reliably relaunch a spaced-path `.cmd`/`.bat` shim (its internal `cmd /c
- *     "<batch>"` hits cmd's double-quote-strip and launches nothing) — detach a real `.exe`, not a
- *     batch file. A caller holding a `.cmd` shim should launch it on its own plain `cmd /c`
+ *   · The `%VAR%`/`^` cmd re-parse hazard is GONE on the WMI path (nothing re-parses through cmd.exe)
+ *     but still applies to the fallback, so callers routing untrusted/confined paths keep refusing
+ *     `%`/`^` up front. See RepoYeti's cmdReparseHazard.
+ *   · Neither path can relaunch a spaced-path `.cmd`/`.bat` shim (WMI CreateProcess won't run a batch
+ *     file at all; `start`'s internal `cmd /c "<batch>"` hits cmd's double-quote-strip) — detach a
+ *     real `.exe`. A caller holding a `.cmd` shim should launch it on its own plain `cmd /c`
  *     (undetached) rather than route it through here.
  *   · macOS callers that want LaunchServices semantics build an `open`/`open -a` argv themselves and
  *     pass it through — `open` already hands the launch off, so the POSIX `detached:true` is a
@@ -38,9 +55,51 @@
  * (detached-spawn.test.ts). Runtime-agnostic (Bun + Node); the `.d.mts` sibling types the import for
  * the TypeScript apps. Synced from the shared kit — do not edit in an app.
  */
+
+/**
+ * Quote one argv element back into a Windows command-line token, per the CommandLineToArgvW rules
+ * every CreateProcess-based launcher parses with: backslashes are literal EXCEPT immediately before
+ * a quote, where they double and the quote is escaped. Needed because WMI takes a single string.
+ */
+export function quoteWinArg(arg) {
+  if (arg.length > 0 && !/[ \t\n\v"]/.test(arg)) return arg;
+  let out = '"';
+  for (let i = 0; i < arg.length; i++) {
+    let slashes = 0;
+    while (i < arg.length && arg[i] === "\\") {
+      slashes++;
+      i++;
+    }
+    if (i === arg.length) {
+      out += "\\".repeat(slashes * 2); // trailing run: doubled so the closing quote stays a quote
+      break;
+    }
+    if (arg[i] === '"') out += "\\".repeat(slashes * 2 + 1) + '"';
+    else out += "\\".repeat(slashes) + arg[i];
+  }
+  return out + '"';
+}
+
+/** Escape a string for a PowerShell single-quoted literal (the only metacharacter is `'`). */
+const psLiteral = (s) => `'${s.replace(/'/g, "''")}'`;
+
 export function buildDetachedSpawn(platform, argv) {
   if (platform === "win32") {
-    return { argv: ["cmd", "/c", "start", "", ...argv], detached: false };
+    const commandLine = argv.map(quoteWinArg).join(" ");
+    // WMI first (detaches AND inherits no handles); the old cmd/start hand-off only if WMI refuses,
+    // because a leaked port is a far smaller failure than a window that never opens. `exit 0` keeps
+    // a non-zero WMI ReturnValue from reaching the caller as a spawn failure once we've fallen back.
+    const ps = [
+      "$ErrorActionPreference = 'Stop'",
+      "$rc = 1",
+      `try { $rc = (Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${psLiteral(commandLine)} }).ReturnValue } catch { $rc = 1 }`,
+      `if ($rc -ne 0) { & cmd.exe /c start "" ${commandLine} }`,
+      "exit 0",
+    ].join("; ");
+    return {
+      argv: ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+      detached: false,
+    };
   }
   return { argv: [...argv], detached: true };
 }

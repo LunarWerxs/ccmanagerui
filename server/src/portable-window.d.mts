@@ -34,6 +34,29 @@ export function buildPortableSpawn(
   browserArgs: string[],
 ): PortableSpawn;
 
+/** Outer window size in device pixels (what Chromium's `--window-size` sets). */
+export interface WindowSize {
+  width: number;
+  height: number;
+}
+
+/**
+ * Chromium's key for a saved app-window placement (`host + "_" + path`). NOTE it carries
+ * neither the port nor the query string, so windows differing only by `?query=` share one
+ * saved geometry — vary the PATH to give a window its own. Null for an unparseable URL.
+ */
+export function appWindowPlacementKey(url: string): string | null;
+
+/**
+ * True when Chromium has already stored bounds for this window in `profileDir` — i.e. the
+ * user has moved or resized it. False for a never-opened window, an unreadable profile, or
+ * a size we merely imposed via `--window-size` (Chromium does not persist those).
+ * Handles both storage forms: the flat key, and the nested dicts Chromium writes a dotted
+ * key as (prefs go by dotted path: `localhost_/focus/p1.main` lands under
+ * `["localhost_/focus/p1"]["main"]`).
+ */
+export function hasRememberedBounds(profileDir: string | undefined, url: string): boolean;
+
 export interface PortableWindowOptions {
   /**
    * Dedicated Chromium profile dir for the window (`--user-data-dir`), so the
@@ -41,6 +64,12 @@ export interface PortableWindowOptions {
    * convention: `<configDir>/portable-profile`, a sibling of runtime.json.
    */
   profileDir?: string;
+  /**
+   * First-run geometry: the size to open a window Chromium has never seen. Ignored once
+   * the user has sized the window themselves, so their resize is never undone. Omit to
+   * take Chromium's default, which is close to the full work area.
+   */
+  initialSize?: WindowSize;
 }
 
 /**
