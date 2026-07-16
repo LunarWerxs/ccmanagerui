@@ -85,7 +85,7 @@ import {
   writeInstanceInfo,
 } from './instance'
 import { initFileLogging } from './log-file.mjs'
-import { isLoopbackOrigin, loopbackGuard } from './loopback-guard'
+import { isLoopbackOrigin, loopbackGuard } from './loopback-guard.mjs'
 import {
   getMonitorSettings,
   listMonitorAccounts,
