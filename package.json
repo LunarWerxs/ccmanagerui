@@ -12,7 +12,7 @@
     "dev:server": "bun run --cwd server dev",
     "dev:web": "bun run --cwd web dev",
     "build": "bun run --cwd web build",
-    "compile": "bun build --compile --minify --outfile=tmp/ccmanagerui server/src/main.ts",
+    "compile": "bun build --compile --outfile=tmp/ccmanagerui server/src/main.ts",
     "start": "bun run --cwd server start",
     "mcp": "bun server/src/mcp.ts",
     "check": "biome check . && bun run --cwd web check:i18n && bun run check:kit",

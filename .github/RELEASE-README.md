@@ -12,10 +12,19 @@ to the executable.
 - **macOS / Linux**: `./ccmanagerui`
 
 The daemon serves the UI and API on <http://localhost:7787> (it hops to the next free port if
-7787 is busy, and prints the real URL). State lives in `~/.ccmanagerui/`.
+7787 is busy, and prints the real URL). State (the run queue, settings, saved accounts) lives in
+`~/.ccmanagerui/data/`. Your Claude Code **sessions/transcripts are not stored here** — they're
+read live from `~/.claude/projects`, so they show up regardless of which build you run.
 
 `./ccmanagerui --version` prints the version; `--mcp` runs the MCP stdio server for
-MCP-speaking agents (point your `mcpServers` command at this executable with the `--mcp` arg).
+MCP-speaking agents — point your `mcpServers` config's `command` at this executable's full path
+with `--mcp` as its arg (no Bun needed), e.g. `{ "command": "C:\\path\\to\\CCManagerUI.exe",
+"args": ["--mcp"] }`.
+
+> **Coming from a `git` checkout?** A source checkout keeps its database under the repo's
+> `server/data/`; this packaged build uses `~/.ccmanagerui/data/` instead, so it starts with an
+> empty queue. Your sessions are unaffected (see above). To carry the old queue/accounts/settings
+> over, point the binary at the old file: set `CCMANAGERUI_DB=<repo>/server/data/ccmanagerui.db`.
 
 ## Requirements
 

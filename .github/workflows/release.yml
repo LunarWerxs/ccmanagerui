@@ -118,12 +118,18 @@ jobs:
             out/*.zip
             out/*.tar.gz
           if-no-files-found: error
+          # These are large binaries only consumed by the smoke + release jobs in THIS run
+          # (or nobody, on a workflow_dispatch validation run). No reason to keep them 90 days.
+          retention-days: 3
 
-  # Boot each bundle on REAL hardware for its OS: --version answers, /api/health reports
-  # service+distribution, and the sidecar SPA serves. This is the step that catches the
-  # compiled-only runtime bugs a green compile can't.
+  # Boot each bundle and assert --version + /api/health + served SPA. This catches the
+  # compiled-only runtime bugs a green compile can't (virtual import.meta.dir paths, the
+  # implicit-serve trap). Native runners for x64 Linux / Windows / arm64 macOS; linux-arm64 is
+  # booted under QEMU on the x64 runner (no free native ARM-Linux runner). darwin-x64 (Intel mac)
+  # is the ONE target that stays build-only-verified: GitHub retired its Intel macOS runners, so
+  # there is no honest way to boot it in CI — a documented, deliberate gap, not a silent one.
   smoke:
-    name: smoke (${{ matrix.os }})
+    name: smoke (${{ matrix.target }})
     needs: build
     strategy:
       fail-fast: false
@@ -132,6 +138,10 @@ jobs:
           - os: ubuntu-latest
             target: linux-x64
             bin: ccmanagerui
+          - os: ubuntu-latest
+            target: linux-arm64
+            bin: ccmanagerui
+            qemu: true
           - os: windows-latest
             target: windows-x64
             bin: CCManagerUI.exe
@@ -145,7 +155,14 @@ jobs:
           name: release-${{ matrix.target }}
           path: out
 
-      - name: Unpack and boot the real binary
+      # linux-arm64 runs inside an arm64 container via binfmt/QEMU emulation on the x64 runner.
+      - name: Set up QEMU (arm64 emulation)
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Unpack the bundle
         shell: bash
         run: |
           cd out
@@ -156,12 +173,20 @@ jobs:
             *) tar -xzf "$bundle" ;;
           esac
           dir="${bundle%.zip}"; dir="${dir%.tar.gz}"
-          cd "$dir"
-          chmod +x "${{ matrix.bin }}" 2>/dev/null || true
-          "./${{ matrix.bin }}" --version
+          echo "BUNDLE_DIR=out/$dir" >> "$GITHUB_ENV"
+
+      # The actual boot+assert, factored so native and QEMU paths run identical checks.
+      - name: Boot + assert (native)
+        if: '!matrix.qemu'
+        shell: bash
+        env:
+          BIN: ${{ matrix.bin }}
+        run: |
+          cd "$BUNDLE_DIR"
+          chmod +x "$BIN" 2>/dev/null || true
+          "./$BIN" --version
           export CCMANAGERUI_HOME="$RUNNER_TEMP/ccm-smoke-home"
-          PORT=7797 "./${{ matrix.bin }}" > daemon.out 2>&1 &
-          DAEMON_PID=$!
+          PORT=7797 "./$BIN" > daemon.out 2>&1 &
           ok=""
           for _ in $(seq 1 40); do
             if curl -sf http://127.0.0.1:7797/api/health > health.json 2>/dev/null; then ok=1; break; fi
@@ -172,7 +197,16 @@ jobs:
           grep -q '"service":"ccmanagerui"' health.json
           grep -q '"distribution":"compiled"' health.json
           curl -sf http://127.0.0.1:7797/ | grep -qi '<!doctype html'
-          kill $DAEMON_PID 2>/dev/null || true
+
+      - name: Boot + assert (arm64 under QEMU)
+        if: matrix.qemu
+        shell: bash
+        run: |
+          # arm64 Debian container (binfmt routes it through QEMU). --version proves the emulated
+          # binary at least loads + runs; a full daemon boot under QEMU is slow/flaky, so the arm64
+          # leg asserts the launch, and the native x64 leg covers the serving behavior.
+          docker run --rm --platform linux/arm64 -v "$PWD/$BUNDLE_DIR:/app" -w /app \
+            arm64v8/debian:stable-slim ./ccmanagerui --version
 
   release:
     name: draft the GitHub release
@@ -187,11 +221,18 @@ jobs:
           path: out
 
       # DRAFT on purpose: the maintainer writes the Highlights prose and publishes by hand,
-      # consistent with the existing releases.
+      # consistent with the existing releases. IDEMPOTENT: if a release for this tag already
+      # exists (e.g. a re-pushed/moved tag during pipeline iteration), delete it first so a retry
+      # UPDATES rather than piling up duplicate orphaned drafts. --cleanup-tag is intentionally NOT
+      # used — the tag itself is managed by the push that triggered us, not by this job.
       - name: Create draft release with binaries attached
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists — deleting it so this run replaces it"
+            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
+          fi
           gh release create "$GITHUB_REF_NAME" out/*.zip out/*.tar.gz \
             --repo "$GITHUB_REPOSITORY" \
             --title "CC Manager UI ${GITHUB_REF_NAME#v}" \
