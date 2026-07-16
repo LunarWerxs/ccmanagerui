@@ -8,6 +8,18 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Fixed
 
+- **A run could be stuck "running" forever after a crash — and cancelling it could kill an unrelated
+  program.** When CC Manager UI restarts, it re-adopts runs that outlived it, and it is careful not
+  to trust a dead runner's recorded process id (Windows recycles those numbers, so it may now belong
+  to something else entirely). That care never actually happened: the liveness probe searched running
+  processes for the run's spec file *by command line*, and the search itself carried that text in its
+  own command line — so it always found itself and always answered "still alive". Every Windows
+  reattach therefore trusted a stale id. If that id had been recycled by a live program, the run
+  waited on it forever (a session stuck "busy" with nothing running), and pressing Cancel would have
+  killed that innocent program. The probe now excludes itself, and the tail loop no longer re-adopts
+  the id the reattach deliberately refused — it fails the run cleanly instead, with the work it did
+  manage still on disk.
+
 - **A 529 overload was treated as your rate limit, so the run died instead of retrying.** `529
   Overloaded` means Anthropic's servers are saturated and it clears in seconds; a session limit
   means your own 5-hour allowance is spent and only time fixes it. Both wear the word "limit", and

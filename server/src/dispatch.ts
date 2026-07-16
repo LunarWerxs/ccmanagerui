@@ -348,6 +348,17 @@ interface ActiveEntry {
   canceled: boolean
   childPid: number | null
   killed: boolean
+  /**
+   * Is the runner behind this entry verifiably OURS and alive — i.e. is its status file a live
+   * record we may take a child pid from?
+   *
+   * True for a run we just spawned. For a reattach it is isRunnerAlive()'s answer, and when that is
+   * false the status file is a leftover from a dead process: the pid inside it is just a number,
+   * and on Windows that number gets recycled. Trusting it then is how a run gets stranded
+   * 'running' forever (the recycled pid answers "alive", so the child-died grace never fires and no
+   * marker is ever coming) — or worse, how a cancel killTree()s a stranger's process.
+   */
+  runnerLive: boolean
 }
 
 const active = new Map<string, ActiveEntry>()
@@ -461,7 +472,13 @@ async function isRunnerAlive(id: string): Promise<boolean> {
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          `@(Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%${needle}%'").Count`,
+          // `AND ProcessId <> $PID` is load-bearing, not defensive tidiness: the needle is embedded
+          // in THIS powershell's own CommandLine (it IS the LIKE pattern), so without the exclusion
+          // the query always matches itself and the count is never zero. That made isRunnerAlive
+          // return true for every reattach on Windows — silently defeating reattachRuns's stale-pid
+          // guard AND its "runner gone, nothing to replay → fail" path. (The POSIX branch below
+          // can't self-match: `ps -eo args=` prints `ps`'s own args, which don't contain the needle.)
+          `@(Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%${needle}%' AND ProcessId <> $PID").Count`,
         ],
         { stdout: 'pipe', stderr: 'ignore' },
       )
@@ -595,8 +612,12 @@ async function tailRun(id: string, entry: ActiveEntry): Promise<void> {
     if (entry.childPid === null) {
       const st = readStatus(id)
       if (st) {
+        // The file EXISTING is what proves the runner launched (step 5), regardless of whether we
+        // may trust the pid inside it — so record that either way.
         sawStatus = true
-        if (typeof st.childPid === 'number') {
+        // ...but only adopt the pid while the runner is live. reattachRuns deliberately refuses a
+        // dead runner's pid; re-reading the same stale file here would hand it straight back.
+        if (entry.runnerLive && typeof st.childPid === 'number') {
           entry.childPid = st.childPid
           db.query('update queue_items set pid = ? where id = ?').run(st.childPid, id)
           publish(id, {
@@ -659,9 +680,20 @@ async function tailRun(id: string, entry: ActiveEntry): Promise<void> {
       await killTree(entry.childPid)
     }
 
-    // 4. Child gone without a terminal marker (runner crashed) → fail after a short grace so a
-    //    marker already in flight still wins.
-    if (entry.childPid !== null && !isAlive(entry.childPid)) {
+    // 4. Nothing left that could still finish this run → fail after a short grace, so a marker
+    //    already in flight still wins. Two ways to arrive here:
+    //      · we were watching a child and it died without writing a terminal marker (runner crashed);
+    //      · we reattached onto a runner that was ALREADY gone, so there is no child to watch at
+    //        all — the log we replayed in step 2 is everything that will ever exist, and if it held
+    //        a marker we returned there. This branch is what reattachRuns means by "fails after its
+    //        grace"; it used to work only because step 1 re-adopted the dead runner's stale pid and
+    //        step 4 then found it dead, which is the same read that strands the run outright when
+    //        the pid has been recycled by something still alive.
+    //    A fresh run is neither: runnerLive is true and its child pid simply hasn't appeared yet
+    //    (step 5's START_GRACE covers a runner that never launches).
+    const nothingLeftToWatch =
+      entry.childPid !== null ? !isAlive(entry.childPid) : !entry.runnerLive
+    if (nothingLeftToWatch) {
       deadFor += POLL_MS
       if (deadFor > DEAD_GRACE_MS) {
         // Say WHY. exit -1 is our own synthetic code for "we lost the process", not something
@@ -806,6 +838,9 @@ export async function dispatchItem(item: QueueItem): Promise<void> {
     canceled: false,
     childPid: null,
     killed: false,
+    // We are spawning the runner ourselves right now, so the status file it is about to write is
+    // ours by construction — there is no stale-pid question for a fresh run.
+    runnerLive: true,
   }
   active.set(item.id, entry) // SYNC: before the first await
 
@@ -893,6 +928,7 @@ export async function reattachRuns(): Promise<void> {
       canceled: false,
       childPid,
       killed: false,
+      runnerLive: runnerAlive,
     }
     active.set(id, entry)
 

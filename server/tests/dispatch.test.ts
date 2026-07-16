@@ -361,3 +361,51 @@ test('the retry sweep ignores ordinary queued items — it only fires its own re
   await dispatch.dispatchDueRetries()
   expect(statusOf(item.id)?.status).toBe('queued')
 })
+
+// --- a dead runner's pid is a number, not a handle ---------------------------------------------
+//
+// reattachRuns refuses to trust a dead runner's stored childPid, because on Windows that number
+// gets recycled: comment at its own call site says a recycled pid means "stuck run, or a cancel
+// force-killing an innocent process". tailRun then re-read the same status file and adopted the pid
+// anyway, undoing it milliseconds later. This pins the refusal end to end.
+//
+// The fixture IS the race, deterministically: process.pid is guaranteed alive and guaranteed not to
+// be our `claude` child — exactly the shape of a recycled pid. No real collision needed.
+test('a reattach onto a dead runner never adopts its stale child pid', async () => {
+  const item = makeItem()
+  db.query("update queue_items set status = 'running' where id = ?").run(item.id)
+  writeFileSync(
+    join(RUN_LOG_DIR, `${item.id}.status.json`),
+    JSON.stringify({ runnerPid: process.pid, childPid: process.pid, state: 'running', code: null }),
+  )
+  // Real output but NO terminal marker: the runner died before it could write one.
+  writeFileSync(
+    join(RUN_LOG_DIR, `${item.id}.stream.jsonl`),
+    `${JSON.stringify({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'partial work' }] },
+    })}\n`,
+  )
+
+  // No <id>.spec.json process exists, so isRunnerAlive() is false — the runner is gone.
+  await dispatch.reattachRuns()
+
+  // It must reach a terminal state. Before the fix it never did: the adopted pid answered "alive"
+  // forever, so the child-died grace never fired and no marker was ever coming — the row sat
+  // 'running' for good, which is a permanent false "session is busy" in the UI.
+  expect(await waitForStatus(item.id, 'failed')).toBe('failed')
+
+  // And the foreign pid must never have been recorded as ours — that column is what cancelItem
+  // would have handed to killTree(), i.e. this test process.
+  const row = db
+    .query<{ pid: number | null }, [string]>('select pid from queue_items where id = ?')
+    .get(item.id)
+  expect(row?.pid).toBeNull()
+
+  // The work it did manage is still recoverable, not silently dropped.
+  const events = dispatch.getRunEvents(item.id)
+  expect(events.some((e) => e.text.includes('partial work'))).toBe(true)
+  // Past bun's 5s default: this deliberately waits out the real DEAD_GRACE_MS (4s) on top of the
+  // runner-liveness probe, because the grace is the thing under test — a marker still in flight has
+  // to be able to win before we call the run lost.
+}, 20_000)
