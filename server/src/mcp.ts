@@ -129,7 +129,9 @@ export const TOOLS: McpEngineTool[] = [
   {
     name: 'list_queue',
     description:
-      'List every queue item (queued/running/completed/failed/rate_limited/canceled), in run order.',
+      // rate_limited vs overloaded is the distinction an agent reading this most needs: the first is
+      // YOUR quota (wait for the reset), the second is Anthropic's servers (already auto-retried).
+      'List every queue item (queued/running/completed/failed/rate_limited/overloaded/canceled), in run order. rate_limited = the account hit its own session/weekly cap; overloaded = a 529 that outlasted the automatic retries.',
     inputSchema: S(),
     run: () => api('/api/queue'),
   },

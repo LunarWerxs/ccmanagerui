@@ -2,41 +2,61 @@
 
 The CLI-instances / usage-check / auto-resume-monitor feature set is built, unit-tested, and wired
 end to end (see `CHANGELOG.md` "Unreleased"). This file lists ONLY the parts that need a human,
-because they require either a real rate-limit event (which cannot be triggered on demand safely) or
-an OAuth login (which an AI must never perform). Nothing here blocks using the feature today.
+because they require either real time across a real rate-limit window (which cannot be triggered on
+demand safely) or an OAuth login (which an AI must never perform). Nothing here blocks using the
+feature today.
 
-## 1. Confirm the exact rate-limit signature against a REAL event (plan Q4)
+**Item 1 is now closed** — by real captured events (2026-07-16), and it turned up a live bug rather
+than the missing phrase it was expecting. What is left is one observation that needs a real 5-hour
+window, and one login only you can perform.
 
-**Status: heuristic in place; one live confirmation outstanding.**
+## 1. ~~Confirm the exact rate-limit signature against a REAL event~~ — CLOSED 2026-07-16
 
-Detection does NOT depend on new guesswork. It reuses the signature list already shipping in
-`server/src/dispatch.ts` (`RATE_LIMIT_PATTERNS` + `looksRateLimited`), which finalizes a rate-limited
-dispatch with the structured `rate_limited` queue status. The monitor keys off that status. So the
-"detection" brick is done and self-consistent.
+**Status: closed by real events. No longer needs a human.**
 
-What an AI cannot do is force a REAL rate limit to capture the exact `stream-json` error type/message
-(and a real interactive transcript tail) to confirm the patterns match current wording and to tell a
-5-hour-window limit apart from a weekly limit if the text differs.
+Two real notices were captured off this machine and are now the fixtures the detector is tested
+against (`tests/rate-limit-signal.test.ts`):
 
-**To close it:** next time a dispatched run (or an interactive session) actually hits a limit, grab
-the tail of its run log (`~/.ccmanagerui`-side `run-logs/<id>.stream.jsonl`, the `{"__dispatch":"stderr",…}`
-marker) and the transcript tail, paste the real wording, and if it is not already matched by
-`RATE_LIMIT_PATTERNS`, add the missing phrase there. That is a one-line change if needed.
+- a real 5-hour wall, seen in 7 transcripts:
+  `You've hit your session limit · resets 9:10am (America/Chicago)`
+- a real 529, from a dispatched run's own `run_events`:
+  `API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a
+  moment. If it persists, check https://status.claude.com.`
+
+The confirmation did NOT find a missing phrase, which is what this item expected. It found the
+opposite problem: the one pattern list matched **both** of those, so a 529 — Anthropic's servers
+being saturated for a few seconds — was finalized `rate_limited` and parked against a 5-hour reset
+that was never coming. Detection now lives in `server/src/rate-limit-signal.ts` (`classifyLimit`),
+which sorts a QUOTA wall from a TRANSIENT overload; `dispatch.ts` retries the latter and only parks
+the former. A weekly vs 5-hour limit still reads as one `quota` kind, which is correct — the monitor
+schedules against a live usage read, never against the notice's wording.
+
+The old names this file used to point at (`RATE_LIMIT_PATTERNS`, `looksRateLimited`) no longer
+exist.
 
 ## 2. Full end-to-end auto-resume test against a real 5-hour limit (plan item 19)
 
 **Status: logic unit-tested; live end-to-end needs a real limit + real time.**
 
-The state machine is covered by `tests/monitor.test.ts` (enabled gate, no-account → needs_human,
-idempotency, per-account override, settings). The usage gate and the scheduled `--resume` dispatch
-were exercised against the running daemon, but a TRUE end-to-end ("session dies on a 5-hour limit
-while I sleep, wakes and finishes after the reset, and is correctly BLOCKED when the weekly cap is
-maxed") can only be observed across a real limit window.
+The state machine is covered by `tests/monitor.test.ts` (enabled gate, ambient usage gate,
+weekly-maxed → blocked, idempotency, per-account override, settings, and transcript-discovered
+stops). A TRUE end-to-end — "session dies on a 5-hour limit while I sleep, wakes and finishes after
+the reset, and is correctly BLOCKED when the weekly cap is maxed" — can still only be observed
+across a real limit window.
 
 **To close it:** turn the monitor on (Settings → Auto-resume monitor, or `set_monitor {enabled:true}`),
-let a real dispatched run hit a 5-hour limit with weekly under 100%, and confirm a resume is scheduled
-for just after the reset and fires. Then repeat with weekly at/over 100% and confirm it is held with
+let a real run hit a 5-hour limit with weekly under 100%, and confirm a resume is scheduled for just
+after the reset and fires. Then repeat with weekly at/over 100% and confirm it is held with
 "blocked: weekly maxed" instead of resuming.
+
+Two things narrowed since this was written:
+
+- The monitor no longer only sees runs it dispatched. It also FINDS sessions stopped at a limit by
+  reading recent transcripts (`server/src/rate-limit-discovery.ts`), so a session started in a
+  terminal is resumable too — those rows carry a "Found" badge. Measured on this machine
+  2026-07-16: 7 transcripts carried a real limit notice in 12h, 2 were still stopped at one.
+- A 529 no longer reaches this path at all (see item 1), so an overload can't be mistaken for the
+  5-hour event you are trying to observe.
 
 ## 3. Sign the CLI instances in (`/login`): user-only by design
 
