@@ -59,6 +59,13 @@ jobs:
       - name: Guardrail (self-matching WMI query)
         run: bun .arkitect/your-checks/code/wmi-commandline-query-self-match.mjs
 
+      # Fails if a vendored server lib's runtime .mjs and its hand-maintained .d.mts disagree on
+      # value exports either way: a .mjs export the .d.mts omits (TS2305 on import — exactly the
+      # kit-sync that shipped RepoYeti v0.6.0 with red CI), or a .d.mts declaration the .mjs lacks
+      # (tsc trusts it, so it typechecks and is `undefined` at runtime). See the check's header.
+      - name: Guardrail (kit lib .mjs/.d.mts export drift)
+        run: bun .arkitect/your-checks/code/kit-lib-type-drift.mjs
+
       - name: Build (web SPA)
         run: bun run build
 
