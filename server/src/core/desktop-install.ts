@@ -98,7 +98,7 @@ async function msixAppxProbe(): Promise<boolean> {
         '-Command',
         '(Get-AppxPackage -Name Claude).PackageFamilyName',
       ],
-      { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' },
+      { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', windowsHide: true },
     )
     const timeout = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), 8000)

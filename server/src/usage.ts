@@ -291,11 +291,16 @@ export async function checkUsage(opts: UsageCheckOpts = {}): Promise<UsageSnapsh
 
   let proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
   try {
+    // windowsHide matters more here than at the other spawn sites: resolveClaudeExe() falls back to
+    // `claude.cmd` when the packaged claude.exe is absent, and a .cmd runs THROUGH cmd.exe. This
+    // refresh is also periodic, so on a machine without the .exe an unhidden spawn is a CMD window
+    // that flashes on its own schedule, with no user action to blame it on.
     proc = Bun.spawn([resolveClaudeExe(), '-p', '/usage'], {
       env,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
+      windowsHide: true,
     }) as Bun.Subprocess<'ignore', 'pipe', 'pipe'>
   } catch {
     return parseUsageOutput('', label) // never even launched → no data

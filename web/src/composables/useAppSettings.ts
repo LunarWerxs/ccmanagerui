@@ -17,6 +17,11 @@ const autoRefresh = ref(true)
 const autoRefreshIntervalMin = ref(15)
 const showDesktopInstances = ref(true)
 const showCliInstances = ref(true)
+// '' = auto-detect (server/src/transcript-open.ts picks the first installed editor it knows).
+const transcriptEditor = ref('')
+// Server-derived echo: what will ACTUALLY open a transcript once auto-detect has run and an
+// override pointing at nothing has been discarded. Read-only here; never sent back in a patch.
+const transcriptEditorResolved = ref('')
 const loaded = ref(false)
 
 function absorb(s: api.AppSettings): void {
@@ -24,6 +29,8 @@ function absorb(s: api.AppSettings): void {
   autoRefreshIntervalMin.value = s.autoRefreshIntervalMin
   showDesktopInstances.value = s.showDesktopInstances
   showCliInstances.value = s.showCliInstances
+  transcriptEditor.value = s.transcriptEditor
+  transcriptEditorResolved.value = s.transcriptEditorResolved
   loaded.value = true
 }
 
@@ -36,8 +43,10 @@ async function load(): Promise<void> {
   }
 }
 
-/** Apply a patch and absorb the server's echo. Returns false if the write failed. */
-async function update(patch: Partial<api.UsageSettings>): Promise<boolean> {
+/** Apply a patch and absorb the server's echo. Returns false if the write failed. Widened past
+ *  UsageSettings (rather than a second copy of this function) so transcriptEditor round-trips
+ *  through the exact same load/absorb contract as every other setting here. */
+async function update(patch: Partial<api.AppSettings>): Promise<boolean> {
   try {
     absorb(await api.updateSettings(patch))
     return true
@@ -52,6 +61,8 @@ export function useAppSettings() {
     autoRefreshIntervalMin,
     showDesktopInstances,
     showCliInstances,
+    transcriptEditor,
+    transcriptEditorResolved,
     loaded,
     load,
     update,

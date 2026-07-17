@@ -80,6 +80,14 @@ create table if not exists monitor_accounts (
   account_id text primary key,
   enabled    integer not null default 1
 );
+
+-- User's own "done" mark on a session (distinct from Claude Desktop's own isArchived, which is
+-- read-only metadata scanned from disk). Mark only: it must never filter a session out of a list.
+create table if not exists session_marks (
+  session_id text primary key,
+  done       integer not null default 0,
+  updated_at integer not null
+);
 `)
 
 // --- additive migrations ----------------------------------------------------
@@ -204,6 +212,8 @@ const DEFAULT_SETTINGS: Record<string, string> = {
   portable_mode: '0',
   hide_tray_icon: '0',
   connections_sync: '',
+  // '' = auto-detect an editor (server/src/transcript-open.ts); set to an absolute path to override.
+  transcript_editor: '',
   // Auto-resume monitor (Feature E) — OFF by default (it auto-prompts sessions while you sleep).
   monitor_enabled: '0',
   monitor_max_attempts: '3',

@@ -143,6 +143,13 @@ function declaredValueExports(file) {
 export const audit = {
   id: "kit-lib-type-drift",
   title: "A vendored lib's .mjs and .d.mts must agree on value exports",
+  category: "custom",
+  domain: "code",
+  requires: {},
+  // Gating: this is the check that exists BECAUSE a kit sync once shipped a runtime export with no
+  // matching declaration and CI went red for three commits before anyone read the log (see header).
+  // A non-gating drift check would have let that exact regression back in silently.
+  gating: true,
   run({ root = process.cwd() } = {}) {
     const findings = [];
     const checked = [];

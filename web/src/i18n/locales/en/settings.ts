@@ -18,6 +18,13 @@ export default {
   hideTrayIconHint:
     'Removes the CC Manager UI icon from the notification area. CC Manager UI keeps running in the background - launch the shortcut again to reopen the UI, or come back here to turn the icon back on.',
   hideTrayIconToastFailed: 'Failed to save hide tray icon setting.',
+  transcriptEditorLabel: 'Transcript editor',
+  transcriptEditorHint:
+    'Absolute path to the editor "Open the session file" opens .jsonl transcripts with. Empty auto-detects VS Code, Cursor, Notepad++ or Sublime Text (in that order), falling back to Notepad - never the OS "pick an app" dialog.',
+  transcriptEditorPlaceholder: 'Auto-detect',
+  transcriptEditorToastFailed: 'Failed to save transcript editor setting.',
+  transcriptEditorResolved: 'Opens with {editor}',
+  transcriptEditorNotFound: "That path doesn't exist. Using {editor}",
 
   // usage section
   usage: 'Usage',

@@ -1,12 +1,12 @@
 import { db } from './db'
-import { instanceSessionMap } from './instance-sessions'
+import { sessionMetaMap } from './instance-sessions'
 import {
   decodeProjectKey,
   eventToTailEvents,
   listTranscriptFiles,
   type TranscriptFile,
 } from './transcript'
-import type { QueueStatus, SessionSummary } from './types'
+import type { ArchivedScope, QueueStatus, SessionSummary } from './types'
 
 function toEpoch(ts: unknown): number | null {
   if (typeof ts !== 'string') return null
@@ -142,22 +142,49 @@ function queueStatusMap(): Map<string, QueueStatus> {
   return map
 }
 
+/** Map of session_id -> the user's own "done" mark (session_marks table). */
+function doneMarkMap(): Map<string, boolean> {
+  const rows = db
+    .query<{ session_id: string; done: number }, []>('select session_id, done from session_marks')
+    .all()
+  const map = new Map<string, boolean>()
+  for (const r of rows) map.set(r.session_id, !!r.done)
+  return map
+}
+
 /**
  * List the newest transcripts, optionally scoped to one instance BEFORE the cap:
  * `instance` = an instance dir name, "default" (non-isolated install), or "other"
  * (unmapped, i.e. plain CLI). Filtering first matters — with thousands of transcripts
  * in the shared store, a quiet instance's sessions would never crack the newest-200.
+ *
+ * `archived` gets the same before-the-cap treatment as `instance`, and for the same
+ * reason: a window full of archived rows would otherwise starve the newest-N of live ones,
+ * and 'only' would surface almost nothing if the cap ran first.
+ * Archived is Claude Desktop's own read-only flag; it never depends on `done`, which is a
+ * mark only and must never filter a session out of this list.
  */
-export async function listSessions(limit = 200, instance?: string): Promise<SessionSummary[]> {
-  const imap = instanceSessionMap()
+export async function listSessions(
+  limit = 200,
+  instance?: string,
+  archived: ArchivedScope = 'hide',
+): Promise<SessionSummary[]> {
+  const mmap = sessionMetaMap()
   let files = listTranscriptFiles()
   if (instance) {
     files = files.filter((f) =>
-      instance === 'other' ? !imap.has(f.session_id) : imap.get(f.session_id) === instance,
+      instance === 'other'
+        ? !mmap.has(f.session_id)
+        : mmap.get(f.session_id)?.instance === instance,
     )
+  }
+  if (archived !== 'include') {
+    const want = archived === 'only'
+    files = files.filter((f) => !!mmap.get(f.session_id)?.archived === want)
   }
   files = files.sort((a, b) => b.mtime_ms - a.mtime_ms).slice(0, limit)
   const qmap = queueStatusMap()
+  const dmap = doneMarkMap()
 
   const out = await Promise.all(
     files.map(async (tf): Promise<SessionSummary> => {
@@ -176,7 +203,9 @@ export async function listSessions(limit = 200, instance?: string): Promise<Sess
         size_bytes: tf.size_bytes,
         transcript_path: tf.path,
         queue_status: qmap.get(tf.session_id) ?? null,
-        instance: imap.get(tf.session_id) ?? null,
+        instance: mmap.get(tf.session_id)?.instance ?? null,
+        archived: mmap.get(tf.session_id)?.archived ?? false,
+        done: dmap.get(tf.session_id) ?? false,
       }
     }),
   )
@@ -189,6 +218,8 @@ export async function getSession(sessionId: string): Promise<SessionSummary | nu
   if (!tf) return null
   const m = await scanMeta(tf)
   const qmap = queueStatusMap()
+  const dmap = doneMarkMap()
+  const meta = sessionMetaMap().get(tf.session_id)
   return {
     session_id: tf.session_id,
     title: m.title,
@@ -203,6 +234,8 @@ export async function getSession(sessionId: string): Promise<SessionSummary | nu
     size_bytes: tf.size_bytes,
     transcript_path: tf.path,
     queue_status: qmap.get(tf.session_id) ?? null,
-    instance: instanceSessionMap().get(tf.session_id) ?? null,
+    instance: meta?.instance ?? null,
+    archived: meta?.archived ?? false,
+    done: dmap.get(sessionId) ?? false,
   }
 }

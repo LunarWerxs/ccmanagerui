@@ -81,7 +81,17 @@ export interface SessionSummary {
   /** Claude Desktop instance the session ran in: an `~/.claude-instances` dir name,
    *  "default" for the non-isolated install, or null for plain CLI / unknown. */
   instance: string | null
+  /** Claude Desktop's own archive flag, read from its local_*.json metadata. False for plain
+   *  CLI / unmapped sessions (there is no metadata file to carry the flag). */
+  archived: boolean
+  /** The user's own mark, stored in our `session_marks` table. Mark only: never filters a list. */
+  done: boolean
 }
+
+/** How a session list treats Claude Desktop's archive flag. 'hide' is the default because archived
+ *  is the large majority of a real store, so including them buries the live work; 'only' exists
+ *  because that same ratio makes archived sessions impossible to find in a mixed list. */
+export type ArchivedScope = 'hide' | 'include' | 'only'
 
 /** One displayable turn from a transcript tail, after the hide-"thinking" filter. */
 export interface TailEvent {
@@ -181,6 +191,17 @@ export interface PortableModeSettings {
   /** Hide the tray's NotifyIcon (the daemon keeps running; the tray keeps re-reading this
    *  live so re-enabling it here restores the icon without a restart). */
   hideTrayIcon: boolean
+}
+
+/** Transcript-file-open setting (server/src/transcript-open.ts). */
+export interface TranscriptSettings {
+  /** Absolute path to an editor; '' = auto-detect. */
+  transcriptEditor: string
+  /** Read-only echo: the editor that will ACTUALLY open a transcript, after auto-detect and after
+   *  discarding an override that points at nothing. Derived, never stored; POST ignores it. Without
+   *  showing this, a typo'd override is indistinguishable from a working one (the open silently
+   *  no-ops), which is the whole reason a plain path field is safe to keep. */
+  transcriptEditorResolved: string
 }
 
 // --- usage-check subsystem (Feature B) --------------------------------------

@@ -6,7 +6,40 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-17
+
 ### Fixed
+
+- **"Filter by instance" opened nothing and froze the whole app.** Clicking it appeared to do
+  nothing, and then no other control responded until you pressed Escape. Both halves were the same
+  bug. reka positions a popup by walking the Vue component tree for the nearest popper root, and the
+  menu was wrapped AROUND its own tooltip, so the tooltip claimed the anchor and the menu's popper
+  never got one. The menu really did open; it just rendered at floating-ui's unpositioned
+  `translate(0, -200%)`, which is off-screen above the window. Being a modal menu, it also set
+  `pointer-events: none` on the page while it was "open", which is what made everything else stop
+  responding. The popper root now lives inside the tooltip, so each anchors to its own element. The
+  advanced-search popover next to it was broken in exactly the same way and had simply been failing
+  in silence, because a popover is not modal and so froze nothing; it is fixed too. A repo guardrail
+  now fails the build on that nesting, and it is tested against both the broken and the fixed shape,
+  because the previous guard for this encoded the wrong cause and crashed on import without ever
+  running.
+- **"Open the session file" asked which app to use instead of just opening.** `.jsonl` has no file
+  association on a stock Windows machine, so handing the path to the OS default handler made Windows
+  pop its "How do you want to open this file?" picker. The app now names an editor itself: it uses
+  the first one it finds (VS Code, Cursor, Notepad++, Sublime) and falls back to Notepad, which
+  always exists, so the picker can never appear. macOS opens the default text editor. A new
+  **Transcript editor** setting overrides the choice, and a path that points at nothing falls back to
+  auto-detect rather than leaving the button silently dead.
+- **Stray console windows could flash on an ordinary click.** Spawning a console program on Windows
+  allocates a console unless the spawn says otherwise, and nothing here said otherwise. It stayed
+  invisible only because the tray happens to launch the daemon with a window-less console that child
+  processes inherit; started any other way (from a terminal, from Explorer, as the portable exe) the
+  same clicks flashed a real window. Every such spawn now states the intent explicitly, so the
+  outcome no longer depends on how the app was started. The worst of them was the periodic usage
+  check: it runs `claude` on a timer, and where the packaged `claude.exe` is missing that resolves to
+  a `.cmd` batch file, which runs through `cmd.exe`. On those machines it was a CMD window blinking
+  on a schedule with no click to blame it on. A guardrail now enforces both directions of the rule,
+  since hiding a *graphical* program instead hides the window it was supposed to open.
 
 - **A run could be stuck "running" forever after a crash — and cancelling it could kill an unrelated
   program.** When CC Manager UI restarts, it re-adopts runs that outlived it, and it is careful not
@@ -69,6 +102,25 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
+- **Right-click a session.** The sidebar list now has its own context menu: mark as done, open the
+  transcript, open or copy the session file, and copy the title, folder or id. Right-clicking acts
+  on the row under the pointer without selecting it, so it never loads a transcript you did not ask
+  for.
+- **Mark a session as done.** A way to say "I have dealt with this" without losing it: the row keeps
+  its place in the list and just stops competing for attention (a check, a struck-through title, and
+  dimmed). Marks are stored by the app itself rather than in the browser, so they survive a cleared
+  browser store. Deliberately not a filter. "Clear all done marks" appears in the list menu once
+  anything is marked.
+- **Archived sessions are recognised, and hidden by default.** The app now reads Claude's own archive
+  flag. Archived is the large majority of a real transcript store, so including them buries the live
+  work; that same ratio is why the control is three-way (Hidden, Shown, Only archived) rather than a
+  checkbox, since finding one archived session in a mixed list is hopeless. The scope is applied
+  before the newest-N cap, so hiding archived returns a full list of live sessions instead of the
+  handful that survived the cap.
+- **One list-options menu.** The sessions toolbar had grown a row of icon buttons, and each new
+  toggle squeezed the search field. Refresh, multi-select, the instance filter and the archive scope
+  now live in a single "⋯" menu, which lights up whenever something is narrowing the list, so a
+  filter set once and forgotten can no longer read as an empty list with no visible cause.
 - **CI actually typechecks now, and it covers the tests too.** The job had been named
   "lint · typecheck · build · test" since day one while never running a typecheck — and something
   had already slipped through: the portable-window exports (`appWindowPlacementKey`,
@@ -86,6 +138,13 @@ All notable changes to CC Manager UI are documented here. The format is based on
   both, the fixed **In 15 min** and **In 1 hour** presets were redundant — 1h is the stepper's
   default and anything shorter is a couple of taps — so they are gone; **In 5 hours** and
   **Tomorrow** remain.
+
+### Changed
+
+- **Pink means "you can click this now".** In the composer's "queue for later" popover, **Queue
+  for then** was pink even before a date was picked, when it did nothing. It is now grey until
+  you pick one. The hours/minutes button beside it had the same flaw at 0h 0m and follows the
+  same rule.
 
 ## [0.3.0] - 2026-07-16
 

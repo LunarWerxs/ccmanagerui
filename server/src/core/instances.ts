@@ -371,6 +371,7 @@ async function forceKillPid(pid: number): Promise<void> {
       const proc = Bun.spawn(['taskkill', '/pid', String(pid), '/f', '/t'], {
         stdout: 'ignore',
         stderr: 'ignore',
+        windowsHide: true,
       })
       await proc.exited
     } catch {
@@ -392,6 +393,7 @@ async function gracefulKillPid(pid: number): Promise<void> {
       const proc = Bun.spawn(['taskkill', '/pid', String(pid), '/t'], {
         stdout: 'ignore',
         stderr: 'ignore',
+        windowsHide: true,
       })
       await proc.exited
     } catch {
@@ -564,6 +566,7 @@ async function focusWindowByPid(pid: number): Promise<'focused' | 'no-window' | 
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
+      windowsHide: true,
     }) as CaptureProc
   } catch (err) {
     return err instanceof Error ? err.message : String(err)
@@ -668,7 +671,16 @@ export async function focusInstance(dir: string): Promise<CMActionResult> {
 
 /** Reveals the instance's profile directory in the OS file browser (Explorer/Finder/xdg-open).
  *  Fire-and-forget, matching the existing open-file route's style (index.ts's /open-file);
- *  Explorer's own exit code is unreliable, so success just means the spawn didn't throw. */
+ *  Explorer's own exit code is unreliable, so success just means the spawn didn't throw.
+ *
+ *  NO windowsHide HERE, and it must stay that way: explorer is a GUI program, and Bun's windowsHide
+ *  is libuv's hide flag, which sets STARTUPINFO SW_HIDE as well as CREATE_NO_WINDOW. A console app
+ *  ignores SW_HIDE, but a GUI app obeys it, so hiding this spawn hides the very window the button
+ *  exists to open: the route still returns ok, and nothing appears. Measured 2026-07-16, spawning
+ *  `explorer <dir>` both ways: plain opened 1 Explorer window, windowsHide opened 0.
+ *  (index.ts's open-file route is the safe-looking exception: `cmd /c start` hides only the
+ *  transient cmd, because `start` ShellExecutes the target as a fresh process that inherits none of
+ *  our STARTUPINFO.) */
 export async function revealInstanceFolder(dir: string): Promise<CMActionResult> {
   const normDir = normalizePath(dir)
   try {
@@ -678,7 +690,11 @@ export async function revealInstanceFolder(dir: string): Promise<CMActionResult>
         : process.platform === 'darwin'
           ? ['open', normDir]
           : ['xdg-open', normDir]
-    Bun.spawn(cmd, { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' }).unref()
+    Bun.spawn(cmd, {
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+    }).unref()
     return { ok: true, action: 'reveal', dir: normDir, message: 'opened', data: {} }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

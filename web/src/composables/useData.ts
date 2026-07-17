@@ -1,5 +1,6 @@
+import { useStorage } from '@vueuse/core'
 import { ref } from 'vue'
-import type { Account, QueueItem, SchedulerState, SessionSummary } from '@/lib/api'
+import type { Account, ArchivedScope, QueueItem, SchedulerState, SessionSummary } from '@/lib/api'
 import * as api from '@/lib/api'
 
 const sessions = ref<SessionSummary[]>([])
@@ -10,6 +11,12 @@ const sessionsLoading = ref(false)
 // Server-side instance scope for the sessions list ('' = all). Lives here so the
 // polling refresh keeps honoring whatever the sidebar filter picked.
 const sessionInstanceFilter = ref('')
+// Archived sessions (Claude's own `isArchived` flag) are hidden by default: they're the
+// large majority here, so showing them buries the live work. That same ratio is why 'only'
+// exists rather than a plain on/off, since hunting one archived session in a mixed list is
+// hopeless. Both scopes are applied server-side BEFORE the newest-N cap, so a quiet corner
+// of the list can't be starved out of the window by rows it was never going to show.
+const sessionArchivedScope = useStorage<ArchivedScope>('ccmanagerui.sessions.archivedScope', 'hide')
 // true once the first queue fetch has settled — gates the queue's first-load skeletons
 const queueLoaded = ref(false)
 const lastError = ref<string | null>(null)
@@ -23,7 +30,9 @@ function guard<T>(p: Promise<T>): Promise<T | undefined> {
 
 async function refreshSessions() {
   sessionsLoading.value = true
-  const r = await guard(api.getSessions(200, sessionInstanceFilter.value))
+  const r = await guard(
+    api.getSessions(200, sessionInstanceFilter.value, sessionArchivedScope.value),
+  )
   if (r) sessions.value = r
   sessionsLoading.value = false
 }
@@ -74,6 +83,7 @@ export function useData() {
     scheduler,
     sessionsLoading,
     sessionInstanceFilter,
+    sessionArchivedScope,
     queueLoaded,
     lastError,
     refreshSessions,

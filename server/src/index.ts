@@ -104,7 +104,8 @@ import { searchSessionBodies } from './session-search'
 import { getSession, listSessions } from './sessions'
 import { skipSingleInstanceGuard } from './single-instance'
 import { findTranscript, tailTranscript } from './transcript'
-import type { Account, MonitorView, QueueItem, UsageCheckResult } from './types'
+import { buildTranscriptOpenArgv, resolveEditor } from './transcript-open'
+import type { Account, ArchivedScope, MonitorView, QueueItem, UsageCheckResult } from './types'
 import { applyUpdate, checkForUpdate } from './updater'
 import {
   allCachedUsage,
@@ -273,6 +274,13 @@ app.post('/api/update/settings', async (c) => {
 const appSettings = () => ({
   portableMode: portableModeEnabled(),
   hideTrayIcon: hideTrayIconEnabled(),
+  transcriptEditor: getSetting('transcript_editor'),
+  transcriptEditorResolved: resolveEditor(
+    process.platform,
+    getSetting('transcript_editor'),
+    process.env,
+    existsSync,
+  ),
   ...getUsageSettings(),
 })
 app.get('/api/settings', (c) => c.json(appSettings()))
@@ -280,6 +288,8 @@ app.post('/api/settings', async (c) => {
   const body = await jsonBody(c)
   if (typeof body.portableMode === 'boolean') setPortableMode(body.portableMode)
   if (typeof body.hideTrayIcon === 'boolean') setHideTrayIcon(body.hideTrayIcon)
+  if (typeof body.transcriptEditor === 'string')
+    setSetting('transcript_editor', body.transcriptEditor.trim())
   // setUsageSettings re-arms the background timer, so flipping autoRefresh takes effect immediately
   // (no daemon restart).
   setUsageSettings({
@@ -373,15 +383,31 @@ app.post('/api/settings/sync/logout', async (c) => {
   return c.json({ ok: true })
 })
 
-// --- sessions (read-only) ---------------------------------------------------
+// --- sessions -----------------------------------------------------------------
 app.get('/api/sessions', async (c) => {
   const limit = c.req.query('limit')
   const instance = c.req.query('instance')
-  return c.json(await listSessions(limit ? Number(limit) : 200, instance || undefined))
+  // Anything unrecognized falls back to 'hide': a typo'd scope should show the live list, never
+  // silently bury it under the archived majority.
+  const archived = c.req.query('archived')
+  const scope: ArchivedScope = archived === 'include' || archived === 'only' ? archived : 'hide'
+  return c.json(await listSessions(limit ? Number(limit) : 200, instance || undefined, scope))
 })
 app.get('/api/sessions/:id', async (c) => {
   const s = await getSession(c.req.param('id'))
   return s ? c.json(s) : c.json({ error: 'session not found' }, 404)
+})
+// The user's own mark (distinct from Claude Desktop's read-only isArchived, surfaced via
+// include_archived above). Mark only: never used to filter listSessions.
+app.post('/api/sessions/:id/done', async (c) => {
+  const id = c.req.param('id')
+  const body = await jsonBody(c)
+  const done = body.done === true
+  db.query(
+    'insert into session_marks (session_id, done, updated_at) values (?, ?, ?) ' +
+      'on conflict(session_id) do update set done = ?, updated_at = ?',
+  ).run(id, done ? 1 : 0, Date.now(), done ? 1 : 0, Date.now())
+  return c.json({ session_id: id, done })
 })
 // Download a copy of the raw transcript (browser save-as; works over remote too). The filename is
 // the session TITLE, not the raw id — the same safeTranscriptFilename the SPA's <a download> uses,
@@ -401,19 +427,22 @@ app.get('/api/sessions/:id/file', async (c) => {
     },
   })
 })
-// Open the transcript with the OS default handler (loopback daemon: same posture as
-// the portable-window spawn; the file opens on the machine the daemon runs on).
+// Open the transcript in an editor (loopback daemon: same posture as the portable-window spawn;
+// the file opens on the machine the daemon runs on). .jsonl has no OS file association, so handing
+// this to the bare default handler would pop Windows' "Pick an app" dialog instead of opening -
+// buildTranscriptOpenArgv names an editor explicitly so that never happens (transcript-open.ts).
 app.post('/api/sessions/:id/open-file', (c) => {
   const tf = findTranscript(c.req.param('id'))
   if (!tf) return c.json({ error: 'session not found' }, 404)
-  const cmd =
-    process.platform === 'win32'
-      ? ['cmd', '/c', 'start', '', tf.path]
-      : process.platform === 'darwin'
-        ? ['open', tf.path]
-        : ['xdg-open', tf.path]
+  const cmd = buildTranscriptOpenArgv(
+    process.platform,
+    tf.path,
+    getSetting('transcript_editor'),
+    process.env,
+    existsSync,
+  )
   try {
-    Bun.spawn(cmd, { stdio: ['ignore', 'ignore', 'ignore'] }).unref()
+    Bun.spawn(cmd, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true }).unref()
     return c.json({ ok: true })
   } catch {
     return c.json({ ok: false }, 500)
@@ -468,9 +497,15 @@ app.post('/api/sessions/:id/copy-file', async (c) => {
           'set the clipboard to (POSIX file (system attribute "CCMANAGERUI_CLIP_PATH"))',
         ]
   try {
+    // windowsHide: true on every console-program spawn in this file, not just this one. The daemon
+    // only inherits a window-less console today because Tray-Host.ps1 happens to launch it with
+    // CreateNoWindow=true. Started any other way (a terminal, Explorer, the compiled portable exe),
+    // that inheritance is gone and a plain click on this button would flash a real console window.
+    // Stating the intent at the spawn call makes that impossible regardless of how the daemon started.
     const proc = Bun.spawn(cmd, {
       env: { ...process.env, CCMANAGERUI_CLIP_PATH: staged },
       stdio: ['ignore', 'ignore', 'ignore'],
+      windowsHide: true,
     })
     // Awaited, unlike open-file's fire-and-forget: the button reports whether the copy landed, and
     // "it's on your clipboard" is a claim we should only make once the exit code says so.

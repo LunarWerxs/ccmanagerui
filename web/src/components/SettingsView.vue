@@ -10,6 +10,7 @@ import {
   CloudOff,
   ExternalLink,
   EyeOff,
+  FilePenLine,
   Gauge,
   KeyRound,
   LogOut,
@@ -39,7 +40,7 @@ import { usePanels } from '@/composables/usePanels'
 import { useUpdates } from '@/composables/useUpdates'
 import type { MonitorStateName, SyncStatus } from '@/lib/api'
 import * as api from '@/lib/api'
-import type { BadgeVariant } from '@/lib/format'
+import { type BadgeVariant, baseName } from '@/lib/format'
 import { useTheme } from '@/lib/theme'
 import { useTooltipConfig } from '@/lib/tooltip-config'
 import ExpandTransition from '@/shell/ExpandTransition.vue'
@@ -168,14 +169,29 @@ const {
   autoRefreshIntervalMin: usageIntervalMin,
   showDesktopInstances,
   showCliInstances,
+  transcriptEditor,
+  transcriptEditorResolved,
   load: loadUsageSettings,
-  update: updateUsageSettings,
+  update: updateAppSettings,
 } = useAppSettings()
 onMounted(loadUsageSettings)
 
 async function patchUsageSettings(patch: Partial<api.UsageSettings>) {
-  if (!(await updateUsageSettings(patch))) toast.error(t('settings.usageToastFailed'))
+  if (!(await updateAppSettings(patch))) toast.error(t('settings.usageToastFailed'))
 }
+
+// --- transcript editor (server/src/transcript-open.ts): which editor "Open the session file"
+// hands the .jsonl to, so it never hits Windows' unassociated-extension "Pick an app" dialog ---
+async function saveTranscriptEditor() {
+  if (!(await updateAppSettings({ transcriptEditor: transcriptEditor.value.trim() })))
+    toast.error(t('settings.transcriptEditorToastFailed'))
+}
+/** The typed override exists but is not what will run, i.e. the server discarded it as a dead path
+ *  and fell back to auto-detect. Worth a warning: the field looks honoured but isn't. */
+const editorOverrideIgnored = computed(() => {
+  const typed = transcriptEditor.value.trim()
+  return !!typed && !!transcriptEditorResolved.value && typed !== transcriptEditorResolved.value
+})
 
 // --- theme (moved here from the app header) + cloud sync -----------------------
 const { mode: themeMode, setTheme } = useTheme()
@@ -536,6 +552,37 @@ defineExpose({ save })
         </template>
         <template #control>
           <Switch :model-value="hideTrayIcon" @update:model-value="toggleHideTrayIcon" />
+        </template>
+      </SettingsRow>
+      <SettingsRow :icon="FilePenLine" :label="$t('settings.transcriptEditorLabel')">
+        <template #info>
+          <InfoHint :text="$t('settings.transcriptEditorHint')" />
+        </template>
+        <template #control>
+          <div class="flex flex-col items-end gap-1">
+            <Input
+              v-model="transcriptEditor"
+              type="text"
+              :placeholder="$t('settings.transcriptEditorPlaceholder')"
+              class="w-56"
+              @change="saveTranscriptEditor"
+            />
+            <!-- The resolved editor is the only feedback this field can give. A path that points at
+                 nothing makes the Open button a silent no-op, so showing what will really run is
+                 what makes a plain text path safe to type into. -->
+            <span
+              v-if="transcriptEditorResolved"
+              class="max-w-56 truncate text-[11px]"
+              :class="editorOverrideIgnored ? 'text-warning' : 'text-muted-foreground'"
+              :title="transcriptEditorResolved"
+            >
+              {{
+                editorOverrideIgnored
+                  ? $t('settings.transcriptEditorNotFound', { editor: baseName(transcriptEditorResolved) })
+                  : $t('settings.transcriptEditorResolved', { editor: baseName(transcriptEditorResolved) })
+              }}
+            </span>
+          </div>
         </template>
       </SettingsRow>
       <!-- which instance tables to show is an appearance choice (moved here from Usage) -->

@@ -1,5 +1,6 @@
 import type {
   Account,
+  ArchivedScope,
   AuthType,
   CliInstance,
   CMAccount,
@@ -21,6 +22,7 @@ import type {
   SessionSummary,
   SyncStatus,
   TailResult,
+  TranscriptSettings,
   UpdateApplyResult,
   UpdateStatus,
   UsageCheckResult,
@@ -30,6 +32,7 @@ import type {
 
 export type {
   Account,
+  ArchivedScope,
   AuthType,
   CliInstance,
   CMAccount,
@@ -56,6 +59,7 @@ export type {
   SyncStatus,
   TailEvent,
   TailResult,
+  TranscriptSettings,
   UpdateApplyResult,
   UpdateStatus,
   UsageAdvice,
@@ -100,10 +104,18 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // --- sessions ---------------------------------------------------------------
-export const getSessions = (limit = 200, instance = '') =>
+export const getSessions = (limit = 200, instance = '', archived: ArchivedScope = 'hide') =>
   j<SessionSummary[]>(
-    `/api/sessions?limit=${limit}${instance ? `&instance=${encodeURIComponent(instance)}` : ''}`,
+    `/api/sessions?limit=${limit}${instance ? `&instance=${encodeURIComponent(instance)}` : ''}` +
+      `${archived === 'hide' ? '' : `&archived=${archived}`}`,
   )
+/** Set the user's own "done" mark on a session (distinct from Claude Desktop's read-only
+ *  `archived` flag). Mark only: never affects which sessions getSessions() returns. */
+export const setSessionDone = (id: string, done: boolean) =>
+  j<{ session_id: string; done: boolean }>(`/api/sessions/${encodeURIComponent(id)}/done`, {
+    method: 'POST',
+    body: JSON.stringify({ done }),
+  })
 /** Browser download URL for the raw transcript (save-as copy). API_BASE prefix: this
  *  URL lands in a plain <a href>, which unlike j() would otherwise resolve against the
  *  Vite dev origin instead of the daemon. */
@@ -263,7 +275,7 @@ export const updateAutoUpdateSettings = (b: Partial<AutoUpdateSettings>) =>
 
 // --- app settings (portable mode, hide tray icon, usage auto-refresh + section visibility) -------
 /** Everything /api/settings returns: the window/tray settings plus the usage settings. */
-export type AppSettings = PortableModeSettings & UsageSettings
+export type AppSettings = PortableModeSettings & UsageSettings & TranscriptSettings
 export const getSettings = () => j<AppSettings>('/api/settings')
 export const updateSettings = (b: Partial<AppSettings>) =>
   j<AppSettings>('/api/settings', { method: 'POST', body: JSON.stringify(b) })

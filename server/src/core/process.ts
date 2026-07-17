@@ -111,6 +111,7 @@ async function runCaptureStdout(
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'ignore',
+      windowsHide: true,
     }) as CaptureProc
   } catch {
     return null // command not found / spawn rejected outright

@@ -146,6 +146,7 @@ async function unprotectViaPowerShell(blob: Uint8Array): Promise<Uint8Array | nu
     const proc = Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], {
       stdout: 'pipe',
       stderr: 'pipe',
+      windowsHide: true,
     })
 
     const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited])

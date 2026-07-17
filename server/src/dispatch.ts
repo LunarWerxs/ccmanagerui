@@ -440,6 +440,7 @@ async function killTree(pid: number): Promise<void> {
       await Bun.spawn(['taskkill', '/pid', String(pid), '/t', '/f'], {
         stdout: 'ignore',
         stderr: 'ignore',
+        windowsHide: true,
       }).exited
     } catch {
       // already gone
@@ -480,7 +481,7 @@ async function isRunnerAlive(id: string): Promise<boolean> {
           // can't self-match: `ps -eo args=` prints `ps`'s own args, which don't contain the needle.)
           `@(Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%${needle}%' AND ProcessId <> $PID").Count`,
         ],
-        { stdout: 'pipe', stderr: 'ignore' },
+        { stdout: 'pipe', stderr: 'ignore', windowsHide: true },
       )
       const [out] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
       return Number(out.trim()) > 0

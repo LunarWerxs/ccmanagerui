@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { safeTranscriptFilename } from '@ccmanagerui/server/filenames'
 import {
+  Archive,
   ArrowLeft,
   Boxes,
   Check,
+  CircleCheck,
+  CircleSlash,
   ClipboardCopy,
   Clock,
   Copy,
@@ -13,6 +16,7 @@ import {
   GitBranch,
   ListTodo,
   MessagesSquare,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
@@ -29,10 +33,23 @@ import SessionComposer, { type ComposerTarget } from '@/components/SessionCompos
 import StatusBadge from '@/components/StatusBadge.vue'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
+import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
@@ -42,14 +59,21 @@ import { Switch } from '@/components/ui/switch'
 import { useData } from '@/composables/useData'
 import { useInstances } from '@/composables/useInstances'
 import { useShellWidth } from '@/composables/useShellWidth'
-import type { SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
+import type { ArchivedScope, SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
 import * as api from '@/lib/api'
 import { baseName, shortId, timeAgo } from '@/lib/format'
 import { displayName } from '@/lib/instance-appearance'
 import { cn } from '@/lib/utils'
 import IconTooltip from '@/shell/IconTooltip.vue'
 
-const { sessions, sessionsLoading, refreshSessions, queue, sessionInstanceFilter } = useData()
+const {
+  sessions,
+  sessionsLoading,
+  refreshSessions,
+  queue,
+  sessionInstanceFilter,
+  sessionArchivedScope,
+} = useData()
 const { t } = useI18n()
 
 // Named instances for the filter dropdown; "default"/"other" are fixed options. The folder
@@ -70,7 +94,50 @@ const instanceLabelFor = (folder: string) =>
 // silent: this view has no instance-list spinner to drive, and the toolbar Refresh icon it would
 // toggle belongs to a different view entirely.
 onMounted(() => void refreshInstances({ silent: true }))
-watch(sessionInstanceFilter, () => refreshSessions())
+// Both scopes are applied server-side, so either one changing needs a refetch, not a re-filter.
+watch([sessionInstanceFilter, sessionArchivedScope], () => refreshSessions())
+
+/** The ⋯ trigger reports "something is narrowing this list". Otherwise a filter set once and
+ *  forgotten reads as an empty/short list with no visible cause, now that the controls are a
+ *  menu rather than a row of lit-up buttons. */
+const filtersActive = computed(
+  () => !!sessionInstanceFilter.value || sessionArchivedScope.value !== 'hide',
+)
+const instanceFilterLabel = computed(() => {
+  const v = sessionInstanceFilter.value
+  if (!v) return t('sessions.instanceAll')
+  if (v === 'default') return t('sessions.instanceDefault')
+  if (v === 'other') return t('sessions.instanceOther')
+  return instanceLabelFor(v)
+})
+const ARCHIVED_LABEL: Record<ArchivedScope, string> = {
+  hide: 'sessions.archivedHide',
+  include: 'sessions.archivedInclude',
+  only: 'sessions.archivedOnly',
+}
+const archivedScopeLabel = computed(() => t(ARCHIVED_LABEL[sessionArchivedScope.value]))
+
+// --- "done" marks: seen it / handled it, without hiding it ---------------------
+// Persisted server-side (sqlite) rather than in localStorage: these are the user's own judgements
+// about real work, so they outlive a cleared browser store or a different webview profile.
+// Deliberately NOT a filter: a done row stays exactly where it was, just quieter.
+const doneCount = computed(() => sessions.value.filter((s) => s.done).length)
+
+async function setDone(s: SessionSummary, done: boolean) {
+  const prev = s.done
+  s.done = done // optimistic: the row marks instantly, the write is a formality
+  try {
+    await api.setSessionDone(s.session_id, done)
+  } catch {
+    s.done = prev
+    toast.error(t('sessions.markDoneFailed'))
+  }
+}
+const toggleDone = (s: SessionSummary) => setDone(s, !s.done)
+
+async function clearDoneMarks() {
+  await Promise.all(sessions.value.filter((s) => s.done).map((s) => setDone(s, false)))
+}
 
 const sessionFileUrl = api.sessionFileUrl
 async function openFile(id: string) {
@@ -394,91 +461,157 @@ function copy(text: string) {
               :placeholder="$t('sessions.searchPlaceholder')"
               class="pl-8 pr-8"
             />
-            <Popover v-model:open="advancedOpen">
-              <IconTooltip :label="$t('sessions.advancedSearch')" :description="$t('sessions.advancedSearchHint')">
-                <PopoverTrigger as-child>
+            <!-- Same popper-anchor rule as the instance filter below: the Popover root lives
+                 INSIDE IconTooltip, so PopoverTrigger's PopperAnchor finds the popover's own
+                 PopperRoot instead of the tooltip's. Wrapped around the tooltip, this popover was
+                 unanchored too. It just failed quietly, because Popover isn't modal and so never
+                 froze the page the way the filter menu did. -->
+            <IconTooltip :label="$t('sessions.advancedSearch')" :description="$t('sessions.advancedSearchHint')">
+              <span class="absolute right-2 top-1/2 inline-flex -translate-y-1/2">
+                <Popover v-model:open="advancedOpen">
+                  <PopoverTrigger as-child>
+                    <button
+                      type="button"
+                      class="rounded text-muted-foreground transition-colors hover:text-foreground"
+                      :aria-label="$t('sessions.advancedSearch')"
+                      @click="advancedQuery = advancedQuery || search"
+                    >
+                      <SlidersHorizontal class="size-4" />
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" class="w-80 space-y-3 p-3">
+                    <p class="text-xs font-semibold">{{ $t('sessions.advancedSearchTitle') }}</p>
+                    <div class="space-y-1.5">
+                      <label class="text-xs font-medium text-muted-foreground">
+                        {{ $t('sessions.advancedSearchQueryLabel') }}
+                      </label>
+                      <Input
+                        v-model="advancedQuery"
+                        :placeholder="$t('sessions.advancedSearchQueryPlaceholder')"
+                        class="font-mono text-xs"
+                        @keydown.enter="runBodySearch"
+                      />
+                    </div>
+                    <div class="flex items-center justify-between">
+                      <IconTooltip :label="$t('sessions.regexMode')" :description="$t('sessions.regexModeHint')">
+                        <span class="text-xs" tabindex="0">{{ $t('sessions.regexMode') }}</span>
+                      </IconTooltip>
+                      <Switch v-model="advancedRegex" size="sm" />
+                    </div>
+                    <div class="flex items-center justify-between">
+                      <span class="text-xs">{{ $t('sessions.caseSensitive') }}</span>
+                      <Switch v-model="advancedCaseSensitive" size="sm" />
+                    </div>
+                    <Button
+                      size="sm"
+                      class="w-full"
+                      :disabled="!advancedQuery.trim() || bodySearching"
+                      @click="runBodySearch"
+                    >
+                      {{ bodySearching ? $t('sessions.searching') : $t('sessions.searchButton') }}
+                    </Button>
+                  </PopoverContent>
+                </Popover>
+              </span>
+            </IconTooltip>
+          </div>
+          <!-- Every list control lives in this one ⋯ menu: the toolbar had grown a row of icon
+               buttons and each new toggle pushed the search field narrower.
+               The DropdownMenu root MUST live INSIDE IconTooltip's slot, never around it.
+               reka anchors a popper by walking the COMPONENT tree for the nearest PopperRoot:
+               DropdownMenuTrigger renders a MenuAnchor, which injects that nearest root. With the
+               menu wrapped AROUND the tooltip, the nearest root was the TOOLTIP's, so the tooltip
+               ate the anchor and the menu's own popper got none. floating-ui then left the content
+               at its unpositioned `translate(0,-200%)`, i.e. off-screen above the viewport, while
+               the modal menu still set `body { pointer-events: none }`. That is the "nothing opens
+               and the whole app locks up" bug. Nesting the root here puts PopperRoot(menu) BETWEEN
+               the tooltip's anchor and MenuAnchor, so each popper anchors to its own element.
+               The <span> is the tooltip's own anchor element (as-child needs one real element). -->
+          <IconTooltip
+            :label="$t('sessions.listOptions')"
+            :description="filtersActive ? $t('sessions.listOptionsActive') : $t('sessions.listOptionsHint')"
+          >
+            <span class="inline-flex">
+              <DropdownMenu>
+                <DropdownMenuTrigger as-child>
                   <button
                     type="button"
-                    class="absolute right-2 top-1/2 -translate-y-1/2 rounded text-muted-foreground transition-colors hover:text-foreground"
-                    :aria-label="$t('sessions.advancedSearch')"
-                    @click="advancedQuery = advancedQuery || search"
+                    :class="cn(buttonVariants({ variant: filtersActive ? 'secondary' : 'outline', size: 'icon' }))"
+                    :aria-label="$t('sessions.listOptions')"
                   >
-                    <SlidersHorizontal class="size-4" />
+                    <MoreHorizontal />
                   </button>
-                </PopoverTrigger>
-              </IconTooltip>
-              <PopoverContent align="end" class="w-80 space-y-3 p-3">
-                <p class="text-xs font-semibold">{{ $t('sessions.advancedSearchTitle') }}</p>
-                <div class="space-y-1.5">
-                  <label class="text-xs font-medium text-muted-foreground">
-                    {{ $t('sessions.advancedSearchQueryLabel') }}
-                  </label>
-                  <Input
-                    v-model="advancedQuery"
-                    :placeholder="$t('sessions.advancedSearchQueryPlaceholder')"
-                    class="font-mono text-xs"
-                    @keydown.enter="runBodySearch"
-                  />
-                </div>
-                <div class="flex items-center justify-between">
-                  <IconTooltip :label="$t('sessions.regexMode')" :description="$t('sessions.regexModeHint')">
-                    <span class="text-xs" tabindex="0">{{ $t('sessions.regexMode') }}</span>
-                  </IconTooltip>
-                  <Switch v-model="advancedRegex" size="sm" />
-                </div>
-                <div class="flex items-center justify-between">
-                  <span class="text-xs">{{ $t('sessions.caseSensitive') }}</span>
-                  <Switch v-model="advancedCaseSensitive" size="sm" />
-                </div>
-                <Button
-                  size="sm"
-                  class="w-full"
-                  :disabled="!advancedQuery.trim() || bodySearching"
-                  @click="runBodySearch"
-                >
-                  {{ bodySearching ? $t('sessions.searching') : $t('sessions.searchButton') }}
-                </Button>
-              </PopoverContent>
-            </Popover>
-          </div>
-          <IconTooltip :label="$t('sessions.refresh')" :description="$t('sessions.refreshHint')">
-            <Button variant="outline" size="icon" @click="refreshSessions">
-              <RefreshCw :class="sessionsLoading ? 'animate-spin' : ''" />
-            </Button>
-          </IconTooltip>
-          <DropdownMenu>
-            <IconTooltip :label="$t('sessions.filterInstance')" :description="$t('sessions.filterInstanceHint')">
-              <!-- raw <button>, NOT the kit <Button> component: this trigger is wrapped in TWO
-                   as-child layers (IconTooltip's TooltipTrigger + DropdownMenuTrigger), and a
-                   Primitive-based <Button> component doesn't forward the merged open handler across
-                   that double clone, so the menu never opened. A plain element does — same shape the
-                   advanced-search popover trigger above already uses. -->
-              <DropdownMenuTrigger as-child>
-                <button
-                  type="button"
-                  :class="cn(buttonVariants({ variant: sessionInstanceFilter ? 'secondary' : 'outline', size: 'icon' }))"
-                  :aria-label="$t('sessions.filterInstance')"
-                >
-                  <Boxes />
-                </button>
-              </DropdownMenuTrigger>
-            </IconTooltip>
-            <DropdownMenuContent align="end" class="w-52">
-              <DropdownMenuRadioGroup v-model="sessionInstanceFilter">
-                <DropdownMenuRadioItem value="">{{ $t('sessions.instanceAll') }}</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="default">{{ $t('sessions.instanceDefault') }}</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem v-for="i in namedInstances" :key="i.name" :value="i.name">{{ i.label }}</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="other">{{ $t('sessions.instanceOther') }}</DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <IconTooltip
-            :label="selectMode ? $t('sessions.exitMultiSelect') : $t('sessions.multiSelect')"
-            :description="selectMode ? undefined : $t('sessions.multiSelectHint')"
-          >
-            <Button :variant="selectMode ? 'secondary' : 'outline'" size="icon" @click="toggleSelectMode">
-              <ListTodo />
-            </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" class="w-56">
+                  <DropdownMenuItem @select="refreshSessions">
+                    <RefreshCw :class="sessionsLoading ? 'animate-spin' : ''" />
+                    {{ $t('sessions.refresh') }}
+                  </DropdownMenuItem>
+
+                  <DropdownMenuSeparator />
+
+                  <!-- @select.prevent keeps the menu open so several toggles can be flipped in one
+                       visit; reka closes the menu on select otherwise. -->
+                  <DropdownMenuCheckboxItem
+                    :model-value="selectMode"
+                    @select.prevent
+                    @update:model-value="toggleSelectMode"
+                  >
+                    <ListTodo />
+                    {{ $t('sessions.multiSelect') }}
+                  </DropdownMenuCheckboxItem>
+                  <DropdownMenuSeparator />
+
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      <Boxes />
+                      {{ $t('sessions.filterInstance') }}
+                      <span class="ml-auto max-w-24 truncate pl-2 text-[11px] text-muted-foreground">
+                        {{ instanceFilterLabel }}
+                      </span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent class="w-52">
+                      <DropdownMenuRadioGroup v-model="sessionInstanceFilter">
+                        <DropdownMenuRadioItem value="">{{ $t('sessions.instanceAll') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="default">{{ $t('sessions.instanceDefault') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem v-for="i in namedInstances" :key="i.name" :value="i.name">{{ i.label }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="other">{{ $t('sessions.instanceOther') }}</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+
+                  <!-- three-way rather than a checkbox: archived is the large majority of the store,
+                       so "only" is the only practical way to go back and find one. -->
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      <Archive />
+                      {{ $t('sessions.archived') }}
+                      <span class="ml-auto max-w-24 truncate pl-2 text-[11px] text-muted-foreground">
+                        {{ archivedScopeLabel }}
+                      </span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent class="w-52">
+                      <DropdownMenuRadioGroup v-model="sessionArchivedScope">
+                        <DropdownMenuRadioItem value="hide">{{ $t('sessions.archivedHide') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="include">{{ $t('sessions.archivedInclude') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="only">{{ $t('sessions.archivedOnly') }}</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+
+                  <template v-if="doneCount > 0">
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem @select="clearDoneMarks">
+                      <CircleSlash />
+                      {{ $t('sessions.clearDoneMarks') }}
+                      <span class="ml-auto pl-2 text-[11px] text-muted-foreground">
+                        {{ $t('sessions.doneMarkCount', { n: doneCount }) }}
+                      </span>
+                    </DropdownMenuItem>
+                  </template>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </span>
           </IconTooltip>
         </div>
 
@@ -562,38 +695,89 @@ function copy(text: string) {
           </p>
 
           <template v-if="!bodySearchActive">
-            <button
-              v-for="s in filtered"
-              :key="s.session_id"
-              class="mb-1.5 w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
-              :class="
-                (selectMode ? isChecked(s) : s.session_id === selectedId)
-                  ? 'border-primary/50 bg-primary/10'
-                  : 'border-transparent hover:border-border hover:bg-accent/50'
-              "
-              @click="rowClick(s)"
-            >
-              <div class="flex items-start justify-between gap-2">
-                <span
-                  v-if="selectMode"
-                  class="mt-0.5 grid size-4 shrink-0 place-items-center rounded border transition-colors"
-                  :class="isChecked(s) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'"
+            <!-- Each row owns a ContextMenu so right-click acts on the row under the pointer without
+                 first selecting it (selecting would load a transcript the user never asked for).
+                 The menu content only mounts while open, so the per-row cost is a reka root, not a
+                 rendered menu. -->
+            <ContextMenu v-for="s in filtered" :key="s.session_id">
+              <ContextMenuTrigger as-child>
+                <button
+                  class="mb-1.5 w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
+                  :class="[
+                    (selectMode ? isChecked(s) : s.session_id === selectedId)
+                      ? 'border-primary/50 bg-primary/10'
+                      : 'border-transparent hover:border-border hover:bg-accent/50',
+                    // done rows stay in place and stay readable; they just stop competing for the eye
+                    s.done && s.session_id !== selectedId ? 'opacity-55' : '',
+                  ]"
+                  @click="rowClick(s)"
                 >
-                  <Check v-if="isChecked(s)" class="size-3" />
-                </span>
-                <span class="line-clamp-2 min-w-0 flex-1 text-sm font-medium leading-snug">{{ s.title }}</span>
-                <StatusBadge v-if="s.queue_status" :status="s.queue_status" />
-              </div>
-              <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                <span class="inline-flex items-center gap-1"><FolderGit2 class="size-3" />{{ baseName(s.cwd) }}</span>
-                <span v-if="s.git_branch" class="inline-flex items-center gap-1"><GitBranch class="size-3" />{{ s.git_branch }}</span>
-                <span class="inline-flex items-center gap-1"><MessagesSquare class="size-3" />{{ s.message_count }}</span>
-                <span class="inline-flex items-center gap-1"><Clock class="size-3" />{{ timeAgo(s.last_activity_at) }}</span>
-                <span v-if="s.instance" class="inline-flex items-center gap-1">
-                  <Boxes class="size-3" />{{ s.instance === 'default' ? $t('sessions.instanceDefault') : instanceLabelFor(s.instance) }}
-                </span>
-              </div>
-            </button>
+                  <div class="flex items-start justify-between gap-2">
+                    <span
+                      v-if="selectMode"
+                      class="mt-0.5 grid size-4 shrink-0 place-items-center rounded border transition-colors"
+                      :class="isChecked(s) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'"
+                    >
+                      <Check v-if="isChecked(s)" class="size-3" />
+                    </span>
+                    <CircleCheck
+                      v-else-if="s.done"
+                      class="mt-0.5 size-3.5 shrink-0 text-success"
+                      :aria-label="$t('sessions.done')"
+                    />
+                    <span
+                      class="line-clamp-2 min-w-0 flex-1 text-sm font-medium leading-snug"
+                      :class="s.done ? 'line-through decoration-muted-foreground/40' : ''"
+                    >{{ s.title }}</span>
+                    <StatusBadge v-if="s.queue_status" :status="s.queue_status" />
+                  </div>
+                  <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                    <span class="inline-flex items-center gap-1"><FolderGit2 class="size-3" />{{ baseName(s.cwd) }}</span>
+                    <span v-if="s.git_branch" class="inline-flex items-center gap-1"><GitBranch class="size-3" />{{ s.git_branch }}</span>
+                    <span class="inline-flex items-center gap-1"><MessagesSquare class="size-3" />{{ s.message_count }}</span>
+                    <span class="inline-flex items-center gap-1"><Clock class="size-3" />{{ timeAgo(s.last_activity_at) }}</span>
+                    <span v-if="s.instance" class="inline-flex items-center gap-1">
+                      <Boxes class="size-3" />{{ s.instance === 'default' ? $t('sessions.instanceDefault') : instanceLabelFor(s.instance) }}
+                    </span>
+                    <!-- only meaningful while archived rows are being shown at all -->
+                    <span v-if="s.archived" class="inline-flex items-center gap-1"><Archive class="size-3" />{{ $t('sessions.archived') }}</span>
+                  </div>
+                </button>
+              </ContextMenuTrigger>
+              <ContextMenuContent class="w-52">
+                <ContextMenuItem @select="toggleDone(s)">
+                  <CircleCheck v-if="!s.done" />
+                  <CircleSlash v-else />
+                  {{ s.done ? $t('sessions.markNotDone') : $t('sessions.markDone') }}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem @select="select(s)">
+                  <MessagesSquare />
+                  {{ $t('sessions.openTranscript') }}
+                </ContextMenuItem>
+                <ContextMenuItem @select="openFile(s.session_id)">
+                  <FileSymlink />
+                  {{ $t('sessions.openFile') }}
+                </ContextMenuItem>
+                <ContextMenuItem :disabled="copyingFile" @select="copyFile(s.session_id)">
+                  <ClipboardCopy />
+                  {{ $t('sessions.copyFile') }}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem @select="copy(s.title)">
+                  <Copy />
+                  {{ $t('sessions.copyTitle') }}
+                </ContextMenuItem>
+                <ContextMenuItem @select="copy(s.cwd)">
+                  <FolderGit2 />
+                  {{ $t('sessions.copyCwd') }}
+                </ContextMenuItem>
+                <ContextMenuItem @select="copy(s.session_id)">
+                  <Copy />
+                  {{ $t('sessions.copySessionId') }}
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
           </template>
         </div>
       </div>

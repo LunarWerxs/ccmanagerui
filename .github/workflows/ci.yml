@@ -47,11 +47,13 @@ jobs:
       - name: i18n check (web)
         run: bun run --cwd web check:i18n
 
-      # Repo guardrail (Architect custom check, run standalone — no npx/network): fails if a reka
-      # *Trigger wrapped in a tooltip uses the kit <Button> (the double as-child that silently
-      # stopped the Sessions instance-filter dropdown from opening). See the check file's header.
-      - name: Guardrail (reka trigger + tooltip)
-        run: bun .arkitect/your-checks/code/reka-trigger-tooltip-button.mjs
+      # Repo guardrail (Architect custom check, run standalone, no npx/network): fails if a reka
+      # popper root (DropdownMenu/Popover/etc) wraps AROUND an <IconTooltip> that contains its own
+      # trigger, instead of living inside it. reka anchors to the nearest PopperRoot in the Vue
+      # component tree, so the tooltip steals the anchor and the real content opens off-screen (and
+      # freezes pointer events for modal poppers). See the check file's header.
+      - name: Guardrail (reka popper root inside tooltip)
+        run: bun .arkitect/your-checks/code/reka-popper-root-inside-tooltip.mjs
 
       # Fails if a WMI `CommandLine LIKE` query forgets to exclude the shell running it — that query
       # carries the needle in its own command line, so it matches itself and answers "found"
@@ -65,6 +67,18 @@ jobs:
       # (tsc trusts it, so it typechecks and is `undefined` at runtime). See the check's header.
       - name: Guardrail (kit lib .mjs/.d.mts export drift)
         run: bun .arkitect/your-checks/code/kit-lib-type-drift.mjs
+
+      # Enforces BOTH directions of the windowsHide rule in server/src.
+      # Missing on a console program (powershell/cmd/taskkill/bun/node/claude/npm/wmic/reg): that
+      # spawn only stays invisible because the daemon happens to be launched with a window-less
+      # console (misc/Tray-Host.ps1's CreateNoWindow=true) that a console child inherits; start the
+      # daemon any other way and it flashes a real console window.
+      # PRESENT on a GUI program (explorer, an editor, a browser): windowsHide is libuv's hide flag,
+      # which sets SW_HIDE too, and a GUI app obeys it, so the window the spawn exists to open never
+      # appears while the call still succeeds. That silently broke reveal-instance-folder once.
+      # See the check's header.
+      - name: Guardrail (windowsHide on console spawns, never on GUI spawns)
+        run: bun .arkitect/your-checks/code/spawn-console-window.mjs
 
       - name: Build (web SPA)
         run: bun run build

@@ -136,6 +136,7 @@ async function createWindowsShortcut(
           CM_ICON: icon,
           CM_DESC: `Launch the ${name} Claude Desktop instance`,
         },
+        windowsHide: true,
         stdin: 'ignore',
         stdout: 'pipe',
         stderr: 'pipe',

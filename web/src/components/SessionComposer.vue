@@ -417,8 +417,9 @@ function onKeydown(e: KeyboardEvent) {
                     </Button>
                   </div>
                 </div>
+                <!-- pink (default) means "clickable right now"; gray (secondary) means it still needs input -->
                 <Button
-                  variant="default"
+                  :variant="scheduleDelayMin > 0 ? 'default' : 'secondary'"
                   size="xs"
                   class="w-full"
                   :disabled="scheduleDelayMin <= 0"
@@ -428,7 +429,13 @@ function onKeydown(e: KeyboardEvent) {
                 </Button>
                 <label class="block text-[11px] text-muted-foreground">{{ $t('composer.schedulePickLabel') }}</label>
                 <Input v-model="scheduleLocal" type="datetime-local" class="text-xs" />
-                <Button size="sm" class="w-full" :disabled="!scheduleLocal" @click="queueAtPicked()">
+                <Button
+                  :variant="scheduleLocal ? 'default' : 'secondary'"
+                  size="sm"
+                  class="w-full"
+                  :disabled="!scheduleLocal"
+                  @click="queueAtPicked()"
+                >
                   {{ $t('composer.scheduleConfirm') }}
                 </Button>
               </PopoverContent>
