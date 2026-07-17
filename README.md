@@ -2,26 +2,33 @@
 
 <img alt="CC Manager UI — run, queue and orchestrate Claude: many instances, one dashboard" src=".github/og-image.png" width="820" />
 
-<p>
-  <a href="#what-you-get">Features</a>
-  &nbsp;·&nbsp; <a href="#quick-start">Quick start</a>
-  &nbsp;·&nbsp; <a href="#mcp-server">MCP</a>
-  &nbsp;·&nbsp; <a href="https://github.com/LunarWerxs/ccmanagerui/releases">Releases</a>
-  &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
-</p>
+### Run, queue and orchestrate Claude — from one dashboard
 
-<p>
-  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-c15f3c" />
-  <img alt="Runtime: Bun" src="https://img.shields.io/badge/runtime-Bun-c15f3c" />
-  <img alt="UI: Vue 3" src="https://img.shields.io/badge/UI-Vue%203-c15f3c" />
-  <img alt="Local and private" src="https://img.shields.io/badge/local-%26%20private-c15f3c" />
-</p>
+One daemon on your machine turns every isolated Claude Desktop instance, every Claude Code
+session, and a whole queue of `claude` runs into a single dashboard in your browser.<br/>
+No more hunting across windows, terminals and accounts to remember what each Claude is doing.
+
+[**Website**](https://ccmanagerui.github.io) &nbsp;·&nbsp; [Features](#what-you-get) &nbsp;·&nbsp; [Quick start](#quick-start) &nbsp;·&nbsp; [MCP](#mcp-server) &nbsp;·&nbsp; [Releases](https://github.com/LunarWerxs/ccmanagerui/releases) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+
+[![Website](https://img.shields.io/badge/website-ccmanagerui.github.io-c15f3c?style=flat-square)](https://ccmanagerui.github.io)
+[![CI](https://img.shields.io/github/actions/workflow/status/LunarWerxs/ccmanagerui/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/LunarWerxs/ccmanagerui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/LunarWerxs/ccmanagerui?style=flat-square&color=c15f3c)](https://github.com/LunarWerxs/ccmanagerui/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-c15f3c?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
 **CC Manager UI** is a local dashboard for running Claude. See every isolated Claude Desktop instance and which account it's on, browse and live-tail your Claude Code sessions, and build a queue of `claude` runs — each with its own prompt, model, effort, permissions and account — dispatched on demand or on a schedule. One daemon, your browser, a tray icon. Nothing leaves your machine.
+
+## Why it exists
+
+If you run Claude in more than one place — a couple of isolated Desktop instances on different
+accounts, a pile of Claude Code sessions across repos, a terminal or three — there's no single
+place that shows you all of it. You end up alt-tabbing to remember which account is which, whether
+a session is still going, and what you asked it to do. CC Manager UI is that missing place: **one
+daemon that reads what's already on your machine and gives you (and your agents, over MCP) one pane
+to see it, message it, queue it and schedule it** — without sending anything to a cloud.
 
 ## What you get
 
