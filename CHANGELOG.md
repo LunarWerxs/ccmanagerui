@@ -16,6 +16,12 @@ All notable changes to CC Manager UI are documented here. The format is based on
 - Biome no longer walks `.claude/`, which holds generated local artifacts, the same exclusion
   `.arkitect/reports` already had. A stale codemap stamp file could fail `bun run lint` locally
   while CI, which checks out fresh, stayed green.
+- **0.5.0 has its own section again.** Its entries had been written into 0.6.0's, so the changelog
+  described two releases as one and no `[0.5.0]` heading existed. Each entry is now filed under the
+  tag that actually shipped it, checked against the commit that introduced the code rather than
+  against where the prose sat. Wording is unchanged; two changes that had never been recorded at all
+  (the scheduler status chip becoming a link, and the vendored-library export-drift guard) are now
+  listed.
 
 ## [0.7.0] - 2026-07-18
 
@@ -136,6 +142,35 @@ All notable changes to CC Manager UI are documented here. The format is based on
   always exists, so the picker can never appear. macOS opens the default text editor. A new
   **Transcript editor** setting overrides the choice, and a path that points at nothing falls back to
   auto-detect rather than leaving the button silently dead.
+
+### Added
+
+- **Right-click a session.** The sidebar list now has its own context menu: mark as done, open the
+  transcript, open or copy the session file, and copy the title, folder or id. Right-clicking acts
+  on the row under the pointer without selecting it, so it never loads a transcript you did not ask
+  for.
+- **Mark a session as done.** A way to say "I have dealt with this" without losing it: the row keeps
+  its place in the list and just stops competing for attention (a check, a struck-through title, and
+  dimmed). Marks are stored by the app itself rather than in the browser, so they survive a cleared
+  browser store. Deliberately not a filter. "Clear all done marks" appears in the list menu once
+  anything is marked.
+- **Archived sessions are recognised, and hidden by default.** The app now reads Claude's own archive
+  flag. Archived is the large majority of a real transcript store, so including them buries the live
+  work; that same ratio is why the control is three-way (Hidden, Shown, Only archived) rather than a
+  checkbox, since finding one archived session in a mixed list is hopeless. The scope is applied
+  before the newest-N cap, so hiding archived returns a full list of live sessions instead of the
+  handful that survived the cap.
+- **One list-options menu.** The sessions toolbar had grown a row of icon buttons, and each new
+  toggle squeezed the search field. Refresh, multi-select, the instance filter and the archive scope
+  now live in a single "⋯" menu, which lights up whenever something is narrowing the list, so a
+  filter set once and forgotten can no longer read as an empty list with no visible cause.
+- **A CI guard against vendored-library export drift**, so the break this release had to
+  fix cannot recur silently.
+
+## [0.5.0] - 2026-07-16
+
+### Fixed
+
 - **Stray console windows could flash on an ordinary click.** Spawning a console program on Windows
   allocates a console unless the spawn says otherwise, and nothing here said otherwise. It stayed
   invisible only because the tray happens to launch the daemon with a window-less console that child
@@ -146,7 +181,6 @@ All notable changes to CC Manager UI are documented here. The format is based on
   a `.cmd` batch file, which runs through `cmd.exe`. On those machines it was a CMD window blinking
   on a schedule with no click to blame it on. A guardrail now enforces both directions of the rule,
   since hiding a *graphical* program instead hides the window it was supposed to open.
-
 - **A run could be stuck "running" forever after a crash, and cancelling it could kill an unrelated
   program.** When CC Manager UI restarts, it re-adopts runs that outlived it, and it is careful not
   to trust a dead runner's recorded process id (Windows recycles those numbers, so it may now belong
@@ -158,7 +192,6 @@ All notable changes to CC Manager UI are documented here. The format is based on
   killed that innocent program. The probe now excludes itself, and the tail loop no longer re-adopts
   the id the reattach deliberately refused; it fails the run cleanly instead, with the work it did
   manage still on disk.
-
 - **A 529 overload was treated as your rate limit, so the run died instead of retrying.** `529
   Overloaded` means Anthropic's servers are saturated and it clears in seconds; a session limit
   means your own 5-hour allowance is spent and only time fixes it. Both wear the word "limit", and
@@ -181,7 +214,6 @@ All notable changes to CC Manager UI are documented here. The format is based on
   announced that the message "will queue and start on its own" about one that had just started
   running immediately. The hint now only shows while there is actually a draft it could apply to,
   which is the only time it says anything useful.
-
 - **The auto-resume monitor was blind to every session it hadn't launched itself.** It only ever
   looked at `queue_items` rows with status `rate_limited`, and the only thing that can set that
   status is a run the daemon spawned and tailed, so a session you started yourself (a bare `claude`
@@ -208,25 +240,6 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ### Added
 
-- **Right-click a session.** The sidebar list now has its own context menu: mark as done, open the
-  transcript, open or copy the session file, and copy the title, folder or id. Right-clicking acts
-  on the row under the pointer without selecting it, so it never loads a transcript you did not ask
-  for.
-- **Mark a session as done.** A way to say "I have dealt with this" without losing it: the row keeps
-  its place in the list and just stops competing for attention (a check, a struck-through title, and
-  dimmed). Marks are stored by the app itself rather than in the browser, so they survive a cleared
-  browser store. Deliberately not a filter. "Clear all done marks" appears in the list menu once
-  anything is marked.
-- **Archived sessions are recognised, and hidden by default.** The app now reads Claude's own archive
-  flag. Archived is the large majority of a real transcript store, so including them buries the live
-  work; that same ratio is why the control is three-way (Hidden, Shown, Only archived) rather than a
-  checkbox, since finding one archived session in a mixed list is hopeless. The scope is applied
-  before the newest-N cap, so hiding archived returns a full list of live sessions instead of the
-  handful that survived the cap.
-- **One list-options menu.** The sessions toolbar had grown a row of icon buttons, and each new
-  toggle squeezed the search field. Refresh, multi-select, the instance filter and the archive scope
-  now live in a single "⋯" menu, which lights up whenever something is narrowing the list, so a
-  filter set once and forgotten can no longer read as an empty list with no visible cause.
 - **CI actually typechecks now, and it covers the tests too.** The job had been named
   "lint · typecheck · build · test" since day one while never running a typecheck, and something
   had already slipped through: the portable-window exports (`appWindowPlacementKey`,
@@ -244,6 +257,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   both, the fixed **In 15 min** and **In 1 hour** presets were redundant, 1h is the stepper's
   default and anything shorter is a couple of taps, so they are gone; **In 5 hours** and
   **Tomorrow** remain.
+- **The scheduler status chip in the header is now a link** to the setting it reports on.
 
 ### Changed
 
@@ -251,7 +265,6 @@ All notable changes to CC Manager UI are documented here. The format is based on
   for then** was pink even before a date was picked, when it did nothing. It is now grey until
   you pick one. The hours/minutes button beside it had the same flaw at 0h 0m and follows the
   same rule.
-
 ## [0.3.0] - 2026-07-16
 
 ### Security
