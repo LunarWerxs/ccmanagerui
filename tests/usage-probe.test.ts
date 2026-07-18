@@ -53,7 +53,13 @@ const winPath = (...parts: string[]) => parts.join(BACKSLASH)
 const INSTANCE_3 = winPath('C:', 'Users', 'blogi', '.claude-instances', '3claude')
 const INSTANCE_4 = winPath('C:', 'Users', 'blogi', '.claude-instances', '4claude')
 
-test('every spelling of one instance directory maps to a single cache key', () => {
+// win32-gated, because the bug itself is a win32 one: drive letters, backslash separators and a
+// case-insensitive filesystem are what let a single folder be spelled several ways. Elsewhere
+// `path.resolve` reads `C:\Users\...` as one long filename and a backslash spelling genuinely is a
+// different path from a forward-slash one, so collapsing them would be wrong rather than desirable.
+const win = process.platform === 'win32'
+
+test.skipIf(!win)('every spelling of one instance directory maps to a single cache key', () => {
   const keys = [
     INSTANCE_3,
     INSTANCE_3.toLowerCase(),
@@ -62,6 +68,8 @@ test('every spelling of one instance directory maps to a single cache key', () =
   ].map(desktopKey)
   expect(new Set(keys).size).toBe(1)
 })
+
+// The rest hold on every platform: they are about the key's shape, not path semantics.
 
 test('different instances still get different keys', () => {
   // The normalization must not be so aggressive that it collides two real instances.
