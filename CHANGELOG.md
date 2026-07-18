@@ -265,6 +265,42 @@ All notable changes to CC Manager UI are documented here. The format is based on
   for then** was pink even before a date was picked, when it did nothing. It is now grey until
   you pick one. The hours/minutes button beside it had the same flaw at 0h 0m and follows the
   same rule.
+## [0.4.0] - 2026-07-16
+
+### Added
+
+- **The portable window opens at a usable size instead of filling the screen.** A window the
+  dedicated Chromium profile had never seen opened at roughly the whole work area, about
+  1905x2092 on a 4K display. Both open paths, the daemon and the tray, now ask for 1060x800 on a
+  first run and yield to the profile's saved placement ever after, so a size you picked yourself
+  always wins. The width is measured rather than guessed: the binding constraint is not the
+  1000px shell but the sessions sidebar, which rail-collapses below a 1024px viewport, so
+  1024 plus about 16px of window frame is the floor and 1060 clears it with slack.
+- **A launch onto an already-running portable profile now sizes correctly too.** Chromium ignores
+  both `--window-size` and the saved placement when an instance is already running on that
+  profile: the forwarded `--app` window simply inherits the running window's geometry. The daemon
+  cannot fix that from outside, so it now tags the window's URL with the size it should have
+  (`POST /api/portable-window`) and the page corrects itself once at startup, before first paint.
+  Gated to real `--app` windows and a no-op on an un-hinted URL, so an ordinary browser tab is
+  untouched. A maximized window deliberately sends no hint.
+
+### Changed
+
+- **The loopback guard is now one shared, audited implementation.** The guard that stops a
+  malicious web page from driving the local API was the app's own copy. It now consumes the same
+  primitive as the other LunarWerx daemons, so a security-critical decision lives in one reviewed
+  place instead of four drifting ones. Behaviour is unchanged for real clients. The shared version
+  additionally allows a request carrying no `Host` header, which a browser always sends, so this
+  only affects non-browser tools.
+
+### Fixed
+
+- **The release build was broken while the typecheck passed.** The vendored copy of the
+  portable-window helper was a stale snapshot missing an export that the code importing it already
+  declared, so `tsc` was satisfied and `bun build --compile` failed with "No matching export". The
+  vendored file is back in sync, and the window-size applier now has behavioural test coverage
+  rather than type-only coverage.
+
 ## [0.3.0] - 2026-07-16
 
 ### Security
