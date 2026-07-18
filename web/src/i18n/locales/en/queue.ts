@@ -17,7 +17,7 @@ export default {
   runDue: 'Run due ({n})',
   runDueTitle: 'Run every due queued item now (ignores scheduler limits)',
   toastRanDue: 'Started {n} run(s)',
-  toastRanDueSkipped: '{n} skipped — session already running',
+  toastRanDueSkipped: '{n} skipped: session already running',
   toastRunDueFailed: 'Failed to start the due runs.',
   empty: 'Queue is empty.',
   queueARun: 'Queue a run',
@@ -37,6 +37,6 @@ export default {
   allDone: 'Nothing left to run.',
   exitLost: 'interrupted',
   exitLostHint:
-    'The run was cut off before it finished — the process was killed, or CC Manager UI restarted under it. Whatever it had already done is on disk; open the session to see how far it got.',
+    'The run was cut off before it finished. The process was killed, or CC Manager UI restarted under it. Whatever it had already done is on disk; open the session to see how far it got.',
   deletedInstance: '(deleted instance)',
 }

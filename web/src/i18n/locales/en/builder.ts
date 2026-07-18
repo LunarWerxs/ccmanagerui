@@ -29,7 +29,7 @@ export default {
   permissionLabel: 'Permission',
   accountLabel: 'Run as (account)',
   accountHint:
-    'Which login this run uses. "Ambient" = whatever the claude CLI is already signed into (the default). To run as a specific account, sign it into an instance on the Instances tab — every signed-in instance is listed here.',
+    'Which login this run uses. "Ambient" = whatever the claude CLI is already signed into (the default). To run as a specific account, sign it into an instance on the Instances tab; every signed-in instance is listed here.',
   defaultPlaceholder: 'Default',
   accountAmbient: 'Ambient (whatever the CLI is logged into)',
   accountDesktopInstance: 'Desktop instance',

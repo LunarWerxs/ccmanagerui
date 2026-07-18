@@ -22,8 +22,8 @@ export default {
   saveCopyHint: 'Downloads the raw .jsonl transcript file, named after the session',
   copyFile: 'Copy the session file to the clipboard',
   copyFileHint:
-    'Puts the .jsonl file itself on the clipboard — paste it into a folder, a chat or an email',
-  copyFileDone: 'Copied {name} to the clipboard — paste it anywhere that takes a file',
+    'Puts the .jsonl file itself on the clipboard; paste it into a folder, a chat or an email',
+  copyFileDone: 'Copied {name} to the clipboard; paste it anywhere that takes a file',
   copyFileFailed: "Couldn't copy the session file to the clipboard",
   copyFileUnsupported: 'Copying a file to the clipboard needs Windows or macOS',
   closeChat: 'Close this chat',

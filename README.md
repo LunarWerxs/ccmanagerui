@@ -1,8 +1,8 @@
 <div align="center">
 
-<img alt="CC Manager UI — run, queue and orchestrate Claude: many instances, one dashboard" src=".github/og-image.png" width="820" />
+<img alt="CC Manager UI. Run, queue and orchestrate Claude: many instances, one dashboard" src=".github/og-image.png" width="820" />
 
-### Run, queue and orchestrate Claude — from one dashboard
+### Run, queue and orchestrate Claude from one dashboard
 
 One daemon on your machine turns every isolated Claude Desktop instance, every Claude Code
 session, and a whole queue of `claude` runs into a single dashboard in your browser.<br/>
@@ -19,31 +19,31 @@ No more hunting across windows, terminals and accounts to remember what each Cla
 
 ---
 
-**CC Manager UI** is a local dashboard for running Claude. See every isolated Claude Desktop instance and which account it's on, browse and live-tail your Claude Code sessions, and build a queue of `claude` runs — each with its own prompt, model, effort, permissions and account — dispatched on demand or on a schedule. One daemon, your browser, a tray icon. Nothing leaves your machine.
+**CC Manager UI** is a local dashboard for running Claude. See every isolated Claude Desktop instance and which account it's on, browse and live-tail your Claude Code sessions, and build a queue of `claude` runs, each with its own prompt, model, effort, permissions and account, dispatched on demand or on a schedule. One daemon, your browser, a tray icon. Nothing leaves your machine.
 
 ## Why it exists
 
-If you run Claude in more than one place — a couple of isolated Desktop instances on different
-accounts, a pile of Claude Code sessions across repos, a terminal or three — there's no single
+If you run Claude in more than one place (a couple of isolated Desktop instances on different
+accounts, a pile of Claude Code sessions across repos, a terminal or three), there's no single
 place that shows you all of it. You end up alt-tabbing to remember which account is which, whether
 a session is still going, and what you asked it to do. CC Manager UI is that missing place: **one
 daemon that reads what's already on your machine and gives you (and your agents, over MCP) one pane
-to see it, message it, queue it and schedule it** — without sending anything to a cloud.
+to see it, message it, queue it and schedule it**, without sending anything to a cloud.
 
 ## What you get
 
-- 🎛️ &nbsp;**Multi-instance manager** — every isolated Claude Desktop instance on the machine, its account (email + plan), live memory and uptime, in one sortable table. Open / quit / create / delete / rename, and drop a per-instance desktop shortcut.
-- 🧵 &nbsp;**Sessions across every instance** — browse and live-tail your Claude Code transcripts (`~/.claude/projects`), filtered by instance, with "thinking" hidden by default. Open the raw `.jsonl`, download it, or copy the file itself to the clipboard — both named after the session, not its uuid.
-- 💬 &nbsp;**Chat composer** — type at the bottom of a transcript and dispatch straight to that session; queue it, or schedule for later (an exact hours + 10-minute delay, 5 h, or tomorrow). Multi-select to message many sessions at once.
-- ⏱️ &nbsp;**Queue + scheduler** — build a queue of `claude` runs (prompt, model, effort, permission mode, account) and dispatch on demand, or let the scheduler run them with concurrency + spacing controls. Off by default.
-- ♻️ &nbsp;**Runs that survive a restart** — dispatched runs run under a detached supervisor and reattach after a quit or an auto-update, instead of dying mid-flight.
-- 🌙 &nbsp;**Auto-resume past a rate limit** — sessions stopped by a 5-hour limit are picked back up once the window resets, including ones you started yourself in a terminal (found by checking recent transcripts, not just runs the app launched). Gated on your weekly usage, capped per session. Off by default — it prompts sessions while you sleep. A 529 overload is a different animal and is handled separately: those retry in seconds, automatically, with no opt-in.
-- 🏠 &nbsp;**Local & private** — one daemon on your machine + your regular browser + a tray icon. No cloud, no account needed to run it.
+- 🎛️ &nbsp;**Multi-instance manager**: every isolated Claude Desktop instance on the machine, its account (email + plan), live memory and uptime, in one sortable table. Open / quit / create / delete / rename, and drop a per-instance desktop shortcut.
+- 🧵 &nbsp;**Sessions across every instance**: browse and live-tail your Claude Code transcripts (`~/.claude/projects`), filtered by instance, with "thinking" hidden by default. Open the raw `.jsonl`, download it, or copy the file itself to the clipboard, both named after the session, not its uuid.
+- 💬 &nbsp;**Chat composer**: type at the bottom of a transcript and dispatch straight to that session; queue it, or schedule for later (an exact hours + 10-minute delay, 5 h, or tomorrow). Multi-select to message many sessions at once.
+- ⏱️ &nbsp;**Queue + scheduler**: build a queue of `claude` runs (prompt, model, effort, permission mode, account) and dispatch on demand, or let the scheduler run them with concurrency + spacing controls. Off by default.
+- ♻️ &nbsp;**Runs that survive a restart**: dispatched runs run under a detached supervisor and reattach after a quit or an auto-update, instead of dying mid-flight.
+- 🌙 &nbsp;**Auto-resume past a rate limit**: sessions stopped by a 5-hour limit are picked back up once the window resets, including ones you started yourself in a terminal (found by checking recent transcripts, not just runs the app launched). Gated on your weekly usage, capped per session. Off by default, since it prompts sessions while you sleep. A 529 overload is a different animal and is handled separately: those retry in seconds, automatically, with no opt-in.
+- 🏠 &nbsp;**Local & private**: one daemon on your machine + your regular browser + a tray icon. No cloud, no account needed to run it.
 
 ## Quick start
 
 **Download a release (no Bun needed):** grab the bundle for your OS from
-[Releases](https://github.com/LunarWerxs/ccmanagerui/releases) — a self-contained executable
+[Releases](https://github.com/LunarWerxs/ccmanagerui/releases): a self-contained executable
 (Windows x64, Linux x64/arm64, macOS x64/arm64) with the web UI beside it. Unzip and run
 `CCManagerUI.exe` (or `./ccmanagerui`); on Windows, `misc\Tray-Launch.vbs` gives you the
 system-tray icon instead of a console window.
@@ -58,9 +58,9 @@ bun run build && bun run start      # daemon serves the UI + API on http://local
 
 Or **desktop**: double-click `CCManagerUI.lnk` in the repo root for a **system-tray icon** (Open / Restart / Quit) that boots the daemon and opens the UI in your browser. The daemon prefers port **7787**, hops if it's busy, and records the real URL in `~/.ccmanagerui/runtime.json`.
 
-**Dev (hot reload):** `bun run dev` — Hono API on `:7787` + Vite web on `:5173` → http://localhost:5173
+**Dev (hot reload):** `bun run dev`: Hono API on `:7787` + Vite web on `:5173` → http://localhost:5173
 
-> **Trying it out?** Set `CCMANAGERUI_FAKE=1` so dispatch uses a harmless stand-in for the `claude` CLI (no quota, no real repos). The scheduler is off by default; queued items only run on the **Run** button or when you enable the scheduler in Settings. Multi-instance actions (open / quit / create / delete) act on **real** Claude Desktop instances — delete is a guarded, confirm-by-name operation.
+> **Trying it out?** Set `CCMANAGERUI_FAKE=1` so dispatch uses a harmless stand-in for the `claude` CLI (no quota, no real repos). The scheduler is off by default; queued items only run on the **Run** button or when you enable the scheduler in Settings. Multi-instance actions (open / quit / create / delete) act on **real** Claude Desktop instances. Delete is a guarded, confirm-by-name operation.
 
 ## Requirements
 
@@ -103,7 +103,7 @@ Tools cover sessions (list / get / tail), the queue (list / add / update / run /
 | `CCMANAGERUI_FAKE` | unset | dispatch uses the harmless fake CLI |
 | `CCMANAGERUI_DB` | `server/data/ccmanagerui.db` | sqlite path |
 
-`/api/health` returns `service: "ccmanagerui"` — load-bearing for the single-instance pointer.
+`/api/health` returns `service: "ccmanagerui"`, which is load-bearing for the single-instance pointer.
 
 ## Auto-update
 
@@ -122,7 +122,7 @@ POST /api/update/settings   { "enabled": true, "intervalSecs": 21600 }
 | Frontend | Vue 3 + Vite, a shared LunarWerx UI kit (shadcn-vue `reka-mira` on Reka UI), Tailwind v4, `@lucide/vue`, TypeScript |
 | Backend | **Bun + Hono**, `bun:sqlite` (queue / dispatch / scheduler / accounts) + JSON under `CONFIG_DIR`, SSE (`hono/streaming`) for live run output |
 | Dispatch | `Bun.spawn` of the real `claude` CLI (no Agent SDK) |
-| Multi-instance | per-OS instance discovery / launch / quit / create (`server/src/core/*`) — Windows DPAPI / macOS Keychain / Linux libsecret for reading each isolated instance's stored credentials |
+| Multi-instance | per-OS instance discovery / launch / quit / create (`server/src/core/*`): Windows DPAPI / macOS Keychain / Linux libsecret for reading each isolated instance's stored credentials |
 | Launcher | Windows browser + system-tray (`misc/`) |
 
 ## Layout
@@ -137,12 +137,12 @@ misc/      the Windows launcher toolkit (tray .ps1 / .vbs / .ico / Create-Shortc
 
 ## Checks
 
-`bun run check` runs Biome + the i18n gate + a kit drift-check. The kit check needs an internal LunarWerx kit checkout, so it's **owner-only and skipped in CI** — external contributors should run the individual checks instead:
+`bun run check` runs Biome + the i18n gate + a kit drift-check. The kit check needs an internal LunarWerx kit checkout, so it's **owner-only and skipped in CI**, so external contributors should run the individual checks instead:
 
-- `bun run lint` — Biome.
-- `bun run --cwd web check:i18n` — no hardcoded UI strings; every `t()` key resolves (also gates `build`).
-- `bun test` — includes the Windows-gated tray launcher guard and instance/crypto tests.
-- `bun run typecheck` — web (`vue-tsc`) + server (`tsc`).
+- `bun run lint`: Biome.
+- `bun run --cwd web check:i18n`: no hardcoded UI strings; every `t()` key resolves (also gates `build`).
+- `bun test`: includes the Windows-gated tray launcher guard and instance/crypto tests.
+- `bun run typecheck`: web (`vue-tsc`) + server (`tsc`).
 
 ## License
 

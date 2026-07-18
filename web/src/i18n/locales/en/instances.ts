@@ -43,7 +43,7 @@ export default {
   toastCliCreateFailed: 'Failed to create a CLI instance for this account.',
   quitExternalDialogTitle: 'Quit your regular Claude Desktop?',
   quitExternalDialogDescription:
-    'This is your real, non-isolated Claude Desktop — not an instance created here. Quitting it closes any conversation in progress.',
+    'This is your real, non-isolated Claude Desktop, not an instance created here. Quitting it closes any conversation in progress.',
   quitExternalDialogSubmit: 'Quit it anyway',
   quitExternalDialogQuitting: 'Quitting…',
   refreshAllUsage: 'Refresh all usage',
@@ -99,7 +99,7 @@ export default {
   // user dutifully following it one-click-quit their REAL (External) Claude Desktop mid-chat.
   browserDanceTitle: 'One-time sign-in required',
   browserDanceBody:
-    'Before signing in for the first time, quit the other ISOLATED instances created here (the login can attach to the wrong isolated profile). Your regular Claude Desktop is not affected — leave it open.',
+    'Before signing in for the first time, quit the other ISOLATED instances created here (the login can attach to the wrong isolated profile). Your regular Claude Desktop is not affected, so leave it open.',
   toastOpened: 'Instance opened.',
   toastOpenFailed: 'Failed to open instance.',
   toastQuit: 'Instance quit.',

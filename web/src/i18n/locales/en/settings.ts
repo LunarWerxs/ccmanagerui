@@ -114,11 +114,11 @@ export default {
   monitorMaxAttemptsLabel: 'Max resume attempts',
   monitorBufferLabel: 'Resume buffer (min)',
   monitorEmpty:
-    'Nothing to resume right now. A session appears here once it stops on a rate limit — whether the app ran it or you started it yourself in a terminal, which the monitor finds by checking recent transcripts. The monitor then tracks it until the window resets and resumes it. An empty list means nothing is currently waiting on a limit, not that monitoring is off.',
+    'Nothing to resume right now. A session appears here once it stops on a rate limit, whether the app ran it or you started it yourself in a terminal, which the monitor finds by checking recent transcripts. The monitor then tracks it until the window resets and resumes it. An empty list means nothing is currently waiting on a limit, not that monitoring is off.',
   monitorAttempts: '{n} attempts',
   monitorDiscovered: 'Found',
   monitorDiscoveredHint:
-    'The monitor found this session stopped at a rate limit on disk — you started it outside the app, so there was no queued run to watch.',
+    'The monitor found this session stopped at a rate limit on disk. You started it outside the app, so there was no queued run to watch.',
   monitorStateScheduled: 'Scheduled',
   monitorStateBlockedWeekly: 'Blocked (weekly limit)',
   monitorStateNeedsHuman: 'Needs you',
@@ -133,8 +133,8 @@ export default {
   // signed-in instance automatically.
   accounts: 'Accounts',
   accountsIntro:
-    'Accounts are added by signing in on the Instances tab — every signed-in instance can run queued work under its own login, no token-pasting involved. Listed below are leftover manually-pasted credentials (a legacy path); they still work for dispatch and can be removed here.',
-  noAccountsYet: 'No pasted credentials — add accounts by signing in on the Instances tab.',
+    'Accounts are added by signing in on the Instances tab. Every signed-in instance can run queued work under its own login, no token-pasting involved. Listed below are leftover manually-pasted credentials (a legacy path); they still work for dispatch and can be removed here.',
+  noAccountsYet: 'No pasted credentials. Add accounts by signing in on the Instances tab.',
   removeAction: 'Remove',
   apiKeyBadge: 'API key',
   oauthBadge: 'OAuth',
