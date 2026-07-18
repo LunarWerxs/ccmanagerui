@@ -41,61 +41,61 @@ All notable changes to CC Manager UI are documented here. The format is based on
   on a schedule with no click to blame it on. A guardrail now enforces both directions of the rule,
   since hiding a *graphical* program instead hides the window it was supposed to open.
 
-- **A run could be stuck "running" forever after a crash — and cancelling it could kill an unrelated
+- **A run could be stuck "running" forever after a crash, and cancelling it could kill an unrelated
   program.** When CC Manager UI restarts, it re-adopts runs that outlived it, and it is careful not
   to trust a dead runner's recorded process id (Windows recycles those numbers, so it may now belong
   to something else entirely). That care never actually happened: the liveness probe searched running
   processes for the run's spec file *by command line*, and the search itself carried that text in its
-  own command line — so it always found itself and always answered "still alive". Every Windows
+  own command line, so it always found itself and always answered "still alive". Every Windows
   reattach therefore trusted a stale id. If that id had been recycled by a live program, the run
   waited on it forever (a session stuck "busy" with nothing running), and pressing Cancel would have
   killed that innocent program. The probe now excludes itself, and the tail loop no longer re-adopts
-  the id the reattach deliberately refused — it fails the run cleanly instead, with the work it did
+  the id the reattach deliberately refused; it fails the run cleanly instead, with the work it did
   manage still on disk.
 
 - **A 529 overload was treated as your rate limit, so the run died instead of retrying.** `529
   Overloaded` means Anthropic's servers are saturated and it clears in seconds; a session limit
   means your own 5-hour allowance is spent and only time fixes it. Both wear the word "limit", and
-  `dispatch.ts` matched them with ONE pattern list — so a run killed by a few-second server hiccup
+  `dispatch.ts` matched them with ONE pattern list, so a run killed by a few-second server hiccup
   was filed `rate_limited` and parked against a reset that had nothing to do with it, while the same
   message sent from the desktop app (which just retries) went straight through. They are now told
-  apart (`rate-limit-signal.ts`), and a transient overload is **retried automatically** — three
-  tries over ~35s, backing off — before it gives up as its own new `overloaded` status, which is
+  apart (`rate-limit-signal.ts`), and a transient overload is **retried automatically**: three
+  tries over ~35s, backing off, before it gives up as its own new `overloaded` status, which is
   neither `failed` (nothing is wrong with the run) nor `rate_limited` (your quota is fine). The
   retry only fires when the run produced no output first, so it can never silently re-do work you
   already paid for; it is DB-backed, so a daemon restart mid-backoff resumes rather than forgets;
   and it is deliberately not behind the scheduler or monitor switches, which are off by default and
-  govern hours-scale autonomy — this just finishes the run you started ten seconds ago.
+  govern hours-scale autonomy, this just finishes the run you started ten seconds ago.
   Ambiguous text still classifies as a quota wall, the conservative default. A migration relabels
   rows already mis-filed by the old detector. The auto-resume monitor now only ever sees a genuine
   quota stop, so it can no longer park a 529 against a five-hour reset that was never coming.
 - **The composer claimed "this session is busy" the moment you hit send, with nothing running.**
   `submit()` awaits a queue refresh, and the server doesn't answer until the run is already marked
-  `running` — so sending a message flipped the banner on within the very same click, and it then
+  `running`, so sending a message flipped the banner on within the very same click, and it then
   announced that the message "will queue and start on its own" about one that had just started
   running immediately. The hint now only shows while there is actually a draft it could apply to,
   which is the only time it says anything useful.
 
 - **The auto-resume monitor was blind to every session it hadn't launched itself.** It only ever
   looked at `queue_items` rows with status `rate_limited`, and the only thing that can set that
-  status is a run the daemon spawned and tailed — so a session you started yourself (a bare `claude`
+  status is a run the daemon spawned and tailed, so a session you started yourself (a bare `claude`
   in a terminal, or the desktop app) that died on a 5-hour limit had a transcript on disk, no queue
   row, and no path to the resume list at all. The list said "Nothing to resume right now" while real
   sessions sat at the wall, and hand-queueing them was the only recourse. The monitor now also
   *finds* stops on disk (`rate-limit-discovery.ts`): it checks transcripts touched in the last 12
   hours for the CLI's own limit notice sitting at the tail with nothing after it, which is exactly
-  what "still stopped" looks like. Found stops go through the same rails as any other — the weekly
-  usage gate, the per-session attempt cap, the resume buffer, the idempotency check — and carry a
+  what "still stopped" looks like. Found stops go through the same rails as any other, the weekly
+  usage gate, the per-session attempt cap, the resume buffer, the idempotency check, and carry a
   **Found** badge so a session the app went looking for never reads as one you queued. Detection
   reuses `dispatch.ts`'s existing `isApiErrorEvent` gate unchanged, so the 2026-07-15 false-positive
   class (a run that merely *mentions* "quota" or "529") cannot come back at machine scale. Still
   behind the monitor's off-by-default switch.
 - **A downloaded transcript was named after the session's UUID, not the session.** `Save a copy` now
-  writes `<session title>.jsonl` — falling back to the id only when a title has nothing
+  writes `<session title>.jsonl`, falling back to the id only when a title has nothing
   filesystem-safe left in it. One shared `safeTranscriptFilename` (new
   `@ccmanagerui/server/filenames` export) backs both the download link and the server's
   `Content-Disposition`, because the browser honours the link's name only same-origin and the header
-  only cross-origin — fixing one alone would have left the other broken. It strips the characters
+  only cross-origin, so fixing one alone would have left the other broken. It strips the characters
   Windows rejects, refuses the reserved device names (`CON`, `COM1`…), trims the trailing dots
   Windows drops silently, and sends the header as RFC 5987 `filename*` so an emoji or non-Latin
   title names the file properly instead of throwing on an invalid header value.
@@ -122,21 +122,21 @@ All notable changes to CC Manager UI are documented here. The format is based on
   now live in a single "⋯" menu, which lights up whenever something is narrowing the list, so a
   filter set once and forgotten can no longer read as an empty list with no visible cause.
 - **CI actually typechecks now, and it covers the tests too.** The job had been named
-  "lint · typecheck · build · test" since day one while never running a typecheck — and something
+  "lint · typecheck · build · test" since day one while never running a typecheck, and something
   had already slipped through: the portable-window exports (`appWindowPlacementKey`,
   `hasRememberedBounds`, `quoteWinArg`) went undeclared for two commits, which nothing noticed
   because nothing looked. `tests/` was outside every tsconfig for the same reason, so a test could
   only fail at runtime; wiring it in immediately caught a real error in a new fixture. All 34 test
   files across the three test directories are covered now.
 - **Copy the session file to the clipboard.** A new button beside "save a copy" puts the `.jsonl`
-  FILE on the clipboard — not its text — so Ctrl+V into a folder, a chat or an email pastes the
+  FILE on the clipboard, not its text, so Ctrl+V into a folder, a chat or an email pastes the
   actual file, named after the session rather than its uuid. A web page cannot do this at all (no
   clipboard type maps to a native file-drop, by design), so the daemon does it; Windows and macOS
   only, since Linux has no cross-desktop convention for it.
 - **A 10-minute stepper in the composer's "queue for later".** The hours stepper now sits next to a
   minutes one that steps in 10s, and a single button queues the combined delay ("In 1h 30m"). With
-  both, the fixed **In 15 min** and **In 1 hour** presets were redundant — 1h is the stepper's
-  default and anything shorter is a couple of taps — so they are gone; **In 5 hours** and
+  both, the fixed **In 15 min** and **In 1 hour** presets were redundant, 1h is the stepper's
+  default and anything shorter is a couple of taps, so they are gone; **In 5 hours** and
   **Tomorrow** remain.
 
 ### Changed
@@ -152,8 +152,8 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 - **Fixed a drive-by remote-code-execution hole in the local API.** The daemon binds localhost and
   its API had no cross-site protection, so any web page you visited while it was running could quietly
-  POST to it — queuing a `claude` run with `--permission-mode bypassPermissions`, an attacker-chosen
-  prompt and directory, using your own logged-in credentials with no approval prompt — or read your
+  POST to it, queuing a `claude` run with `--permission-mode bypassPermissions`, an attacker-chosen
+  prompt and directory, using your own logged-in credentials with no approval prompt, or read your
   session transcripts. The daemon now rejects browser cross-site requests (via `Sec-Fetch-Site` /
   `Origin` / `Host`, which also defeats the "simple request" CORS bypass and DNS rebinding) while
   still allowing the app's own UI, the dev server, and non-browser tools (the tray, MCP clients).
@@ -162,19 +162,19 @@ All notable changes to CC Manager UI are documented here. The format is based on
 ### Added
 
 - **Real executables on every release.** A tag push cross-compiles self-contained binaries (Bun
-  embedded — no install step) for Windows x64, Linux x64/arm64, and macOS x64/arm64, smoke-tests each
+  embedded, no install step) for Windows x64, Linux x64/arm64, and macOS x64/arm64, smoke-tests each
   on real hardware for its OS, and attaches them to a draft GitHub release. The binary carries every
   process mode as a subcommand (`--version`, `--mcp`, the detached dispatch runner), keeps state under
   `~/.ccmanagerui/`, serves the SPA from a sidecar `web/dist/`, and the Windows zip ships the tray
   toolkit (no Bun on PATH required).
 - **Packaged builds now self-update.** A compiled build checks GitHub Releases, downloads the newer
-  platform bundle, verifies the new binary runs before swapping it in place, and relaunches — the
+  platform bundle, verifies the new binary runs before swapping it in place, and relaunches, the
   same Settings check/apply/auto-update controls the source build has. (Source builds still self-update
   via `git`.)
-- **Run queued work as any signed-in instance — no token pasting.** The queue's "Run as" picker lists
+- **Run queued work as any signed-in instance, no token pasting.** The queue's "Run as" picker lists
   every signed-in desktop/CLI instance; the runner extracts that instance's own OAuth token at spawn
   time and fails the run with a clear "signed out?" message rather than silently falling back to the
-  ambient login. Signing in on the Instances tab is now how accounts get added — the Settings
+  ambient login. Signing in on the Instances tab is now how accounts get added, the Settings
   paste-a-token form is gone (existing credentials still work; the raw API remains for headless use).
 - **CLI sign-in on every instance row**, from the row's actions menu (create-on-demand when no CLI
   login is linked yet), replacing the single inline table sub-line.
@@ -186,14 +186,14 @@ All notable changes to CC Manager UI are documented here. The format is based on
   default profile dir without an explicit confirmation (`confirmExternal`, the quit-side analog
   of Delete's existing guard), and the UI routes it through a warning dialog. The "Browser
   Dance" copy now names ISOLATED instances and says outright that your regular Claude Desktop
-  should stay open — the old "quit every other running instance" wording steered a user into
+  should stay open, the old "quit every other running instance" wording steered a user into
   closing a real conversation.
 - **The MSIX warning banner could be flat wrong.** `manageable` now also accepts a LIVE running
   Claude process (carrying `--user-data-dir`) as proof of a working classic install, the
   authoritative `Get-AppxPackage` probe runs (and overrides) when filesystem leftovers from an
   uninstalled MSIX would otherwise pin the verdict forever, the classic binary resolves via the
   stable Squirrel stub first (versioned `app-<ver>` dirs are replaced on every update), and the
-  banner re-verifies fresh after any successful open/create and every 60s while visible — so
+  banner re-verifies fresh after any successful open/create and every 60s while visible, so
   "install the classic build" actually clears it once you do.
 - **A run pinned to a specific account could silently run as the wrong one.** A queued run pinned to
   an instance whose sign-in had expired, been deleted, or whose reference was malformed used to fall
@@ -205,37 +205,37 @@ All notable changes to CC Manager UI are documented here. The format is based on
   quietly changing the run.
 - **Deleting a desktop instance could orphan its linked CLI login** into an invisible, unmanageable
   state; a failed "Sign in CLI" left a stray CLI instance behind. Both are cleaned up now.
-- **A run recovered after a restart could briefly be double-dispatched** — the scheduler and
+- **A run recovered after a restart could briefly be double-dispatched**: the scheduler and
   auto-resume monitor could fire before the daemon finished re-adopting runs that survived the
   restart. They now wait for that to complete.
 
 - **A run that merely TALKED about rate limits was marked rate-limited.** The detector matched its
-  patterns against every event of a run — tool inputs and tool results included — so an agent that
+  patterns against every event of a run, tool inputs and tool results included, so an agent that
   grepped for "session limit", or read a file whose line 529 scrolled past, finished as
   `rate_limited` despite exiting 0 with the job done. (Both such rows in the shipped database were
   this; `\b529\b` had matched a line number.) Only the CLI's own report counts now: a synthetic
-  API-error message, an errored terminal `result`, or stderr — never model prose, tool inputs, or
+  API-error message, an errored terminal `result`, or stderr, never model prose, tool inputs, or
   tool results. Runs already mislabeled this way are repaired on startup, along with the auto-resume
   bookkeeping that existed only to babysit them.
 - **The auto-resume monitor did nothing at all unless you had added an account.** A run with no
-  dispatch account — the default, since the accounts table is empty until you paste a token in — was
-  parked at "needs you — no dispatch account on the run" on sight, on the grounds that its usage
+  dispatch account, the default, since the accounts table is empty until you paste a token in, was
+  parked at "needs you, no dispatch account on the run" on sight, on the grounds that its usage
   couldn't be gated and its auth couldn't be injected. Neither was true: an ambient run uses the
   login `claude` already has, which needs no injection to resume and whose quota reads straight from
   its config dir (the same read `check_my_usage` already did). Ambient runs now go through the usage
   gate like any other, so the monitor actually resumes them.
 - **Sending a message opened a console window that stayed on screen for the whole run.** The detached
-  runner is created through WMI, which applies default startup info — so `bun` (a console app) got a
+  runner is created through WMI, which applies default startup info, so `bun` (a console app) got a
   real, visible window; the daemon's own `windowsHide` only ever covered the short-lived PowerShell.
   Beyond the eyesore, closing that stray window killed the runner and `claude` mid-turn, and the run
   then finalized as a bare "failed, exit -1". It is created hidden now.
 - **The session view showed conversation the CLI was having with itself.** Resuming a session whose
   last turn died on an API error makes `claude` append a canned "Continue from where you left off." /
-  "No response requested." pair — same millisecond, no model call. Rendered as real turns they read
+  "No response requested." pair, same millisecond, no model call. Rendered as real turns they read
   as though a prompt had been sent and refused. They're filtered; the rate-limit notice, the one
   synthetic message that explains anything, still shows.
 - **"exit -1" now says what it means.** It is our own code for "the process vanished before it
-  finished" — never something `claude` reported — and the paths that produce it recorded nothing to
+  finished", never something `claude` reported, and the paths that produce it recorded nothing to
   say so. They now explain themselves, and the badge reads "interrupted" instead of a number nobody
   can look up. Transcribing an event can also no longer throw and take the tail loop down with it.
 
@@ -246,8 +246,8 @@ All notable changes to CC Manager UI are documented here. The format is based on
   still pending rather than the all-time total. The per-item card moved to `QueueItemCard.vue`.
 - **The composer's busy warning says what will happen to your message.** It stated a rule ("a session
   with a run in progress gets its message queued instead of sent") and left you to guess whether the
-  message was about to run or stuck. It now says which — start on its own when the current run
-  finishes, or wait for you to press Run when the scheduler is off — and why two runs can't share a
+  message was about to run or stuck. It now says which, start on its own when the current run
+  finishes, or wait for you to press Run when the scheduler is off, and why two runs can't share a
   session.
 - **Queuing a run resumes a session from a searchable list instead of a pasted UUID.** The run
   builder's "session to resume" field is now a searchable picker over the same session list the
@@ -259,7 +259,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   run-at, fork, and the resume title/folder overrides now live behind an "Advanced options"
   disclosure; the common path is just the session (or new-chat title + folder) and the prompt. The
   "New chat from scratch" toggle is hidden when editing an existing item (editing never converts a
-  run's kind). Long prompts no longer push the dialog off-screen — the prompt box caps its height and
+  run's kind). Long prompts no longer push the dialog off-screen, the prompt box caps its height and
   every dialog now scrolls instead of overflowing the viewport.
 - **Settings is one scrolling page.** The General / Scheduler / Accounts tabs were merged: Accounts
   is now a section rather than a tab, and Scheduler folds in with everything else. "Show desktop /
@@ -270,7 +270,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   (an empty list doesn't mean monitoring is off). A deep link (the composer's "tomorrow" gear) now
   scrolls to the Scheduler section instead of switching a tab.
 - **The queue toolbar's scheduler indicator is an icon with a hover, not a text pill**, and shows
-  both on and off states at a glance. The redundant "Queue resume" button was removed — "New run"
+  both on and off states at a glance. The redundant "Queue resume" button was removed, "New run"
   already opens the builder in resume mode.
 
 ### Added
@@ -350,7 +350,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   session (for example the tray, launched from Explorer). Surfaced three ways: a per-row usage cell in the
   Instances table (the binding weekly % color-coded, with a hover breakdown), a `check_usage` MCP
   tool, and a `check_my_usage` self-check any agent can call. Checks are on demand (each spawns a real
-  `claude`) and cached with an age; a no-data result shows "—" with a reason rather than silently.
+  `claude`) and cached with an age; a no-data result shows ", " with a reason rather than silently.
 - **AI self-check guidance.** `docs/AI_USAGE_SELFCHECK.md` plus a README note teach agents that they
   can read their own quota and that the weekly all-models % is the binding cap to pace by.
 - **Auto-resume monitor (opt-in, off by default).** A session killed mid-work by a 5-hour rate limit
@@ -375,7 +375,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 - **An instance is named after the account it is signed into, not the folder it lives in.** The
   folder name was only ever a guess at the identity, and it stops being true the moment a profile is
-  signed into an account other than the one it was named after — nothing prevents that drift and
+  signed into an account other than the one it was named after, nothing prevents that drift and
   nothing corrects it. On the machine this was built against, the folder called `claude` was signed
   into `6claude@lunarwerx.com` and had been reading as "claude" the whole time, while two other
   instances had been hand-relabelled to their accounts precisely to paper over the same problem. So
@@ -386,27 +386,27 @@ All notable changes to CC Manager UI are documented here. The format is based on
   same shared instance list rather than fetching its own, so a session's instance chip and the
   Instances table can no longer disagree about what the same instance is called.
 - **Accounts resolve themselves; the "Resolve" button is gone.** Resolving reads `config.json` and
-  the token cache off disk, so a stopped instance resolves exactly as well as a running one — but
+  the token cache off disk, so a stopped instance resolves exactly as well as a running one, but
   auto-resolution was gated on `isRunning`, which meant a stopped instance sat there offering a
   button that would have worked on the first click, every time. That is a chore, not a choice. Every
   instance now resolves on its own, running or not, and an instance with no identity yet (logged
   out, offline) is retried once a minute so signing one in surfaces without a restart. The inline
   button and its ⋮ entry are both removed; the toolbar's Refresh now force-re-resolves every account
   live, which is the only case a manual action was ever good for (a stale cached identity). Resolving
-  no longer marks the row busy — it changes nothing about the instance, and flagging it made the
+  no longer marks the row busy, it changes nothing about the instance, and flagging it made the
   row's buttons flicker un-clickable whenever a background resolve was in flight.
 - **The Instances table's quota numbers stay current while you watch them.** The background sweep
   refreshes the server's usage cache every 15 minutes, but the UI only ever pulled that cache once,
-  on mount — so an open Instances tab kept showing its first reading and went quietly stale for as
+  on mount, so an open Instances tab kept showing its first reading and went quietly stale for as
   long as you left it open. It now pulls on the same 4-second cycle the instance list already
   refreshes on, measured firing in lockstep with it. This is a read of the server's own cache: no
-  probe, no `claude`, no request to Anthropic, and no quota spent — so there was no reason to do it
+  probe, no `claude`, no request to Anthropic, and no quota spent, so there was no reason to do it
   once and hope. The "Refresh all usage" tooltip no longer claims each check "spawns a real claude
   process", which stopped being true when checks became a direct ~300ms API read.
 - **Fewer rules on the Instances screen.** The two tables abutted, separated only by a hairline
   sitting flush against the desktop table's last row, which read as one continuous table whose last
   rows happened to have different columns. They are now separated by space instead, and both section
-  toolbars lost their bottom border — the sticky table header immediately below each one already
+  toolbars lost their bottom border, the sticky table header immediately below each one already
   draws that line, so the second rule was weight for nothing. This matches Sessions, Queue, and the
   app header, which were borderless already. The row separators stay; they are the ones doing work.
 - **Renaming an instance is now instant and works while it is running.** A rename used to move the
@@ -463,7 +463,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   auto-update relaunch killed the run mid-flight and left it stuck marked "running". Now the daemon
   launches each run through a detached supervisor (`server/src/dispatch-runner.ts`) that owns the
   `claude` process and streams its output to a per-run log file the daemon tails; the run keeps
-  executing to completion even with the daemon gone. On the next launch the daemon **reattaches** —
+  executing to completion even with the daemon gone. On the next launch the daemon **reattaches** , 
   rebuilds the run's events from its log and resumes the live view, or records the final status if it
   finished while the daemon was down (`reattachRuns`, `server/src/dispatch.ts`). On Windows the
   supervisor is created via WMI (`Win32_Process.Create`) so it escapes the daemon's job object;
@@ -556,7 +556,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
 - **The Instances ⋮ "More actions" menu opens again.** Its trigger had been wrapped in a
   tooltip, and the nested `TooltipTrigger`/`DropdownMenuTrigger` (both `as-child`) swallowed the
   click so the menu never opened, while the zero-delay tooltip itself was intrusive. The kebab
-  is now a bare dropdown trigger with an `aria-label`: it opens on click, with no tooltip.
+  is now a bare dropdown trigger with an `aria-label`, it opens on click, with no tooltip.
 - **The Instances refresh icon no longer spins on every poll.** The list silently re-polls every
   4 s and the spinner was tied to that `loading` flag, so it flickered constantly and read as a
   constant spin. Background poll ticks are now silent; the icon spins only on a first load or a
@@ -567,7 +567,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   quotes, and the previous command-line parser truncated the path at the first space, so the
   running instance was mis-matched (it showed as "stopped" or as a stray external row). The
   `core/process.ts` parser now handles all three quotings (unquoted, value-quoted, and
-  whole-token-quoted) — see `tests/process-parse.test.ts`.
+  whole-token-quoted), see `tests/process-parse.test.ts`.
 - **Composer toasts render as real toasts.** The "Queued N message(s)" confirmation showed as
   bare unstyled text lines: vue-sonner v2 ships its styling as a separate stylesheet that was
   never imported. `main.ts` now imports `vue-sonner/style.css`, so every toast gets its card,
@@ -635,7 +635,7 @@ All notable changes to CC Manager UI are documented here. The format is based on
   (`https://claude.ai/api/desktop/win32/x64/exe/latest/redirect`).
   `CCMANAGERUI_FAKE_DESKTOP_INSTALL` (msix-only | none | ok) forces the detection result for
   dev/testing.
-- **Portable mode** — a server-persisted setting (Settings → Appearance → Portable window) that
+- **Portable mode**: a server-persisted setting (Settings → Appearance → Portable window) that
   opens CC Manager UI in its own chromeless Chromium app window (`msedge`/`chrome --app=`, no
   tabs or address bar) instead of a browser tab. Applies both to the in-app toggle (`POST
   /api/portable-window`) and the desktop tray launcher, which now opens the UI through the
@@ -643,9 +643,9 @@ All notable changes to CC Manager UI are documented here. The format is based on
   (`~/.ccmanagerui/portable-profile`, `--user-data-dir`) so it remembers its size/position
   across launches instead of sharing the main browser profile; both open paths derive the same
   profile dir from `runtime.json`'s location.
-- **MCP stdio server** (`server/src/mcp.ts`, `bun run mcp`) — exposes CC Manager UI's
+- **MCP stdio server** (`server/src/mcp.ts`, `bun run mcp`), exposes CC Manager UI's
   sessions/queue/instances API over MCP stdio for use from Claude Code / Claude Desktop.
-- **Background auto-update loop** — an opt-in daemon-wide timer that checks the update remote on
+- **Background auto-update loop**: an opt-in daemon-wide timer that checks the update remote on
   a schedule and, when a newer commit is available and the working tree is clean, pulls +
   reinstalls + rebuilds + self-relaunches so the running daemon stays current unattended. Off by
   default; never touches a dirty working tree.
