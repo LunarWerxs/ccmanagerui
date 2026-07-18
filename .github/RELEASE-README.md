@@ -35,5 +35,5 @@ with `--mcp` as its arg (no Bun needed), e.g. `{ "command": "C:\\path\\to\\CCMan
 ## Updating
 
 Packaged builds don't self-update (that's a source-checkout feature); download the next release
-from <https://github.com/LunarWerxs/ccmanagerui/releases>. Your data (`~/.ccmanagerui/`) carries
+from <https://github.com/LunarWerxs/CCManagerUI/releases>. Your data (`~/.ccmanagerui/`) carries
 over unchanged.

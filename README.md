@@ -8,11 +8,11 @@ One daemon on your machine turns every isolated Claude Desktop instance, every C
 session, and a whole queue of `claude` runs into a single dashboard in your browser.<br/>
 No more hunting across windows, terminals and accounts to remember what each Claude is doing.
 
-[**Website**](https://ccmanagerui.github.io) &nbsp;·&nbsp; [Features](#what-you-get) &nbsp;·&nbsp; [Quick start](#quick-start) &nbsp;·&nbsp; [MCP](#mcp-server) &nbsp;·&nbsp; [Releases](https://github.com/LunarWerxs/ccmanagerui/releases) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
+[**Website**](https://ccmanagerui.github.io) &nbsp;·&nbsp; [Features](#what-you-get) &nbsp;·&nbsp; [Quick start](#quick-start) &nbsp;·&nbsp; [MCP](#mcp-server) &nbsp;·&nbsp; [Releases](https://github.com/LunarWerxs/CCManagerUI/releases) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
 [![Website](https://img.shields.io/badge/website-ccmanagerui.github.io-c15f3c?style=flat-square)](https://ccmanagerui.github.io)
-[![CI](https://img.shields.io/github/actions/workflow/status/LunarWerxs/ccmanagerui/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/LunarWerxs/ccmanagerui/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/LunarWerxs/ccmanagerui?style=flat-square&color=c15f3c)](https://github.com/LunarWerxs/ccmanagerui/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/LunarWerxs/CCManagerUI/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/LunarWerxs/CCManagerUI/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/LunarWerxs/CCManagerUI?style=flat-square&color=c15f3c)](https://github.com/LunarWerxs/CCManagerUI/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-c15f3c?style=flat-square)](LICENSE)
 
 </div>
@@ -43,7 +43,7 @@ to see it, message it, queue it and schedule it**, without sending anything to a
 ## Quick start
 
 **Download a release (no Bun needed):** grab the bundle for your OS from
-[Releases](https://github.com/LunarWerxs/ccmanagerui/releases): a self-contained executable
+[Releases](https://github.com/LunarWerxs/CCManagerUI/releases): a self-contained executable
 (Windows x64, Linux x64/arm64, macOS x64/arm64) with the web UI beside it. Unzip and run
 `CCManagerUI.exe` (or `./ccmanagerui`); on Windows, `misc\Tray-Launch.vbs` gives you the
 system-tray icon instead of a console window.
@@ -51,8 +51,8 @@ system-tray icon instead of a console window.
 **Or run from source:**
 
 ```sh
-git clone https://github.com/LunarWerxs/ccmanagerui.git
-cd ccmanagerui && bun install
+git clone https://github.com/LunarWerxs/CCManagerUI.git
+cd CCManagerUI && bun install
 bun run build && bun run start      # daemon serves the UI + API on http://localhost:7787
 ```
 
