@@ -74,10 +74,10 @@ export function quoteWinArg(arg) {
       out += "\\".repeat(slashes * 2); // trailing run: doubled so the closing quote stays a quote
       break;
     }
-    if (arg[i] === '"') out += "\\".repeat(slashes * 2 + 1) + '"';
+    if (arg[i] === '"') out += `${"\\".repeat(slashes * 2 + 1)}"`;
     else out += "\\".repeat(slashes) + arg[i];
   }
-  return out + '"';
+  return `${out}"`;
 }
 
 /** Escape a string for a PowerShell single-quoted literal (the only metacharacter is `'`). */
