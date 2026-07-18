@@ -1,0 +1,116 @@
+# Reference
+
+Everything the README deliberately leaves out. The README is for deciding whether you want this;
+this file is for running, configuring and hacking on it.
+
+- [MCP server](#mcp-server)
+- [Config (env)](#config-env)
+- [Auto-update](#auto-update)
+- [Stack](#stack)
+- [Layout](#layout)
+- [Checks](#checks)
+
+Agents looking for the quota tools specifically want [AI_USAGE_SELFCHECK.md](AI_USAGE_SELFCHECK.md).
+
+## MCP server
+
+The daemon's REST API is also exposed over MCP stdio (`server/src/mcp.ts`, or `bun run mcp`), so
+agents (Claude Code, Claude Desktop, Cursor) can drive sessions, the run queue, accounts, the
+scheduler, and instances the same way the web UI does. Start the daemon first; the MCP server
+follows its actual bound port via the runtime pointer, overridable with `CCMANAGERUI_URL` (full base
+URL) or `CCMANAGERUI_PORT`.
+
+```json
+{
+  "mcpServers": {
+    "ccmanagerui": {
+      "command": "bun",
+      "args": ["run", "--cwd", "<path-to-ccmanagerui>", "mcp"]
+    }
+  }
+}
+```
+
+Tools cover sessions (list / get / tail), the queue (list / add / update / run / cancel / events),
+accounts (secrets always masked), the scheduler (get / set), instances (list / launch / quit), CLI
+instances (list / create / launch / login helper), usage-check (`check_usage`, `check_my_usage`),
+and the auto-resume monitor (get / set), plus an update check. Mutating tools say `MUTATES:` in
+their description; there is deliberately no shutdown tool.
+
+### Usage-check
+
+`check_usage { account?, configDir? }` and `check_my_usage {}` let any MCP-speaking agent read an
+account's remaining Claude subscription quota without asking a human. Pass `account` (a saved
+dispatch account id or label) or `configDir` (a `CLAUDE_CONFIG_DIR` that's been `/login`'d once);
+`check_my_usage` is a shorthand self-check of the calling process's own `CLAUDE_CONFIG_DIR`. Both
+report the session (5h) %, the weekly (all-models) %, and any per-model weekly %.
+
+**The weekly (all-models) % is the binding cap.** A fresh session % is a red herring when weekly is
+near 100, and switching the flagship model doesn't dodge the shared weekly bucket. An agent should
+check its own quota before a heavy multi-agent fan-out and pace accordingly, routing heavy work to
+whichever account has the lowest weekly %.
+
+## Config (env)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `PORT` | `7787` | preferred API/UI port (hops if busy) |
+| `CCMANAGERUI_PORT_FIXED` | unset | `1` = bind `PORT` exactly, skip the single-instance/port-hop |
+| `CCMANAGERUI_HOME` | `~/.ccmanagerui` | config dir (`runtime.json`, instance-identity cache) |
+| `CCMANAGERUI_SHUTDOWN_TOKEN` | unset | if set, `/api/shutdown` requires a matching `x-ccmanagerui-shutdown-token` header (the tray sets it) |
+| `CCMANAGERUI_FAKE` | unset | dispatch uses the harmless fake CLI |
+| `CCMANAGERUI_DB` | `server/data/ccmanagerui.db` | sqlite path |
+
+`/api/health` returns `service: "ccmanagerui"`, which is load-bearing for the single-instance
+pointer.
+
+## Auto-update
+
+Opt-in background self-update (off by default; it restarts the daemon):
+
+```
+POST /api/update/settings   { "enabled": true, "intervalSecs": 21600 }
+```
+
+`intervalSecs` clamps to [900, 604800]; default 21600 (6h). Each tick checks the remote and, only if
+the working tree is clean, applies (`git pull --ff-only` + reinstall + rebuild) and relaunches itself
+on the same port (`CCMANAGERUI_RELAUNCH=1` makes the successor wait for the predecessor to free it).
+A dirty tree is never touched.
+
+Because updates are a `git pull --ff-only` against `origin/main`, **pushing `main` is the release**:
+as soon as `main` moves, every instance with auto-update enabled fast-forwards to it on its next
+check. Treat a push to `main` as user-facing rather than as a staging step.
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| Frontend | Vue 3 + Vite, a shared LunarWerx UI kit (shadcn-vue `reka-mira` on Reka UI), Tailwind v4, `@lucide/vue`, TypeScript |
+| Backend | **Bun + Hono**, `bun:sqlite` (queue / dispatch / scheduler / accounts) + JSON under `CONFIG_DIR`, SSE (`hono/streaming`) for live run output |
+| Dispatch | `Bun.spawn` of the real `claude` CLI (no Agent SDK) |
+| Multi-instance | per-OS instance discovery / launch / quit / create (`server/src/core/*`): Windows DPAPI / macOS Keychain / Linux libsecret for reading each isolated instance's stored credentials |
+| Launcher | Windows browser + system-tray (`misc/`) |
+
+## Layout
+
+```
+server/    Bun + Hono daemon: sqlite, session reader, transcript tail, dispatch, scheduler,
+           instance pointer, core/ (multi-instance crypto/paths/process/instances/lifecycle/accounts)
+web/       Vue 3 SPA (Sessions / Queue / Instances views)
+tests/     launcher.test.ts (the tray guard, Windows-gated) + server/instance unit tests
+misc/      the Windows launcher toolkit (tray .ps1 / .vbs / .ico / Create-Shortcut / Make-Icon / Rebuild.bat)
+```
+
+## Checks
+
+`bun run check` runs Biome + the i18n gate + a kit drift-check. The kit check needs an internal
+LunarWerx kit checkout, so it's **owner-only and skipped in CI**; external contributors should run
+the individual checks instead:
+
+- `bun run lint`: Biome.
+- `bun run --cwd web check:i18n`: no hardcoded UI strings; every `t()` key resolves (also gates `build`).
+- `bun test`: includes the Windows-gated tray launcher guard and instance/crypto tests.
+- `bun run typecheck`: web (`vue-tsc`) + server (`tsc`).
+
+CI runs these across `[ubuntu-latest, windows-latest]`, so a green local run on one OS clears one
+leg of two.

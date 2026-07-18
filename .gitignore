@@ -20,3 +20,6 @@ PLAN.md
 
 # Local root rebuild convenience wrapper (delegates to misc/Rebuild.bat)
 /Rebuild.bat
+
+# Owner handoff notes: internal, not for the public repo
+docs/HANDOFF_MICHAEL.md
