@@ -9,6 +9,7 @@
       "!**/dist",
       "!**/data",
       "!.arkitect/reports",
+      "!.claude",
       "!tmp",
       "!**/*.gen.ts",
       "!**/*.css",

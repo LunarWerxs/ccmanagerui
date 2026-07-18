@@ -21,20 +21,56 @@ it at once. You alt-tab to remember which account is which, whether a session is
 what you asked it to do.
 
 CC Manager UI is one local daemon that reads what is already on your machine and puts it in a single
-browser tab.
+browser tab. It is not a Claude client and it does not replace one. It is the dashboard the CLI and
+the desktop app do not come with.
 
-## What it does
+## Every session, in one list
 
-|  |  |
-|---|---|
-| **See every instance** | Each isolated Claude Desktop instance, which account it is on, live memory and uptime. Open, quit, create or delete them. |
-| **Browse every session** | Your Claude Code transcripts, live-tailing, filtered by instance and recency. Open the raw `.jsonl` or copy it out. |
-| **Message a session** | Type at the bottom of a transcript and send straight to it. Or pick several and message them all. |
-| **Queue up work** | Build a list of `claude` runs, each with its own prompt, model, effort, permissions and account. Run on demand or on a schedule. |
-| **Survive a restart** | Dispatched runs reattach after a quit or an update instead of dying. |
-| **Sleep through a rate limit** | Sessions stopped by a 5-hour limit resume once the window resets, gated on your weekly usage. Off by default. |
+![The sessions view: a searchable list of Claude Code transcripts on the left, one open on the right with a message box at the bottom](.github/screenshots/sessions.png)
 
-Nothing leaves your machine. No cloud, no account needed to run it.
+<sub>Screenshots use demo data.</sub>
+
+Every Claude Code transcript on your machine, newest first, searchable, filtered by project or by
+instance or by how recent it is. Click one and you get the whole conversation, live-tailing while it
+runs.
+
+The box at the bottom is the part people tend to like: you can type straight back into a session
+from here, without finding the terminal it belongs to. Pick several sessions and you can send the
+same message to all of them.
+
+When you want the raw file, there is a button for opening the `.jsonl` in your editor, downloading
+it under its real title, or copying it out.
+
+## Queue work and let it run
+
+![The run queue drawer: five runs, one running and the rest queued, each showing its project, model, effort and scheduled time](.github/screenshots/queue.png)
+
+Build a list of `claude` runs, each with its own prompt, working directory, model, effort,
+permission mode and account. Run one on demand, or let the scheduler drain the queue for you, one at
+a time or a few at once, with spacing so you are not hammering anything.
+
+Anything you queue can be given a start time, so "do this at 3am" is a checkbox and not a cron job
+you have to maintain.
+
+Two things make this survive contact with reality:
+
+- **Runs reattach after a restart.** Quitting the app, or letting it auto-update, does not kill
+  what is in flight. It picks the runs back up.
+- **A rate limit is not a dead end.** Sessions stopped by a 5-hour limit can resume themselves once
+  the window resets, gated on your weekly usage so it does not spend everything the moment it can.
+  This is off unless you turn it on.
+
+## Manage isolated instances
+
+![The instances view: four isolated Claude Desktop instances, each with its account, live memory and uptime](.github/screenshots/instances.png)
+
+If you keep separate Claude Desktop instances for separate accounts, this is where they live. Each
+row shows which account it is signed into, its plan, and, while it is running, its process, memory
+and uptime.
+
+You can open, focus, quit, create and delete them from here, give each one a name, an icon and a
+colour so they stop looking identical, and see your isolated CLI logins alongside the desktop
+instance that shares their account.
 
 ## Install
 
@@ -57,6 +93,9 @@ Either way the UI is at <http://localhost:7787>.
 > instance actions (open / quit / create / delete) act on **real** Claude Desktop instances; delete
 > asks you to type the name.
 
+Nothing leaves your machine. There is no cloud service behind this, no account to sign up for, and
+no telemetry. It reads the files Claude already writes and talks to `localhost`.
+
 ## Requirements
 
 - **[Bun](https://bun.sh)** if running from source.
@@ -73,7 +112,8 @@ The whole API is exposed over MCP, so Claude Code, Claude Desktop or Cursor can 
 queue, the scheduler and instances directly. Setup and the full tool list are in
 [docs/REFERENCE.md](docs/REFERENCE.md).
 
-Agents can also read their own remaining quota before fanning out work:
+Agents can also read their own remaining quota before fanning out work, which is the difference
+between pacing a big job and hitting a wall halfway through it:
 [docs/AI_USAGE_SELFCHECK.md](docs/AI_USAGE_SELFCHECK.md).
 
 ## More

@@ -6,6 +6,17 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **The README now shows the app.** It had no screenshots at all, so the only way to find out what
+  the thing looked like was to install it. There are now three, one per view, captured from a
+  throwaway daemon pointed at a synthetic home directory so no real session titles, account
+  addresses or filesystem paths ship in a public image. The surrounding copy is organised around
+  those views rather than around the architecture.
+- Biome no longer walks `.claude/`, which holds generated local artifacts, the same exclusion
+  `.arkitect/reports` already had. A stale codemap stamp file could fail `bun run lint` locally
+  while CI, which checks out fresh, stayed green.
+
 ## [0.7.0] - 2026-07-18
 
 ### Added
