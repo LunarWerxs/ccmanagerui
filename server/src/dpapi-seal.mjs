@@ -32,7 +32,10 @@ const dec = new TextDecoder();
 let _ffi;
 function ffi() {
   if (_ffi !== undefined) return _ffi;
-  if (!IS_WINDOWS) return (_ffi = null);
+  if (!IS_WINDOWS) {
+    _ffi = null;
+    return _ffi;
+  }
   try {
     const require = createRequire(import.meta.url);
     // bun:ffi is a Bun builtin; under Node this require throws and we fall back to plaintext.
