@@ -28,7 +28,16 @@ function setButtonEl(id: T, el: Element | ComponentPublicInstance | null) {
 function measure() {
   const active = buttonEls.value[model.value];
   if (!active || !tablistEl.value) return;
-  indicatorStyle.value = { transform: `translateX(${active.offsetLeft}px)`, width: `${active.offsetWidth}px` };
+  // The indicator is absolutely positioned, so its origin is the tablist's PADDING box, while
+  // this measured delta is border-edge to border-edge — hence the clientLeft (= border-left
+  // width) subtraction. Previously the indicator sat at `left-1` AND translated by the full
+  // offset, double-counting the container's 4px pad and sliding every pill right of its own
+  // label (dead space on the right of a wide tab like "Automation", none on the left).
+  // Rect-based rather than offsetLeft so a zoomed/transformed ancestor stays consistent.
+  const listRect = tablistEl.value.getBoundingClientRect();
+  const rect = active.getBoundingClientRect();
+  const left = rect.left - listRect.left - tablistEl.value.clientLeft;
+  indicatorStyle.value = { transform: `translateX(${left}px)`, width: `${rect.width}px` };
   indicatorReady.value = true;
 }
 
@@ -59,7 +68,7 @@ onBeforeUnmount(() => {
   >
     <div
       v-if="indicatorReady"
-      class="pointer-events-none absolute inset-y-1 left-1 rounded-md bg-background shadow-sm transition-[transform,width] duration-200 ease-out"
+      class="pointer-events-none absolute inset-y-1 left-0 rounded-md bg-background shadow-sm transition-[transform,width] duration-200 ease-out"
       :style="indicatorStyle"
       aria-hidden="true"
     />
