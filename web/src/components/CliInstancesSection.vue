@@ -11,6 +11,7 @@
 import {
   ArrowDown,
   ArrowUp,
+  ChevronDown,
   EllipsisVertical,
   Link2,
   LogIn,
@@ -22,6 +23,7 @@ import {
   Terminal,
   Trash2,
 } from '@lucide/vue'
+import { useStorage } from '@vueuse/core'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -130,6 +132,9 @@ const { sortedRows, toggleSort, indicatorFor } = useSortable(
 function isBusy(inst: CliInstance): boolean {
   return busyIds.value.has(inst.id)
 }
+
+// Persisted collapse state, matching the Instances table's own.
+const cliOpen = useStorage('ccmanagerui.instances.cliOpen', true)
 
 // --- create ---
 const createOpen = ref(false)
@@ -322,7 +327,13 @@ onUnmounted(stopPolling)
     <!-- Borderless toolbar, same as the Instances one above it — the table header below draws the
          only line this heading needs. -->
     <div class="flex flex-wrap items-center justify-between gap-2 p-3">
-      <div class="flex items-center gap-2 text-sm font-semibold">
+      <!-- Heading doubles as the collapse trigger, mirroring the Instances table above. -->
+      <button
+        type="button"
+        class="flex items-center gap-2 rounded-md text-sm font-semibold transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        :aria-expanded="cliOpen"
+        @click="cliOpen = !cliOpen"
+      >
         <Terminal class="size-4" />
         {{ $t('cliInstances.title') }}
         <span class="text-muted-foreground">({{ unlinkedCliInstances.length }})</span>
@@ -331,7 +342,11 @@ onUnmounted(stopPolling)
         <span v-if="linkedCount > 0" class="text-xs font-normal text-muted-foreground">
           {{ $t('cliInstances.linkedElsewhere', { count: linkedCount }) }}
         </span>
-      </div>
+        <ChevronDown
+          class="size-4 text-muted-foreground transition-transform duration-200"
+          :class="cliOpen ? '' : '-rotate-90'"
+        />
+      </button>
       <div class="flex flex-wrap items-center gap-1.5">
         <Button
           variant="outline"
@@ -343,13 +358,24 @@ onUnmounted(stopPolling)
         >
           <RefreshCw :class="loading ? 'animate-spin' : ''" />
         </Button>
-        <Button size="sm" @click="openCreateDialog">
-          <Plus /> {{ $t('cliInstances.createInstance') }}
+        <!-- Plus at rest, label on hover/focus — same expanding pill as Instances and New run. -->
+        <Button
+          size="sm"
+          class="group/create gap-0 overflow-hidden transition-all"
+          :aria-label="$t('cliInstances.createInstance')"
+          @click="openCreateDialog"
+        >
+          <Plus class="shrink-0" />
+          <span
+            class="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover/create:ml-1.5 group-hover/create:max-w-[9rem] group-hover/create:opacity-100 group-focus-visible/create:ml-1.5 group-focus-visible/create:max-w-[9rem] group-focus-visible/create:opacity-100"
+          >{{ $t('cliInstances.createInstance') }}</span>
         </Button>
       </div>
     </div>
 
-    <Table>
+    <!-- v-show rather than a height animation, for the same reason as the Instances table: an
+         overflow-hidden wrapper would break this table's `sticky top-0` header. -->
+    <Table v-show="cliOpen">
         <TableHeader class="sticky top-0 z-10 bg-background">
           <TableRow>
             <TableHead class="w-10 cursor-pointer select-none" @click="toggleSort('loggedIn')">

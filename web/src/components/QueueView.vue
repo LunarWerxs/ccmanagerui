@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, FastForward, ListPlus, Plus, Power, PowerOff } from '@lucide/vue'
+import { ChevronDown, FastForward, ListPlus, Plus, Power, PowerOff, Trash2 } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -10,6 +10,7 @@ import { useBuilder } from '@/composables/useBuilder'
 import { useCliInstances } from '@/composables/useCliInstances'
 import { useData } from '@/composables/useData'
 import { useInstances } from '@/composables/useInstances'
+import { usePanels } from '@/composables/usePanels'
 import type { QueueItem } from '@/lib/api'
 import * as api from '@/lib/api'
 import { displayName } from '@/lib/instance-appearance'
@@ -19,6 +20,7 @@ import InfoHint from '@/shell/InfoHint.vue'
 const { t } = useI18n()
 const { queue, queueLoaded, accounts, scheduler, refreshQueue } = useData()
 const { openBuilder, openEditor } = useBuilder()
+const { openSettingsTab } = usePanels()
 // Run-as resolution mirrors QueueBuilder's accountOptions: an item pinned to a signed-in
 // instance ('desktop:<dir>' / 'cli:<id>') resolves through these live lists; a bare uuid is the
 // legacy sqlite accounts fallback. Refresh here too (silent) — these singletons only
@@ -31,6 +33,13 @@ onMounted(() => {
   void refreshCliInstances({ silent: true })
 })
 const expanded = ref<string | null>(null)
+
+// What the state MEANS, then what clicking does. Mirrors SchedulerStatus's header chip, which
+// says the same two things about the same setting.
+const schedulerTooltip = computed(
+  () =>
+    `${scheduler.value?.enabled ? t('queue.schedulerOnHint') : t('queue.schedulerOffHint')} ${t('queue.schedulerClickHint')}`,
+)
 
 // A finished run is history, not a to-do. Left in the one flat list they crowd out the handful of
 // items that still need something to happen, and the panel reads as a pile of work rather than a
@@ -124,6 +133,39 @@ async function remove(item: QueueItem) {
   }
   await refreshQueue()
 }
+
+// --- clear finished ----------------------------------------------------------
+// Two-click confirm rather than a dialog, matching Settings' Disconnect: the click is reversible in
+// spirit (these runs are already over and re-queuing one is a click away) but it is still a bulk
+// delete, so it should not fire on a stray click. The confirm resets on blur.
+const confirmClear = ref(false)
+const clearing = ref(false)
+async function clearFinished() {
+  if (!confirmClear.value) {
+    confirmClear.value = true
+    return
+  }
+  confirmClear.value = false
+  clearing.value = true
+  // No bulk endpoint exists, and a local daemon has no reason to grow one for this: the items are
+  // deleted concurrently and each failure is counted rather than aborting the rest.
+  const results = await Promise.all(
+    finished.value.map((item) =>
+      api
+        .deleteQueueItem(item.id)
+        .then(() => true)
+        .catch(() => false),
+    ),
+  )
+  clearing.value = false
+  const failed = results.filter((ok) => !ok).length
+  if (failed) toast.error(t('queue.toastClearFailed', { n: failed }))
+  else toast.success(t('queue.toastCleared', { n: results.length }))
+  // Collapse the section: leaving an empty "Finished (0)" disclosure open reads as a broken filter.
+  showFinished.value = false
+  expanded.value = null
+  await refreshQueue()
+}
 </script>
 
 <template>
@@ -139,18 +181,23 @@ async function remove(item: QueueItem) {
       </div>
       <div class="flex items-center gap-2">
         <!-- scheduler state at a glance: an icon (not a text pill), state + meaning on hover.
-             The actual toggle lives in Settings → Scheduler. -->
+             A button, not a span: this indicator is where people NOTICE the scheduler is off, so
+             it should also be the way to go fix it. Deep-links to Settings → Scheduler, which
+             pulses on arrival so the landing spot is obvious. -->
         <IconTooltip
           :label="scheduler?.enabled ? $t('queue.schedulerOnLabel') : $t('queue.schedulerOffLabel')"
-          :description="scheduler?.enabled ? $t('queue.schedulerOnHint') : $t('queue.schedulerOffHint')"
+          :description="schedulerTooltip"
         >
-          <span
-            class="inline-flex size-6 items-center justify-center rounded-md"
+          <button
+            type="button"
+            class="inline-flex size-6 items-center justify-center rounded-md transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
             :class="scheduler?.enabled ? 'text-success' : 'text-muted-foreground'"
+            :aria-label="scheduler?.enabled ? $t('queue.schedulerOnLabel') : $t('queue.schedulerOffLabel')"
+            @click="openSettingsTab('scheduler')"
           >
             <Power v-if="scheduler?.enabled" class="size-3.5" />
             <PowerOff v-else class="size-3.5" />
-          </span>
+          </button>
         </IconTooltip>
         <!-- manual drain: run everything already due, skipping busy sessions -->
         <Button
@@ -232,15 +279,31 @@ async function remove(item: QueueItem) {
       </p>
 
       <template v-if="finished.length > 0">
-        <button
-          type="button"
-          class="mt-1 flex w-full items-center gap-1.5 rounded-md px-1 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-          :aria-expanded="showFinished"
-          @click="showFinished = !showFinished"
-        >
-          <ChevronDown class="size-3.5 transition-transform" :class="showFinished ? 'rotate-0' : '-rotate-90'" />
-          {{ showFinished ? $t('queue.hideFinished') : $t('queue.showFinished', { n: finished.length }) }}
-        </button>
+        <div class="mt-1 flex items-center gap-1">
+          <button
+            type="button"
+            class="flex flex-1 items-center gap-1.5 rounded-md px-1 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            :aria-expanded="showFinished"
+            @click="showFinished = !showFinished"
+          >
+            <ChevronDown class="size-3.5 transition-transform" :class="showFinished ? 'rotate-0' : '-rotate-90'" />
+            {{ showFinished ? $t('queue.hideFinished') : $t('queue.showFinished', { n: finished.length }) }}
+          </button>
+          <!-- Finished runs are history the queue accumulates forever; this is the only way to get
+               rid of them short of deleting each card. Sits on the disclosure row so it is right
+               where you are already looking when you go to check the pile. -->
+          <Button
+            :variant="confirmClear ? 'destructive' : 'ghost'"
+            size="xs"
+            :disabled="clearing"
+            :title="$t('queue.clearFinishedTitle')"
+            @click="clearFinished"
+            @blur="confirmClear = false"
+          >
+            <Trash2 />
+            {{ confirmClear ? $t('queue.clearFinishedConfirm') : $t('queue.clearFinished') }}
+          </Button>
+        </div>
 
         <div v-if="showFinished" class="mt-2">
           <QueueItemCard

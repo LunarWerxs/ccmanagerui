@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   Boxes,
+  ChevronDown,
   EllipsisVertical,
   FolderOpen,
   Gauge,
@@ -19,6 +20,7 @@ import {
   TriangleAlert,
   Unlink,
 } from '@lucide/vue'
+import { useStorage } from '@vueuse/core'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -120,6 +122,11 @@ const { sortedRows, toggleSort, indicatorFor } = useSortable(
     },
   ],
 )
+
+// Collapse state, persisted: someone who only uses the desktop app (or only the CLI) collapses the
+// other table once and expects it to stay that way. Same storage-key convention as the sessions
+// sidebar's width/scope refs.
+const desktopOpen = useStorage('ccmanagerui.instances.desktopOpen', true)
 
 const createOpen = ref(false)
 const creating = ref(false)
@@ -365,7 +372,14 @@ function openEditDialog(inst: CMInstance) {
   editError.value = null
   editOpen.value = true
 }
-async function onEditSubmit(payload: {
+/**
+ * Persist an appearance edit AS IT HAPPENS, leaving the dialog open.
+ *
+ * No success toast: this fires on every debounced keystroke, so a toast per change would be a
+ * stream of confetti for something the user can already see happening in the row behind the
+ * dialog. A FAILURE still has to be said out loud, though — silence there would read as "saved".
+ */
+async function onEditApply(payload: {
   label: string | null
   icon: CMInstance['icon']
   color: CMInstance['color']
@@ -376,16 +390,16 @@ async function onEditSubmit(payload: {
   editError.value = null
   try {
     const result = await setAppearance(inst.dir, payload)
-    if (result?.ok) {
-      toast.success(t('instances.toastSaved'))
-      editOpen.value = false
-      editTarget.value = null
-    } else {
-      editError.value = result?.message ?? t('instances.toastSaveFailed')
-    }
+    if (!result?.ok) editError.value = result?.message ?? t('instances.toastSaveFailed')
   } finally {
     editing.value = false
   }
+}
+/** Closing is not a save (each edit already persisted); it just drops the target. */
+function onEditClosed(isOpen: boolean) {
+  if (isOpen) return
+  editTarget.value = null
+  editError.value = null
 }
 
 function openDeleteDialog(inst: CMInstance) {
@@ -466,11 +480,25 @@ onUnmounted(() => {
          header right below already draws a line there, and two rules a row apart was one of them
          doing nothing but adding weight. -->
     <div class="flex flex-wrap items-center justify-between gap-2 p-3">
-      <div class="flex items-center gap-2 text-sm font-semibold">
+      <!-- The heading doubles as the collapse trigger: someone who lives in the CLI wants this
+           table out of the way, and vice versa. Disabled as a trigger when the table is hidden
+           outright (Settings → Appearance), where there is nothing to collapse. -->
+      <button
+        type="button"
+        class="flex items-center gap-2 rounded-md text-sm font-semibold transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        :disabled="!showDesktopInstances"
+        :aria-expanded="desktopOpen"
+        @click="desktopOpen = !desktopOpen"
+      >
         <Boxes class="size-4" />
         {{ $t('instances.title') }}
         <span v-if="showDesktopInstances" class="text-muted-foreground">({{ instances.length }})</span>
-      </div>
+        <ChevronDown
+          v-if="showDesktopInstances"
+          class="size-4 text-muted-foreground transition-transform duration-200"
+          :class="desktopOpen ? '' : '-rotate-90'"
+        />
+      </button>
       <div class="flex flex-wrap items-center gap-1.5">
         <IconTooltip :label="$t('instances.refresh')" :description="$t('instances.refreshHint')">
           <Button
@@ -497,8 +525,20 @@ onUnmounted(() => {
             <Gauge :class="refreshingAllUsage ? 'animate-pulse' : ''" />
           </Button>
         </IconTooltip>
-        <Button v-if="showDesktopInstances" size="sm" @click="openCreateDialog">
-          <Plus /> {{ $t('instances.createInstance') }}
+        <!-- Plus at rest, label on hover/focus: the toolbar's other controls are already icon-only,
+             and a lone labelled button set the row's width for a phrase you only need once.
+             Same expanding-pill mechanics as the queue drawer's New run. -->
+        <Button
+          v-if="showDesktopInstances"
+          size="sm"
+          class="group/create gap-0 overflow-hidden transition-all"
+          :aria-label="$t('instances.createInstance')"
+          @click="openCreateDialog"
+        >
+          <Plus class="shrink-0" />
+          <span
+            class="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all duration-200 ease-out group-hover/create:ml-1.5 group-hover/create:max-w-[9rem] group-hover/create:opacity-100 group-focus-visible/create:ml-1.5 group-focus-visible/create:max-w-[9rem] group-focus-visible/create:opacity-100"
+          >{{ $t('instances.createInstance') }}</span>
         </Button>
       </div>
     </div>
@@ -538,7 +578,11 @@ onUnmounted(() => {
     <div class="flex min-h-0 flex-1 flex-col gap-10 overflow-y-auto scroll-slim">
       <!-- Both tables are hideable (Settings → General): plenty of people use only the desktop app,
            or only the CLI, and shouldn't have to look at an empty table for the other. -->
-      <Table v-if="showDesktopInstances">
+      <!-- v-show, not a height animation: the table header is `sticky top-0`, and any wrapper with
+           `overflow: hidden` (which is how the kit's ExpandTransition animates) becomes the
+           scrollport sticky resolves against, so the header would silently stop sticking. The
+           chevron carries the state change instead. -->
+      <Table v-show="showDesktopInstances && desktopOpen">
         <TableHeader class="sticky top-0 z-10 bg-background">
           <TableRow>
             <TableHead
@@ -828,10 +872,10 @@ onUnmounted(() => {
       :current-label="editTarget?.label ?? null"
       :current-icon="editTarget?.icon ?? null"
       :current-color="editTarget?.color ?? null"
-      :running="editTarget?.isRunning ?? false"
       :submitting="editing"
       :error-message="editError"
-      @submit="onEditSubmit"
+      @apply="onEditApply"
+      @update:open="onEditClosed"
     />
   </div>
 </template>

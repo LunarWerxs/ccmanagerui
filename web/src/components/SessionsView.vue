@@ -4,6 +4,7 @@ import {
   Archive,
   ArrowLeft,
   Boxes,
+  CalendarRange,
   Check,
   CircleCheck,
   CircleSlash,
@@ -59,7 +60,13 @@ import { Switch } from '@/components/ui/switch'
 import { useData } from '@/composables/useData'
 import { useInstances } from '@/composables/useInstances'
 import { useShellWidth } from '@/composables/useShellWidth'
-import type { ArchivedScope, SessionSearchResult, SessionSummary, TailResult } from '@/lib/api'
+import type {
+  ArchivedScope,
+  SessionPeriod,
+  SessionSearchResult,
+  SessionSummary,
+  TailResult,
+} from '@/lib/api'
 import * as api from '@/lib/api'
 import { baseName, shortId, timeAgo } from '@/lib/format'
 import { displayName } from '@/lib/instance-appearance'
@@ -73,6 +80,7 @@ const {
   queue,
   sessionInstanceFilter,
   sessionArchivedScope,
+  sessionPeriod,
 } = useData()
 const { t } = useI18n()
 
@@ -94,14 +102,19 @@ const instanceLabelFor = (folder: string) =>
 // silent: this view has no instance-list spinner to drive, and the toolbar Refresh icon it would
 // toggle belongs to a different view entirely.
 onMounted(() => void refreshInstances({ silent: true }))
-// Both scopes are applied server-side, so either one changing needs a refetch, not a re-filter.
-watch([sessionInstanceFilter, sessionArchivedScope], () => refreshSessions())
+// Every scope is applied server-side, so any of them changing needs a refetch, not a re-filter.
+watch([sessionInstanceFilter, sessionArchivedScope, sessionPeriod], () => refreshSessions())
 
 /** The ⋯ trigger reports "something is narrowing this list". Otherwise a filter set once and
  *  forgotten reads as an empty/short list with no visible cause, now that the controls are a
  *  menu rather than a row of lit-up buttons. */
 const filtersActive = computed(
-  () => !!sessionInstanceFilter.value || sessionArchivedScope.value !== 'hide',
+  () =>
+    !!sessionInstanceFilter.value ||
+    sessionArchivedScope.value !== 'hide' ||
+    // Only a WIDENED window counts. 24h is the default, so flagging it would light the trigger up
+    // permanently and the signal would stop meaning anything.
+    sessionPeriod.value !== '24h',
 )
 const instanceFilterLabel = computed(() => {
   const v = sessionInstanceFilter.value
@@ -116,6 +129,13 @@ const ARCHIVED_LABEL: Record<ArchivedScope, string> = {
   only: 'sessions.archivedOnly',
 }
 const archivedScopeLabel = computed(() => t(ARCHIVED_LABEL[sessionArchivedScope.value]))
+const PERIOD_LABEL: Record<SessionPeriod, string> = {
+  '24h': 'sessions.period24h',
+  '7d': 'sessions.period7d',
+  '30d': 'sessions.period30d',
+  all: 'sessions.periodAll',
+}
+const periodLabel = computed(() => t(PERIOD_LABEL[sessionPeriod.value]))
 
 // --- "done" marks: seen it / handled it, without hiding it ---------------------
 // Persisted server-side (sqlite) rather than in localStorage: these are the user's own judgements
@@ -224,6 +244,12 @@ const filtered = computed(() => {
       s.session_id.includes(q),
   )
 })
+
+/** An empty list under a bounded window is ambiguous: "nothing here" or "nothing here LATELY"?
+ *  Say which, so a quiet day doesn't read as a broken list. */
+const emptyBecauseOfPeriod = computed(
+  () => sessionPeriod.value !== 'all' && !search.value.trim() && sessions.value.length === 0,
+)
 
 // --- advanced (body) search: server-side, streams every transcript's raw content ---------
 // Deliberately independent of `filtered` above (client-side, metadata-only, always fast);
@@ -599,6 +625,27 @@ function copy(text: string) {
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
 
+                  <!-- how far back the list reaches. Applied server-side before the newest-N cap,
+                       so widening the window genuinely reaches further back rather than
+                       reshuffling the same rows. -->
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>
+                      <CalendarRange />
+                      {{ $t('sessions.period') }}
+                      <span class="ml-auto max-w-24 truncate pl-2 text-[11px] text-muted-foreground">
+                        {{ periodLabel }}
+                      </span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent class="w-52">
+                      <DropdownMenuRadioGroup v-model="sessionPeriod">
+                        <DropdownMenuRadioItem value="24h">{{ $t('sessions.period24h') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="7d">{{ $t('sessions.period7d') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="30d">{{ $t('sessions.period30d') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="all">{{ $t('sessions.periodAll') }}</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+
                   <template v-if="doneCount > 0">
                     <DropdownMenuSeparator />
                     <DropdownMenuItem @select="clearDoneMarks">
@@ -690,9 +737,19 @@ function copy(text: string) {
             </button>
           </template>
 
-          <p v-else-if="filtered.length === 0" class="p-4 text-center text-xs text-muted-foreground">
-            {{ $t('sessions.noSessionsFound') }}
-          </p>
+          <div v-else-if="filtered.length === 0" class="p-4 text-center text-xs text-muted-foreground">
+            <p>{{ $t('sessions.noSessionsFound') }}</p>
+            <!-- the window is the most likely reason, and it is invisible until you open the ⋯
+                 menu; offer the widening instead of making the user go find it -->
+            <button
+              v-if="emptyBecauseOfPeriod"
+              type="button"
+              class="mt-1.5 font-medium text-primary hover:underline"
+              @click="sessionPeriod = 'all'"
+            >
+              {{ $t('sessions.periodEmptyHint', { period: periodLabel }) }}
+            </button>
+          </div>
 
           <template v-if="!bodySearchActive">
             <!-- Each row owns a ContextMenu so right-click acts on the row under the pointer without

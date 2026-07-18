@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -32,62 +31,76 @@ const props = defineProps<{
   currentLabel?: string | null
   currentIcon?: InstanceIconKey | null
   currentColor?: InstanceColorKey | null
-  /** Running instances show the live active-state dot in the preview. */
-  running?: boolean
   submitting?: boolean
   errorMessage?: string | null
 }>()
 
 const emit = defineEmits<{
-  /** The parent performs the API call and closes the dialog once it knows the outcome. `label`
+  /** Fired as the user edits (debounced). The parent persists it; the dialog stays open. `label`
    *  is null when the field is empty (falls back to the folder name). */
-  submit: [payload: { label: string | null; icon: InstanceIconKey; color: InstanceColorKey }]
+  apply: [payload: { label: string | null; icon: InstanceIconKey; color: InstanceColorKey }]
 }>()
 
 const name = ref('')
 const icon = ref<InstanceIconKey>('box')
 const color = ref<InstanceColorKey>('slate')
 
+// Set while the watcher below is seeding, so re-opening the dialog doesn't immediately write back
+// the values it just read.
+let seeding = false
+
 // (Re)seed the fields each time the dialog opens: the name from the current label (empty when
 // unset, so the folder name shows as placeholder), the icon/color from the current choice or the
 // deterministic default so the pickers open on the glyph/hue already visible in the table.
 watch(open, (isOpen) => {
   if (!isOpen) return
+  seeding = true
   name.value = props.currentLabel ?? ''
   icon.value = resolveIconKey({ dir: props.dir ?? '', icon: props.currentIcon ?? null })
   color.value = resolveColorKey({ dir: props.dir ?? '', color: props.currentColor ?? null })
+  // Cleared after the watcher below has seen this tick's changes.
+  void nextTick(() => {
+    seeding = false
+  })
 })
 
-function handleSubmit() {
-  const trimmed = name.value.trim()
-  emit('submit', {
-    label: trimmed.length > 0 ? trimmed : null,
-    icon: icon.value,
-    color: color.value,
-  })
-}
+/**
+ * There is no in-dialog preview any more, because the real thing is right there behind the flyout.
+ * A miniature copy of a row that is already on screen is a worse answer to "what will this look
+ * like" than simply making the row itself change, and it quietly encouraged the fiction that
+ * nothing had happened until you pressed Save.
+ *
+ * So every edit persists as you make it. Debounced, because the name is typed a character at a
+ * time and each write touches instance-meta.json on disk; icon and colour are single clicks and
+ * would be fine immediately, but they share the path for one rule instead of two.
+ */
+let applyTimer: ReturnType<typeof setTimeout> | undefined
+watch([name, icon, color], () => {
+  if (seeding) return
+  clearTimeout(applyTimer)
+  applyTimer = setTimeout(() => {
+    const trimmed = name.value.trim()
+    emit('apply', {
+      label: trimmed.length > 0 ? trimmed : null,
+      icon: icon.value,
+      color: color.value,
+    })
+  }, 350)
+})
+onBeforeUnmount(() => clearTimeout(applyTimer))
 </script>
 
 <template>
   <Dialog v-model:open="open">
     <DialogContent>
-      <form @submit.prevent="handleSubmit">
+      <form @submit.prevent="open = false">
         <DialogHeader>
+          <!-- No description. It read "Rename this instance and pick its icon and color. Changes
+               apply live, even while it's running." — three facts the dialog itself already makes
+               obvious: the field is labelled, the swatches are visible, and the row behind now
+               changes as you edit. -->
           <DialogTitle>{{ $t('instances.editDialogTitle') }}</DialogTitle>
-          <DialogDescription>{{ $t('instances.editDialogDescription') }}</DialogDescription>
         </DialogHeader>
-
-        <!-- live preview: the row exactly as it will render in the table -->
-        <div class="mt-3 flex items-center gap-2.5 rounded-lg border border-border bg-muted/30 px-3 py-2.5">
-          <span class="relative inline-flex size-6 items-center justify-center">
-            <component :is="iconComponent(icon)" class="size-5" :style="{ color: colorValue(color) }" />
-            <span
-              v-if="running"
-              class="absolute -right-1 -top-1 size-2 rounded-full bg-success ring-2 ring-background"
-            />
-          </span>
-          <span class="truncate text-sm font-medium">{{ name.trim() || instanceName }}</span>
-        </div>
 
         <div class="mt-3 flex flex-col gap-1.5">
           <label for="instance-edit-name" class="text-xs font-medium text-muted-foreground">
@@ -140,9 +153,12 @@ function handleSubmit() {
 
         <p v-if="errorMessage" class="mt-3 text-xs text-destructive">{{ errorMessage }}</p>
 
+        <!-- "Done", not "Save": everything above is already saved. The button is the way OUT of the
+             dialog, and saying Save would imply the edits were being held back until you pressed
+             it. It still reports an in-flight write so closing mid-save isn't a silent race. -->
         <DialogFooter class="mt-4">
-          <Button type="submit" :disabled="submitting">
-            {{ submitting ? $t('instances.editDialogSaving') : $t('instances.editDialogSubmit') }}
+          <Button type="submit">
+            {{ submitting ? $t('instances.editDialogSaving') : $t('instances.editDialogDone') }}
           </Button>
         </DialogFooter>
       </form>

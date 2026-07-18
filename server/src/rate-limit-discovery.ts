@@ -165,6 +165,10 @@ export async function discoverPendingStops(
     // reader) — that keeps the canonical title logic in exactly one place.
     const session = await getSession(tf.session_id)
     if (!session) continue
+    // Archiving a session is the user saying they are done with it. Auto-resuming one anyway would
+    // reopen work they deliberately filed away — and, because a resume writes to the transcript, it
+    // would drag the session back to the top of a list they had cleared. Their own stop wins.
+    if (session.archived) continue
 
     stops.push({
       id: `disc:${tf.session_id}`,

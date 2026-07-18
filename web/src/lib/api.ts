@@ -18,6 +18,7 @@ import type {
   QueueItem,
   RunEvent,
   SchedulerState,
+  SessionPeriod,
   SessionSearchResult,
   SessionSummary,
   SyncStatus,
@@ -54,6 +55,7 @@ export type {
   QueueStatus,
   RunEvent,
   SchedulerState,
+  SessionPeriod,
   SessionSearchResult,
   SessionSummary,
   SyncStatus,
@@ -104,10 +106,15 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // --- sessions ---------------------------------------------------------------
-export const getSessions = (limit = 200, instance = '', archived: ArchivedScope = 'hide') =>
+export const getSessions = (
+  limit = 200,
+  instance = '',
+  archived: ArchivedScope = 'hide',
+  period: SessionPeriod = '24h',
+) =>
   j<SessionSummary[]>(
     `/api/sessions?limit=${limit}${instance ? `&instance=${encodeURIComponent(instance)}` : ''}` +
-      `${archived === 'hide' ? '' : `&archived=${archived}`}`,
+      `${archived === 'hide' ? '' : `&archived=${archived}`}&period=${period}`,
   )
 /** Set the user's own "done" mark on a session (distinct from Claude Desktop's read-only
  *  `archived` flag). Mark only: never affects which sessions getSessions() returns. */

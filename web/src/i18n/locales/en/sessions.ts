@@ -39,6 +39,12 @@ export default {
   archivedHide: 'Hidden',
   archivedInclude: 'Shown',
   archivedOnly: 'Only archived',
+  period: 'Time period',
+  period24h: 'Last 24 hours',
+  period7d: 'Last 7 days',
+  period30d: 'Last 30 days',
+  periodAll: 'All time',
+  periodEmptyHint: 'Showing {period}. Search all time instead',
   clearDoneMarks: 'Clear all done marks',
   doneMarkCount: '{n} marked done',
   // --- per-session right-click menu ---

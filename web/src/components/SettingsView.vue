@@ -12,18 +12,16 @@ import {
   EyeOff,
   FilePenLine,
   Gauge,
-  KeyRound,
   LogOut,
   MessageCircleQuestion,
   Monitor,
   Power,
   RefreshCw,
-  ShieldCheck,
+  RotateCcw,
   SlidersHorizontal,
   SunMoon,
   Terminal,
   Timer,
-  Trash2,
   User,
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
@@ -54,13 +52,22 @@ const { t } = useI18n()
 // owner request: Accounts didn't warrant a tab, and Scheduler folded into the rest). A
 // deep link (e.g. the composer's tomorrow-preset gear) now scrolls to a section instead of
 // switching a tab. Section anchors are keyed by the old tab ids so callers didn't change.
-const { accounts, scheduler, refreshAccounts, refreshScheduler } = useData()
+// `accounts` is still read here — the auto-resume monitor's per-account overrides list them.
+// Populated by useData's startPolling; nothing in this panel mutates them any more.
+const { accounts, scheduler, refreshScheduler } = useData()
 const { enabled: showTooltips } = useTooltipConfig()
 
 const sectionEls = ref<Record<string, HTMLElement | null>>({})
 function setSectionEl(id: string, el: unknown) {
   sectionEls.value[id] = el as { $el?: HTMLElement } | HTMLElement | null as HTMLElement | null
 }
+
+// Which section is currently flashing after a deep link. A scroll alone lands you somewhere without
+// saying WHERE — on a page of near-identical cards the arrival is ambiguous, so the target pulses
+// briefly (see .settings-flash in style.css). Cleared on a timer, and re-armed if a second deep link
+// arrives while the first is still running.
+const flashSection = ref<string | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | undefined
 
 const { settingsRequestedTab } = usePanels()
 function consumeRequestedTab() {
@@ -71,10 +78,21 @@ function consumeRequestedTab() {
       const el = sectionEls.value[req]
       const node = (el as { $el?: HTMLElement })?.$el ?? (el as HTMLElement | null)
       node?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      // Re-armed from null so clicking the same deep link twice replays the animation; without the
+      // reset the class never changes and the browser has no reason to run it again.
+      flashSection.value = null
+      clearTimeout(flashTimer)
+      nextTick(() => {
+        flashSection.value = req
+        flashTimer = setTimeout(() => {
+          flashSection.value = null
+        }, 1900)
+      })
     })
   }
   if (req !== null) settingsRequestedTab.value = null
 }
+onBeforeUnmount(() => clearTimeout(flashTimer))
 watch(settingsRequestedTab, consumeRequestedTab)
 onMounted(consumeRequestedTab)
 
@@ -182,9 +200,19 @@ async function patchUsageSettings(patch: Partial<api.UsageSettings>) {
 
 // --- transcript editor (server/src/transcript-open.ts): which editor "Open the session file"
 // hands the .jsonl to, so it never hits Windows' unassociated-extension "Pick an app" dialog ---
+// Collapsed by default: auto-detect is right for nearly everyone, so the path field is a
+// destination you go looking for, not something the panel puts in front of you.
+const editorOpen = ref(false)
+
 async function saveTranscriptEditor() {
   if (!(await updateAppSettings({ transcriptEditor: transcriptEditor.value.trim() })))
     toast.error(t('settings.transcriptEditorToastFailed'))
+}
+/** Back to auto-detect. Clearing the box by hand works too, but an explicit "unset this" is the
+ *  only affordance that reads as reversible once a path is in there. */
+async function resetTranscriptEditor() {
+  transcriptEditor.value = ''
+  await saveTranscriptEditor()
 }
 /** The typed override exists but is not what will run, i.e. the server discarded it as a dead path
  *  and fell back to auto-detect. Worth a warning: the field looks honoured but isn't. */
@@ -369,20 +397,6 @@ async function toggleAutoUpdate(enabled: boolean) {
   }
 }
 
-// --- accounts (legacy pasted credentials) ---
-// LIST + DELETE only, deliberately: accounts are added by signing an instance in on the
-// Instances tab (the queue's run-as picker lists every signed-in instance). The old
-// paste-a-token form lived here and confused people into thinking a secret was required —
-// the raw POST /api/accounts route remains for the rare headless/API-key case.
-async function removeAccount(id: string) {
-  try {
-    await api.deleteAccount(id)
-  } catch {
-    toast.error(t('settings.toastAccountDeleteFailed'))
-  }
-  await refreshAccounts()
-}
-
 // --- scheduler ---
 const sched = reactive({
   spacing_seconds: 60,
@@ -554,37 +568,73 @@ defineExpose({ save })
           <Switch :model-value="hideTrayIcon" @update:model-value="toggleHideTrayIcon" />
         </template>
       </SettingsRow>
-      <SettingsRow :icon="FilePenLine" :label="$t('settings.transcriptEditorLabel')">
+      <!-- Progressive disclosure, because the ANSWER is what matters and the input almost never is:
+           auto-detect gets this right for everyone with VS Code / Cursor / Notepad++ / Sublime
+           installed, so the old always-visible path box sat empty and unexplained, asking for an
+           absolute path to solve a problem the user did not have. The row now states which editor
+           will actually open a transcript; the field appears only if you go looking for it. -->
+      <SettingsRow
+        :icon="FilePenLine"
+        :label="$t('settings.transcriptEditorLabel')"
+        clickable
+        @click="editorOpen = !editorOpen"
+      >
         <template #info>
           <InfoHint :text="$t('settings.transcriptEditorHint')" />
         </template>
         <template #control>
-          <div class="flex flex-col items-end gap-1">
-            <Input
-              v-model="transcriptEditor"
-              type="text"
-              :placeholder="$t('settings.transcriptEditorPlaceholder')"
-              class="w-56"
-              @change="saveTranscriptEditor"
-            />
-            <!-- The resolved editor is the only feedback this field can give. A path that points at
-                 nothing makes the Open button a silent no-op, so showing what will really run is
-                 what makes a plain text path safe to type into. -->
-            <span
-              v-if="transcriptEditorResolved"
-              class="max-w-56 truncate text-[11px]"
-              :class="editorOverrideIgnored ? 'text-warning' : 'text-muted-foreground'"
-              :title="transcriptEditorResolved"
-            >
-              {{
-                editorOverrideIgnored
-                  ? $t('settings.transcriptEditorNotFound', { editor: baseName(transcriptEditorResolved) })
-                  : $t('settings.transcriptEditorResolved', { editor: baseName(transcriptEditorResolved) })
-              }}
-            </span>
-          </div>
+          <span
+            class="max-w-44 truncate"
+            :class="editorOverrideIgnored ? 'text-warning' : ''"
+            :title="transcriptEditorResolved || undefined"
+          >
+            {{
+              transcriptEditorResolved
+                ? baseName(transcriptEditorResolved)
+                : $t('settings.transcriptEditorPlaceholder')
+            }}
+          </span>
+          <!-- auto-detect is the norm, so say when it is NOT in play rather than when it is -->
+          <Badge v-if="transcriptEditor.trim()" variant="secondary">
+            {{ $t('settings.transcriptEditorCustomBadge') }}
+          </Badge>
+          <ChevronDown
+            class="size-4 transition-transform duration-200"
+            :class="editorOpen ? 'rotate-180' : ''"
+          />
         </template>
       </SettingsRow>
+      <ExpandTransition :open="editorOpen">
+        <div class="space-y-1.5 px-3.5 pb-3.5 pt-1">
+          <Input
+            v-model="transcriptEditor"
+            type="text"
+            :placeholder="$t('settings.transcriptEditorPlaceholder')"
+            class="w-full font-mono text-xs"
+            @change="saveTranscriptEditor"
+          />
+          <!-- A path that points at nothing makes the Open button a silent no-op, so the one piece
+               of feedback this field can give is what will REALLY run. -->
+          <p
+            class="text-[11px]"
+            :class="editorOverrideIgnored ? 'text-warning' : 'text-muted-foreground'"
+          >
+            {{
+              editorOverrideIgnored
+                ? $t('settings.transcriptEditorNotFound', { editor: baseName(transcriptEditorResolved) })
+                : $t('settings.transcriptEditorResolved', { editor: baseName(transcriptEditorResolved) })
+            }}
+          </p>
+          <Button
+            v-if="transcriptEditor.trim()"
+            variant="ghost"
+            size="xs"
+            @click="resetTranscriptEditor"
+          >
+            <RotateCcw /> {{ $t('settings.transcriptEditorReset') }}
+          </Button>
+        </div>
+      </ExpandTransition>
       <!-- which instance tables to show is an appearance choice (moved here from Usage) -->
       <SettingsRow :icon="Monitor" :label="$t('settings.showDesktopInstancesLabel')">
         <template #info>
@@ -769,9 +819,20 @@ defineExpose({ save })
       <p v-if="syncError" class="px-3.5 pb-2.5 text-xs text-destructive">{{ syncError }}</p>
     </SettingsGroup>
 
-    <!-- scheduler (deep-link target: composer tomorrow gear scrolls here) -->
-    <div :ref="(el) => setSectionEl('scheduler', el)" class="scroll-mt-4">
-    <SettingsGroup :label="$t('settings.scheduler')" :description="$t('settings.schedulerHint')">
+    <!-- scheduler (deep-link target: the queue drawer's indicator, the header chip and the
+         composer's tomorrow gear all scroll here).
+         The ref sits on the GROUP, not on a wrapper div. A wrapper is what caused the missing gap
+         above the auto-resume monitor: the page's space-y-6 only applies between its DIRECT
+         children, so two groups sharing one wrapper got no margin between them. Anchoring the deep
+         link to the group itself keeps both groups direct children, and scopes the landing flash to
+         the section actually asked for rather than to both at once. -->
+    <SettingsGroup
+      :ref="(el) => setSectionEl('scheduler', el)"
+      :label="$t('settings.scheduler')"
+      :description="$t('settings.schedulerHint')"
+      class="scroll-mt-4"
+      :class="flashSection === 'scheduler' ? 'settings-flash' : ''"
+    >
       <SettingsRow :icon="Power" :label="$t('settings.schedulerEnabledLabel')">
         <template #control>
           <span>
@@ -835,7 +896,12 @@ defineExpose({ save })
       <!-- everything below only applies while the monitor is on: collapse it away when
            it's off instead of leaving dead knobs on screen (owner request) -->
       <ExpandTransition :open="monitorSettings?.enabled ?? false">
-        <div>
+        <!-- divide-y is restated here for the same reason the scheduler deep link avoids a wrapper
+             div: SettingsGroup draws its hairlines with divide-y on the one div that directly wraps
+             its slot, and ExpandTransition inserts two divs of its own. Everything in this
+             disclosure is therefore a single child to that container, so the per-account rows below
+             rendered back-to-back with no separator while structurally identical rows got one. -->
+        <div class="divide-y divide-border/60">
           <!-- the tuning numbers are advanced, mirroring the Scheduler group's disclosure -->
           <SettingsRow
             :icon="SlidersHorizontal"
@@ -897,35 +963,13 @@ defineExpose({ save })
         </div>
       </ExpandTransition>
     </SettingsGroup>
-    </div>
 
-    <!-- accounts (kept, but no longer its own tab) -->
-    <SettingsGroup :label="$t('settings.accounts')" :description="$t('settings.accountsIntro')">
-      <SettingsRow
-        v-for="a in accounts"
-        :key="a.id"
-        :icon="a.auth_type === 'api_key' ? KeyRound : ShieldCheck"
-        :label="a.label"
-      >
-        <template #description>
-          <span class="font-mono text-[11px]">{{ a.secret_masked }}</span>
-        </template>
-        <template #control>
-          <Badge variant="secondary">
-            {{ a.auth_type === 'api_key' ? $t('settings.apiKeyBadge') : $t('settings.oauthBadge') }}
-          </Badge>
-          <Button size="icon-sm" variant="ghost" :title="$t('settings.removeAction')" @click="removeAccount(a.id)">
-            <Trash2 />
-          </Button>
-        </template>
-      </SettingsRow>
-      <p v-if="accounts.length === 0" class="px-3.5 py-2.5 text-xs text-muted-foreground italic">
-        {{ $t('settings.noAccountsYet') }}
-      </p>
-
-      <!-- No add-a-token form here anymore (it read as "adding an account needs a secret" and
-           sent people hunting for tokens): accounts are added by signing an instance in on the
-           Instances tab. This list only manages leftover pasted credentials. -->
-    </SettingsGroup>
+    <!-- No Accounts group here anymore. It listed only LEGACY pasted credentials, which are
+         nobody's normal path since accounts arrived by signing an instance in, so for almost
+         everyone it rendered as a section whose entire content was "no accounts yet" above a
+         note telling you to go to the Instances tab. A settings section that exists to redirect
+         you elsewhere is a dead end, not a setting (owner request). The per-account monitor
+         overrides above still list accounts where they actually mean something, and DELETE
+         /api/accounts stays for the rare leftover credential. -->
   </div>
 </template>

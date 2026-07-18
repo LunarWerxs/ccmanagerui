@@ -78,12 +78,11 @@ export default {
   createDialogSubmit: 'Create',
   createDialogCreating: 'Creating…',
   editDialogTitle: 'Edit instance',
-  editDialogDescription:
-    "Rename this instance and pick its icon and color. Changes apply live, even while it's running.",
   editDialogNameLabel: 'Display name',
   editDialogIconLabel: 'Icon',
   editDialogColorLabel: 'Color',
-  editDialogSubmit: 'Save',
+  // "Done", not "Save": every edit persists as it is made, so this button only closes the dialog.
+  editDialogDone: 'Done',
   editDialogSaving: 'Saving…',
   desktopMsixTitle: 'Claude Desktop is installed as the MSIX (Windows Apps) build',
   desktopMsixBody:
@@ -111,7 +110,6 @@ export default {
   toastCreateFailed: 'Failed to create instance.',
   toastDeleted: 'Instance deleted.',
   toastDeleteFailed: 'Failed to delete instance.',
-  toastSaved: 'Changes saved.',
   toastSaveFailed: 'Failed to save changes.',
   toastShortcutCreated: 'Desktop shortcut created.',
   toastShortcutFailed: 'Failed to create desktop shortcut.',

@@ -24,6 +24,7 @@
 import { isDispatchReady } from './boot-state'
 import { coerceQueueItem, db, getSetting, setSetting } from './db'
 import { dispatchItem, isActive, isSessionActive } from './dispatch'
+import { sessionMetaMap } from './instance-sessions'
 import { discoverPendingStops, type RateLimitedStop } from './rate-limit-discovery'
 import type {
   MonitorSettings,
@@ -184,7 +185,11 @@ function upsertState(
     fields.message,
     fields.nextCheckAt ?? null,
     new Date().toISOString(),
-    item.discovered ? item.title : null,
+    // Stored for EVERY row, not just discovered ones. A dispatched stop used to join its title back
+    // out of queue_items, so clearing finished runs from the queue left the row labelled with a bare
+    // session id. The title is a snapshot of a moment anyway; keeping our own copy makes the row
+    // stand on its own.
+    item.title,
     item.discovered ? 1 : 0,
   )
 }
@@ -216,17 +221,80 @@ function hasPendingResume(sessionId: string): boolean {
   return false
 }
 
-/** UI view of every tracked stop (for the status chips in the Instances/Queue surface). */
-export function monitorStatus(): MonitorStatusRow[] {
+/**
+ * Settle every 'scheduled' row whose resume has already had its outcome.
+ *
+ * Nothing else does this. A row was written the moment a resume was enqueued and then never looked
+ * at again: `processRateLimited` skips any stop it has already seen, `dispatchDueResumes` only
+ * dispatches, and `finalize`/`cancelItem` in dispatch.ts touch `queue_items` alone. So a resume that
+ * ran to completion in March still reported "Scheduled · resumes ~09:14" forever, and deleting the
+ * queue item left a row pointing at nothing at all. That is why the list filled up with runs the
+ * user knew were long finished or cancelled.
+ *
+ * Called from monitorStatus() rather than only from the tick, deliberately: the tick returns early
+ * while the monitor is switched OFF, which is exactly when a user is most likely to be looking at
+ * this list wondering why it is full of history.
+ */
+function reconcileScheduled(): void {
   const rows = db
-    .query<MonitorStateRow, []>('select * from monitor_state order by updated_at desc')
+    .query<{ item_id: string; resume_item_id: string | null }, []>(
+      "select item_id, resume_item_id from monitor_state where state = 'scheduled'",
+    )
     .all()
+  for (const r of rows) {
+    // A 'scheduled' row with no resume id never got one; there is nothing to wait for.
+    const q = r.resume_item_id
+      ? db
+          .query<{ status: string }, [string]>('select status from queue_items where id = ?')
+          .get(r.resume_item_id)
+      : null
+    // Still pending: leave it alone, this is the one genuinely live case.
+    if (q && (q.status === 'queued' || q.status === 'running')) continue
+
+    // A resume that hit the wall again is not this row's problem: the new stop gets its own
+    // monitor_state row and its own attempt count. Settle this one either way.
+    const settled: { state: MonitorStateName; message: string } = !q
+      ? { state: 'done', message: 'the scheduled resume is no longer in the queue' }
+      : q.status === 'completed'
+        ? { state: 'done', message: 'resumed and finished' }
+        : q.status === 'canceled'
+          ? { state: 'done', message: 'the scheduled resume was canceled' }
+          : q.status === 'failed'
+            ? { state: 'needs_human', message: 'the scheduled resume failed' }
+            : { state: 'done', message: `the scheduled resume ended (${q.status})` }
+    db.query(
+      'update monitor_state set state = ?, message = ?, updated_at = ? where item_id = ?',
+    ).run(settled.state, settled.message, new Date().toISOString(), r.item_id)
+  }
+}
+
+/**
+ * The stops that still need something to happen, newest first.
+ *
+ * Deliberately NOT the whole table. This list is a to-do, not a ledger: a finished resume, a
+ * cancelled one, or one whose session the user has since archived are all history, and leaving them
+ * in made a handful of live items impossible to pick out. The rows stay in the table (they carry the
+ * per-session attempt count the cap depends on) — they are just not shown.
+ */
+export function monitorStatus(): MonitorStatusRow[] {
+  reconcileScheduled()
+  const meta = sessionMetaMap()
+  const rows = db
+    .query<MonitorStateRow, []>(
+      "select * from monitor_state where state != 'done' order by updated_at desc",
+    )
+    .all()
+    // Archiving is the user saying they are finished with a session. Auto-resume already refuses to
+    // touch one (rate-limit-discovery.ts); showing it here as "Scheduled" would promise the resume
+    // that deliberately will not happen.
+    .filter((r) => !meta.get(r.session_id)?.archived)
   return rows.map((r) => {
-    // A discovered stop carries its own title (there is no queue_items row to join); a dispatched
-    // one resolves it the way it always has.
-    const t = db
-      .query<{ title: string }, [string]>('select title from queue_items where id = ?')
-      .get(r.item_id)
+    // Rows written before titles were stored on every row still join theirs out of queue_items.
+    const t = r.title
+      ? null
+      : db
+          .query<{ title: string }, [string]>('select title from queue_items where id = ?')
+          .get(r.item_id)
     return {
       itemId: r.item_id,
       sessionId: r.session_id,
@@ -298,6 +366,9 @@ async function tick(deps: MonitorDeps): Promise<void> {
   if (ticking) return // a slow checkUsage must not let ticks pile up
   ticking = true
   try {
+    // Settle finished resumes before anything else reads state, so a session whose resume already
+    // completed is eligible for a fresh stop rather than looking permanently "scheduled".
+    reconcileScheduled()
     await dispatchDueResumes()
     await processRateLimited(deps)
   } catch (err) {
@@ -349,7 +420,12 @@ async function processRateLimited(deps: MonitorDeps): Promise<void> {
     console.error('[ccmanagerui] rate-limit discovery failed:', err)
   }
 
+  // Discovery already refuses archived sessions; a stop WE dispatched needs the same guard, or
+  // archiving a session would silently fail to stop the resume it was queued for.
+  const meta = sessionMetaMap()
+
   for (const item of [...dispatched, ...found]) {
+    if (meta.get(item.session_id)?.archived) continue
     const existing = getState(item.id)
 
     // Already resolved for this exact stop — skip, except a blocked_weekly re-arms once its

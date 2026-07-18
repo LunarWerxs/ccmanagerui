@@ -169,56 +169,9 @@ async function submit(mode: 'now' | 'queue', notBefore: string | null = null) {
 }
 
 // --- queue-for-later popover --------------------------------------------------
+// The controls live in SchedulePanel.vue (shared with the queue builder); all this surface owns is
+// whether the popover is open. submit() clears it on a successful send.
 const scheduleOpen = ref(false)
-const scheduleLocal = ref('')
-// The two "+ / −" steppers: an exact delay in hours and 10-minute increments. Together they cover
-// every short delay a fixed preset used to (1h = the default; 15-ish min = 0h + 20m), which is why
-// the old "In 15 min" / "In 1 hour" preset buttons are gone.
-const scheduleHours = ref(1)
-const scheduleMinutes = ref(0)
-
-/** Minutes step in 10s and stay inside the hour (0…50) — a 6th step is one hour, so use the hours
- *  stepper for that rather than silently carrying. Hours have no ceiling (the old stepper had none). */
-function stepHours(delta: number) {
-  scheduleHours.value = Math.max(0, scheduleHours.value + delta)
-}
-function stepMinutes(delta: number) {
-  scheduleMinutes.value = Math.min(50, Math.max(0, scheduleMinutes.value + delta))
-}
-
-const scheduleDelayMin = computed(() => scheduleHours.value * 60 + scheduleMinutes.value)
-// 0h 0m is "now", not a delay — the button is disabled there, so the label never has to say it.
-const scheduleDelayLabel = computed(() => {
-  const h = scheduleHours.value
-  const m = scheduleMinutes.value
-  if (h > 0 && m > 0) return t('composer.presetInHM', { h, m })
-  if (h > 0) return t('composer.presetInHours', { h })
-  return t('composer.presetInMinutes', { m })
-})
-
-// "Tomorrow HH:MM" is a server-side scheduler setting (Settings → Scheduler), not a constant
-const tomorrowTime = computed(() => scheduler.value?.tomorrow_time ?? '09:00')
-
-function queueInMinutes(minutes: number) {
-  submit('queue', new Date(Date.now() + minutes * 60_000).toISOString())
-}
-function queueTomorrowMorning() {
-  const [h = 9, m = 0] = tomorrowTime.value.split(':').map(Number)
-  const d = new Date()
-  d.setDate(d.getDate() + 1)
-  d.setHours(h, m, 0, 0)
-  submit('queue', d.toISOString())
-}
-function queueAtPicked() {
-  if (!scheduleLocal.value) return
-  const ms = Date.parse(scheduleLocal.value)
-  if (!Number.isFinite(ms)) return
-  submit('queue', new Date(ms).toISOString())
-}
-function openSchedulerSettings() {
-  scheduleOpen.value = false
-  openSettingsTab('scheduler')
-}
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key !== 'Enter' || e.shiftKey) return
@@ -352,92 +305,11 @@ function onKeydown(e: KeyboardEvent) {
                   <CalendarClock />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent align="end" class="w-64 space-y-2 p-3">
-                <p class="text-xs font-semibold">{{ $t('composer.scheduleTitle') }}</p>
-                <div class="grid grid-cols-2 gap-1.5">
-                  <Button variant="outline" size="xs" @click="queueInMinutes(300)">{{ $t('composer.presetIn5h') }}</Button>
-                  <!-- the tomorrow time is user-configurable; the tiny gear jumps to where -->
-                  <div class="relative">
-                    <Button variant="outline" size="xs" class="w-full pr-5" @click="queueTomorrowMorning()">
-                      {{ $t('composer.presetTomorrow', { time: tomorrowTime }) }}
-                    </Button>
-                    <button
-                      type="button"
-                      class="absolute right-0.5 top-1/2 -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground transition-colors hover:text-foreground"
-                      :title="$t('composer.editTomorrowTime')"
-                      :aria-label="$t('composer.editTomorrowTime')"
-                      @click.stop="openSchedulerSettings()"
-                    >
-                      <Settings2 class="size-2.5" />
-                    </button>
-                  </div>
-                </div>
-                <!-- exact delay: an hours stepper and a 10-minute stepper side by side, then one
-                     button that queues the combined hours+minutes (replaces the old 15m/1h presets) -->
-                <div class="flex items-center justify-center gap-3">
-                  <div class="flex items-center gap-1">
-                    <Button
-                      variant="outline"
-                      size="icon-xs"
-                      :disabled="scheduleHours <= 0"
-                      :aria-label="$t('composer.hoursDecrease')"
-                      @click="stepHours(-1)"
-                    >
-                      <Minus />
-                    </Button>
-                    <span class="w-8 text-center text-xs tabular-nums">{{ $t('composer.hoursValue', { n: scheduleHours }) }}</span>
-                    <Button
-                      variant="outline"
-                      size="icon-xs"
-                      :aria-label="$t('composer.hoursIncrease')"
-                      @click="stepHours(1)"
-                    >
-                      <Plus />
-                    </Button>
-                  </div>
-                  <div class="flex items-center gap-1">
-                    <Button
-                      variant="outline"
-                      size="icon-xs"
-                      :disabled="scheduleMinutes <= 0"
-                      :aria-label="$t('composer.minutesDecrease')"
-                      @click="stepMinutes(-10)"
-                    >
-                      <Minus />
-                    </Button>
-                    <span class="w-9 text-center text-xs tabular-nums">{{ $t('composer.minutesValue', { n: scheduleMinutes }) }}</span>
-                    <Button
-                      variant="outline"
-                      size="icon-xs"
-                      :disabled="scheduleMinutes >= 50"
-                      :aria-label="$t('composer.minutesIncrease')"
-                      @click="stepMinutes(10)"
-                    >
-                      <Plus />
-                    </Button>
-                  </div>
-                </div>
-                <!-- pink (default) means "clickable right now"; gray (secondary) means it still needs input -->
-                <Button
-                  :variant="scheduleDelayMin > 0 ? 'default' : 'secondary'"
-                  size="xs"
-                  class="w-full"
-                  :disabled="scheduleDelayMin <= 0"
-                  @click="queueInMinutes(scheduleDelayMin)"
-                >
-                  {{ scheduleDelayLabel }}
-                </Button>
-                <label class="block text-[11px] text-muted-foreground">{{ $t('composer.schedulePickLabel') }}</label>
-                <Input v-model="scheduleLocal" type="datetime-local" class="text-xs" />
-                <Button
-                  :variant="scheduleLocal ? 'default' : 'secondary'"
-                  size="sm"
-                  class="w-full"
-                  :disabled="!scheduleLocal"
-                  @click="queueAtPicked()"
-                >
-                  {{ $t('composer.scheduleConfirm') }}
-                </Button>
+              <PopoverContent align="end" class="w-64 p-3">
+                <!-- The panel itself is shared with the queue builder (SchedulePanel.vue); this
+                     surface's job is only to say what a picked time MEANS here: queue the message
+                     currently in the box for then. -->
+                <SchedulePanel @pick="submit('queue', $event)" @close="scheduleOpen = false" />
               </PopoverContent>
             </Popover>
 

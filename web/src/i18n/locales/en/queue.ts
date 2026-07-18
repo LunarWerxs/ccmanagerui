@@ -10,6 +10,7 @@ export default {
   schedulerOnHint: 'Queued items dispatch automatically. Toggle it in Settings → Scheduler.',
   schedulerOffHint:
     'Nothing runs by itself. Press Run on an item, or enable the scheduler in Settings.',
+  schedulerClickHint: 'Click to open the scheduler settings',
   newRun: 'New run',
   itemsCount: '{n} item(s)',
   edit: 'Edit',
@@ -34,6 +35,11 @@ export default {
   toastDeleteFailed: 'Failed to delete the queue item.',
   showFinished: 'Show {n} finished',
   hideFinished: 'Hide finished',
+  clearFinished: 'Clear',
+  clearFinishedConfirm: 'Clear them?',
+  clearFinishedTitle: 'Delete every finished run from the queue',
+  toastCleared: 'Cleared {n} finished run(s)',
+  toastClearFailed: "Couldn't clear {n} run(s)",
   allDone: 'Nothing left to run.',
   exitLost: 'interrupted',
   exitLostHint:

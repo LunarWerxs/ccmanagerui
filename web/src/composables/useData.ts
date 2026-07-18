@@ -1,6 +1,13 @@
 import { useStorage } from '@vueuse/core'
 import { ref } from 'vue'
-import type { Account, ArchivedScope, QueueItem, SchedulerState, SessionSummary } from '@/lib/api'
+import type {
+  Account,
+  ArchivedScope,
+  QueueItem,
+  SchedulerState,
+  SessionPeriod,
+  SessionSummary,
+} from '@/lib/api'
 import * as api from '@/lib/api'
 
 const sessions = ref<SessionSummary[]>([])
@@ -17,6 +24,11 @@ const sessionInstanceFilter = ref('')
 // hopeless. Both scopes are applied server-side BEFORE the newest-N cap, so a quiet corner
 // of the list can't be starved out of the window by rows it was never going to show.
 const sessionArchivedScope = useStorage<ArchivedScope>('ccmanagerui.sessions.archivedScope', 'hide')
+// How far back the list reaches, by last activity. Defaults to the last 24 hours: this list
+// answers "what am I working on", and a store that has been accumulating transcripts for months
+// answers it worse the further back it goes. Applied server-side before the cap, like the scopes
+// above, so a widened window genuinely reaches further rather than reshuffling the same 200 rows.
+const sessionPeriod = useStorage<SessionPeriod>('ccmanagerui.sessions.period', '24h')
 // true once the first queue fetch has settled — gates the queue's first-load skeletons
 const queueLoaded = ref(false)
 const lastError = ref<string | null>(null)
@@ -31,7 +43,12 @@ function guard<T>(p: Promise<T>): Promise<T | undefined> {
 async function refreshSessions() {
   sessionsLoading.value = true
   const r = await guard(
-    api.getSessions(200, sessionInstanceFilter.value, sessionArchivedScope.value),
+    api.getSessions(
+      200,
+      sessionInstanceFilter.value,
+      sessionArchivedScope.value,
+      sessionPeriod.value,
+    ),
   )
   if (r) sessions.value = r
   sessionsLoading.value = false
@@ -84,6 +101,7 @@ export function useData() {
     sessionsLoading,
     sessionInstanceFilter,
     sessionArchivedScope,
+    sessionPeriod,
     queueLoaded,
     lastError,
     refreshSessions,

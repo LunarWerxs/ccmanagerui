@@ -22,6 +22,7 @@ import { join } from 'node:path'
 import { resolveAccount, resolveCliConfigDirToken, resolveInstanceToken } from './core/accounts'
 import { cliInstanceForDesktop, getCliInstance, listCliInstances } from './core/cli-instances'
 import { listInstances } from './core/instances'
+import { normalizeInstancePath } from './core/paths'
 import { db } from './db'
 import type { AuthType, UsageCheckResult, UsageReason, UsageSnapshot } from './types'
 import {
@@ -89,8 +90,20 @@ export async function checkUsageAmbient(): Promise<UsageSnapshot> {
 
 // --- desktop instances --------------------------------------------------------
 
-/** Cache key for a desktop instance's usage snapshot. */
-export const desktopKey = (dir: string): string => `desktop:${dir}`
+/**
+ * Cache key for a desktop instance's usage snapshot.
+ *
+ * Normalized, because the same instance reaches this from several call sites spelling its directory
+ * differently — `C:\Users\…`, `c:\users\…`, `C:/Users/…` all name one folder on Windows. Keyed raw,
+ * each spelling opened its OWN cache entry: the live cache held three separate rows for 3claude,
+ * two for 5claude, and readings taken under one spelling were invisible to a lookup using another,
+ * so a perfectly warm cache still missed and re-ran the check.
+ *
+ * Purely internal: the web client keys its own reactive map off the dir it already has and never
+ * reads this string, so normalizing here cannot desync the UI. Pre-existing rows under the old
+ * spellings are simply never read again.
+ */
+export const desktopKey = (dir: string): string => `desktop:${normalizeInstancePath(dir)}`
 /** Cache key for a CLI instance's usage snapshot. */
 export const cliKey = (id: string): string => `cli:${id}`
 

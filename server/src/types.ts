@@ -93,6 +93,26 @@ export interface SessionSummary {
  *  because that same ratio makes archived sessions impossible to find in a mixed list. */
 export type ArchivedScope = 'hide' | 'include' | 'only'
 
+/** How far back a session list reaches, by last activity. '24h' is the default: the list is a
+ *  "what am I working on" surface, and a store holding months of transcripts answers that question
+ *  worse the further back it goes. 'all' restores the old unbounded behaviour. */
+export type SessionPeriod = '24h' | '7d' | '30d' | 'all'
+
+const PERIOD_MS: Record<Exclude<SessionPeriod, 'all'>, number> = {
+  '24h': 24 * 3600_000,
+  '7d': 7 * 24 * 3600_000,
+  '30d': 30 * 24 * 3600_000,
+}
+
+export function isSessionPeriod(v: unknown): v is SessionPeriod {
+  return v === '24h' || v === '7d' || v === '30d' || v === 'all'
+}
+
+/** Epoch cutoff for a period, or null for 'all' (no cutoff). */
+export function periodCutoffMs(period: SessionPeriod, now = Date.now()): number | null {
+  return period === 'all' ? null : now - PERIOD_MS[period]
+}
+
 /** One displayable turn from a transcript tail, after the hide-"thinking" filter. */
 export interface TailEvent {
   role: 'user' | 'assistant'

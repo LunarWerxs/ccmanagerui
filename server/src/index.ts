@@ -105,7 +105,16 @@ import { getSession, listSessions } from './sessions'
 import { skipSingleInstanceGuard } from './single-instance'
 import { findTranscript, tailTranscript } from './transcript'
 import { buildTranscriptOpenArgv, resolveEditor } from './transcript-open'
-import type { Account, ArchivedScope, MonitorView, QueueItem, UsageCheckResult } from './types'
+import {
+  type Account,
+  type ArchivedScope,
+  isSessionPeriod,
+  type MonitorView,
+  periodCutoffMs,
+  type QueueItem,
+  type SessionPeriod,
+  type UsageCheckResult,
+} from './types'
 import { applyUpdate, checkForUpdate } from './updater'
 import {
   allCachedUsage,
@@ -391,7 +400,18 @@ app.get('/api/sessions', async (c) => {
   // silently bury it under the archived majority.
   const archived = c.req.query('archived')
   const scope: ArchivedScope = archived === 'include' || archived === 'only' ? archived : 'hide'
-  return c.json(await listSessions(limit ? Number(limit) : 200, instance || undefined, scope))
+  // Same defensive read as the scope above: an unrecognized period falls back to the default
+  // window rather than quietly widening the list to everything on disk.
+  const rawPeriod = c.req.query('period')
+  const period: SessionPeriod = isSessionPeriod(rawPeriod) ? rawPeriod : '24h'
+  return c.json(
+    await listSessions(
+      limit ? Number(limit) : 200,
+      instance || undefined,
+      scope,
+      periodCutoffMs(period),
+    ),
+  )
 })
 app.get('/api/sessions/:id', async (c) => {
   const s = await getSession(c.req.param('id'))

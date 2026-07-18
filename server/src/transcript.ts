@@ -123,6 +123,46 @@ function isCliBookkeeping(ev: any): boolean {
 }
 
 /**
+ * Plumbing the CLI wraps in pseudo-tags and stores as an ordinary user message: slash-command
+ * invocations, hook output, bash echoes, the local-command caveat. It is addressed to the MODEL,
+ * not written by the human, so it must never stand in for what a session is "about".
+ *
+ * Unlike the bookkeeping above, most of these carry no `isMeta` flag, so this tag scan is the only
+ * thing that catches them. It is what keeps a `/usage` probe — a transcript holding nothing but a
+ * caveat and a `<command-name>` line — from being listed as a real session (see sessions.ts).
+ */
+const COMMAND_WRAPPER =
+  /^\s*<\/?(local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args|system-reminder|user-prompt-submit-hook|bash-input|bash-stdout|bash-stderr)\b/i
+
+export function isCommandWrapperText(text: string): boolean {
+  return COMMAND_WRAPPER.test(text)
+}
+
+/**
+ * Pull a readable label out of a turn that is real work wrapped in a pseudo-tag.
+ *
+ * Distinct from COMMAND_WRAPPER above, and the difference is the whole point: that list is
+ * plumbing to be ignored outright, whereas a `<scheduled-task name="…">` turn IS the session's
+ * actual prompt — it just arrives wearing an envelope. Dropping it would leave a genuine session
+ * titled with its uuid; keeping it whole titled one "<scheduled-task name="studio-executor-parity-
+ * sweep" file="C:\Users\…">".
+ *
+ * Prefers a `name` attribute (someone chose that string as a label) and otherwise falls back to the
+ * body text. Anything that isn't a wrapped turn passes through untouched.
+ */
+export function unwrapTaggedText(text: string): string {
+  const open = text.match(/^\s*<([a-z][\w-]*)\b([^>]*)>/i)
+  if (!open) return text
+  const name = open[2].match(/\bname\s*=\s*"([^"]+)"/i)?.[1]
+  if (name?.trim()) return name.trim()
+  const body = text
+    .slice(open[0].length)
+    .replace(new RegExp(`</${open[1]}\\s*>\\s*$`, 'i'), '')
+    .trim()
+  return body || text
+}
+
+/**
  * THE hide-"thinking" filter. Turns one raw transcript JSONL event into zero or more
  * displayable TailEvents. Reused for both disk-tail reading and the live stream-json path,
  * so the rule lives in exactly one place (per the rebuild plan).

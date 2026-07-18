@@ -300,6 +300,90 @@ describe('per-account override', () => {
   })
 })
 
+// The list is a to-do, not a ledger. Before this, nothing ever revisited a 'scheduled' row: the row
+// was written the moment a resume was enqueued and then never looked at again (processRateLimited
+// skips stops it has already seen, dispatchDueResumes only dispatches, and dispatch.ts's finalize /
+// cancelItem touch queue_items alone). So a resume that ran to completion months ago still reported
+// "Scheduled · resumes ~09:14" forever, and deleting its queue item left a row pointing at nothing.
+// That is what filled the panel with runs the user knew were long finished.
+describe('settling finished resumes', () => {
+  /** Put a row in the 'scheduled' state with a resume item in `status`, the way a real pass would. */
+  function scheduledWithResume(suffix: string, status: string | null): string {
+    const itemId = `${PREFIX}sch-${suffix}`
+    const resumeId = `${PREFIX}res-${suffix}`
+    insertRateLimited(itemId, `${PREFIX}sess-${suffix}`)
+    if (status !== null) {
+      db.query(
+        `insert into queue_items (id, session_id, title, cwd, prompt, status, position, created_at)
+         values (?, ?, ?, ?, ?, ?, 0, ?)`,
+      ).run(
+        resumeId,
+        `${PREFIX}sess-${suffix}`,
+        'Auto-resume: test run',
+        'D:/x',
+        'resume',
+        status,
+        Date.now(),
+      )
+    }
+    db.query(
+      `insert into monitor_state
+         (item_id, session_id, account_id, resume_attempts, state, resume_item_id, message, next_check_at, updated_at, title, discovered)
+       values (?, ?, null, 1, 'scheduled', ?, 'resumes ~09:14', null, ?, 'test run', 0)`,
+    ).run(itemId, `${PREFIX}sess-${suffix}`, resumeId, new Date().toISOString())
+    return itemId
+  }
+
+  test('a resume that finished stops being listed', () => {
+    const id = scheduledWithResume('done', 'completed')
+    expect(stateFor(id)).toBeNull()
+  })
+
+  test('a resume the user cancelled stops being listed', () => {
+    const id = scheduledWithResume('cancelled', 'canceled')
+    expect(stateFor(id)).toBeNull()
+  })
+
+  test('a resume whose queue item was deleted stops being listed', () => {
+    // The orphan case: "Scheduled, resumes ~09:14" pointing at a row that no longer exists.
+    const id = scheduledWithResume('orphan', null)
+    expect(stateFor(id)).toBeNull()
+  })
+
+  test('a resume that FAILED is kept, and asks for a human', () => {
+    // Not settled away: a failed resume is the one outcome that still wants attention.
+    const id = scheduledWithResume('failed', 'failed')
+    const row = stateFor(id)
+    expect(row?.state).toBe('needs_human')
+  })
+
+  test('a resume still queued is left alone', () => {
+    const id = scheduledWithResume('pending', 'queued')
+    const row = stateFor(id)
+    expect(row?.state).toBe('scheduled')
+    expect(row?.message).toBe('resumes ~09:14')
+  })
+
+  test('a running resume is left alone', () => {
+    const id = scheduledWithResume('running', 'running')
+    expect(stateFor(id)?.state).toBe('scheduled')
+  })
+
+  test('the row survives so the per-session attempt count is not lost', () => {
+    // Settling is about what is SHOWN. The row itself carries resume_attempts, which the cap
+    // depends on, so dropping it would silently hand every session a fresh set of attempts.
+    const id = scheduledWithResume('kept', 'completed')
+    expect(stateFor(id)).toBeNull()
+    const raw = db
+      .query<{ state: string; resume_attempts: number }, [string]>(
+        'select state, resume_attempts from monitor_state where item_id = ?',
+      )
+      .get(id)
+    expect(raw?.state).toBe('done')
+    expect(raw?.resume_attempts).toBe(1)
+  })
+})
+
 describe('settings', () => {
   test('round-trips maxAttempts + resumeBufferMin and keeps a sane resumePrompt', () => {
     setMonitorSettings({ maxAttempts: 5, resumeBufferMin: 10 })

@@ -1,7 +1,8 @@
 # Handoff for Michael (CLI instances + usage-check + auto-resume monitor)
 
 The CLI-instances / usage-check / auto-resume-monitor feature set is built, unit-tested, and wired
-end to end (see `CHANGELOG.md` "Unreleased"). This file lists ONLY the parts that need a human,
+end to end (shipped in `CHANGELOG.md` 0.6.0; 0.7.0 then fixed the monitor listing resumes that had
+already finished). This file lists ONLY the parts that need a human,
 because they require either real time across a real rate-limit window (which cannot be triggered on
 demand safely) or an OAuth login (which an AI must never perform). Nothing here blocks using the
 feature today.

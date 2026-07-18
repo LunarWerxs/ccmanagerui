@@ -12,10 +12,11 @@
 // dispatch-runner.ts uses (CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY), so any account already
 // registered for queue dispatch is pollable with no extra login; CLAUDE_CONFIG_DIR is the fallback.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { DATA_DIR, resolveClaudeExe } from './config'
+import { CLAUDE_PROJECTS_ROOT, DATA_DIR, resolveClaudeExe } from './config'
 import { resolveCliConfigDirToken } from './core/accounts'
+import { encodeCwdKey } from './transcript'
 import type { UsageAdvice, UsageSnapshot } from './types'
 import { fetchUsageApi } from './usage-api'
 
@@ -251,6 +252,55 @@ export type UsageCheckOpts = {
  * output yields an all-null snapshot (`isNoData` true) — callers must treat that as "no data",
  * never as "0% used".
  */
+/**
+ * A directory that exists only so the `/usage` probe has somewhere harmless to be.
+ *
+ * Created lazily and never written to by us — the CLI is what puts a transcript under the matching
+ * `~/.claude/projects/<encoded-cwd>` folder. Returns null if it cannot be created, in which case the
+ * probe simply runs where it always did (a stub transcript is worth far less than a failed read).
+ */
+let probeCwdCache: string | null | undefined
+export function usageProbeCwd(): string | null {
+  if (probeCwdCache !== undefined) return probeCwdCache
+  const dir = join(DATA_DIR, 'usage-probe')
+  try {
+    mkdirSync(dir, { recursive: true })
+    probeCwdCache = dir
+  } catch {
+    probeCwdCache = null
+  }
+  return probeCwdCache
+}
+
+/**
+ * Delete the transcripts the probe leaves behind.
+ *
+ * Safe by construction: it only ever touches the ONE project folder whose key encodes our own
+ * scratch directory, so it cannot reach a real session even if the encoding changes underneath us
+ * (a changed key just means the folder is not found and nothing is deleted). Best-effort — a file
+ * the CLI still holds open is skipped and collected on the next sweep.
+ */
+export function pruneUsageProbeTranscripts(): number {
+  const dir = usageProbeCwd()
+  if (!dir) return 0
+  const folder = join(CLAUDE_PROJECTS_ROOT, encodeCwdKey(dir))
+  let removed = 0
+  try {
+    for (const name of readdirSync(folder)) {
+      if (!name.endsWith('.jsonl')) continue
+      try {
+        rmSync(join(folder, name))
+        removed++
+      } catch {
+        // still locked by the CLI; the next sweep gets it
+      }
+    }
+  } catch {
+    // folder does not exist yet — nothing has been probed from there
+  }
+  return removed
+}
+
 export async function checkUsage(opts: UsageCheckOpts = {}): Promise<UsageSnapshot> {
   const label = opts.account ?? null
 
@@ -289,6 +339,20 @@ export async function checkUsage(opts: UsageCheckOpts = {}): Promise<UsageSnapsh
   }
   if (opts.configDir) env.CLAUDE_CONFIG_DIR = opts.configDir
 
+  // Run the probe in a scratch directory of our own.
+  //
+  // `claude -p` opens a real session and writes a real transcript, keyed by the CWD it ran in. With
+  // the probe inheriting the daemon's cwd, every quota check filed a ~3 KB stub into whatever
+  // project folder that mapped to — a caveat, a `<command-name>/usage</command-name>` line, and
+  // nothing else. Measured 2026-07-18: 279 such stubs, 33 of them in the previous day, sitting in
+  // the middle of the user's real sessions.
+  //
+  // Quota is account-scoped, not directory-scoped, so where this runs makes no difference to what
+  // it reads. Pointing it here keeps every stub in one folder we own and can sweep (see
+  // pruneUsageProbeTranscripts), instead of scattering them through real work.
+  const probeCwd = usageProbeCwd()
+  if (probeCwd) env.PWD = probeCwd
+
   let proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'>
   try {
     // windowsHide matters more here than at the other spawn sites: resolveClaudeExe() falls back to
@@ -297,6 +361,7 @@ export async function checkUsage(opts: UsageCheckOpts = {}): Promise<UsageSnapsh
     // that flashes on its own schedule, with no user action to blame it on.
     proc = Bun.spawn([resolveClaudeExe(), '-p', '/usage'], {
       env,
+      cwd: probeCwd ?? undefined,
       stdin: 'ignore',
       stdout: 'pipe',
       stderr: 'pipe',
@@ -322,6 +387,10 @@ export async function checkUsage(opts: UsageCheckOpts = {}): Promise<UsageSnapsh
     // read/exit error → whatever we captured (likely empty) parses to no-data
   } finally {
     clearTimeout(timer)
+    // The probe has exited, so its transcript is closed and safe to drop. Swept every time rather
+    // than on a schedule: the stub has no value the moment the numbers above are parsed, and the
+    // cost is one readdir of a folder that holds at most a handful of files.
+    pruneUsageProbeTranscripts()
   }
   return parseUsageOutput(out, label)
 }

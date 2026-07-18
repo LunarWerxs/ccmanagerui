@@ -25,6 +25,8 @@ export default {
   transcriptEditorToastFailed: 'Failed to save transcript editor setting.',
   transcriptEditorResolved: 'Opens with {editor}',
   transcriptEditorNotFound: "That path doesn't exist. Using {editor}",
+  transcriptEditorCustomBadge: 'Custom',
+  transcriptEditorReset: 'Back to auto-detect',
 
   // usage section
   usage: 'Usage',
@@ -68,7 +70,6 @@ export default {
   autoUpdateToastDisabled: 'Auto-update disabled.',
   autoUpdateToastFailed: 'Failed to save auto-update settings.',
   toastSchedulerFailed: 'Failed to update scheduler settings.',
-  toastAccountDeleteFailed: 'Failed to delete account.',
 
   // cloud sync section ("Sync my settings with Connections")
   cloudSyncTitle: 'Cloud sync',
@@ -128,14 +129,7 @@ export default {
   monitorToastDisabled: 'Auto-resume monitor disabled.',
   monitorToastFailed: 'Failed to save auto-resume monitor settings.',
 
-  // accounts section — LIST + REMOVE of legacy pasted credentials only. Accounts are ADDED by
-  // signing an instance in on the Instances tab; the queue's run-as picker lists every
-  // signed-in instance automatically.
-  accounts: 'Accounts',
-  accountsIntro:
-    'Accounts are added by signing in on the Instances tab. Every signed-in instance can run queued work under its own login, no token-pasting involved. Listed below are leftover manually-pasted credentials (a legacy path); they still work for dispatch and can be removed here.',
-  noAccountsYet: 'No pasted credentials. Add accounts by signing in on the Instances tab.',
-  removeAction: 'Remove',
-  apiKeyBadge: 'API key',
-  oauthBadge: 'OAuth',
+  // The accounts section's strings are gone with the section itself: it only ever listed legacy
+  // pasted credentials, so in practice it rendered as an empty box telling you to go to the
+  // Instances tab. Accounts are added by signing an instance in there.
 }
