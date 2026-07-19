@@ -1,3 +1,8 @@
+// Read docs/DESKTOP_CLI_SESSION_SHARING.md before changing the session-linking logic in this
+// file, especially anything touching cliSessionId matching or claude://resume. It documents the
+// measurement traps this file's scan avoids, and why claude://resume must never be treated as a
+// "refresh" for a live session.
+//
 // server/src/instance-sessions.ts — which Claude Desktop instance did a session run in?
 //
 // Every desktop install keeps per-session metadata at
