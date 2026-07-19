@@ -8,6 +8,7 @@
     "web"
   ],
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
     "dev": "concurrently -k -n server,web -c blue,green \"bun run dev:server\" \"bun run dev:web\"",
     "dev:server": "bun run --cwd server dev",
     "dev:web": "bun run --cwd web dev",
