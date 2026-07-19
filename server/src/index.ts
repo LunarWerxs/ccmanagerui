@@ -1244,7 +1244,14 @@ async function waitForPortFree(port: number, timeoutMs: number): Promise<void> {
 // (CCMANAGERUI_RELAUNCH) are exempt; see skipSingleInstanceGuard for why, and
 // single-instance.test.ts for the regression guard on the relaunch exemption.
 if (!skipSingleInstanceGuard()) {
-  const live = await findLiveInstance()
+  // Re-probe (3 attempts, 2s each) rather than trusting ONE 1s probe. This decides whether to
+  // become a second daemon, so a false "nothing running" is expensive and self-concealing: we
+  // then wait out waitForPortFree, hop to PORT+1, and overwrite runtime.json — two live daemons,
+  // the pointer aimed at the newer one, and open tabs stranded on the older. That is exactly what
+  // the field logs show (paired starts ~6.4s apart == one 1s probe + the 5s waitForPortFree,
+  // then the hop). A stale pointer with nothing listening still resolves in well under a second
+  // (connections are refused instantly), so this costs a genuine cold start almost nothing.
+  const live = await findLiveInstance(2000, 3)
   if (live) {
     console.log(
       `\n  CC Manager UI is already running  →  ${live.url}\n  Not starting a second instance.\n`,

@@ -19,6 +19,10 @@
 import { readFileSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 
+/** Gap between findLiveInstance re-probes (see `attempts` there). Short enough that a
+ *  multi-attempt guard still adds well under a second to a genuine cold start. */
+const RETRY_DELAY_MS = 250;
+
 export function createInstancePointer({ configDir, serviceName, host = "127.0.0.1" }) {
   const runtimeFile = join(configDir, "runtime.json");
 
@@ -112,20 +116,41 @@ export function createInstancePointer({ configDir, serviceName, host = "127.0.0.
    * Resolve a LIVE instance from the pointer, or null. Reads runtime.json and probes
    * `${url}/api/health` so a stale pointer (daemon crashed, or the port was recycled
    * by another app) reads as "nothing running", only a real, answering daemon counts.
+   *
+   * `attempts` > 1 re-probes before concluding "nothing running". A single probe is a
+   * COIN FLIP for the single-instance guard: a daemon that is alive but momentarily busy
+   * (boot-time scanning, a slow sync tick) misses one probe, the guard concludes the port
+   * is free, and the caller starts a SECOND daemon that then hops to PORT+1 — leaving two
+   * live daemons and a runtime pointer aimed at the wrong one. Observed repeatedly in
+   * ccmanagerui's daemon.log (paired starts seconds apart, the second logging "port N was
+   * busy"). Callers deciding whether to SPAWN should pass attempts >= 2; callers merely
+   * reporting status can keep the cheap single probe.
+   *
+   * A service-name mismatch is a DEFINITIVE answer (someone else's server owns that port),
+   * so it returns immediately and is never retried — only transient failures (timeout,
+   * connection refused, a non-ok response) are worth a second look.
    */
-  async function findLiveInstance(timeoutMs = 1000) {
+  async function findLiveInstance(timeoutMs = 1000, attempts = 1) {
     const info = readInstanceInfo();
     if (!info?.url) return null;
-    try {
-      const res = await fetch(`${info.url}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!res.ok) return null;
-      const body = await res.json();
-      if (!body?.ok) return null;
-      if (serviceName && body.service !== serviceName) return null;
-      return info;
-    } catch {
-      return null; // unreachable / wrong service / timed out → treat as not running
+    const tries = Math.max(1, attempts);
+    for (let i = 0; i < tries; i++) {
+      // Space out retries so a busy event loop gets a chance to drain before the next probe.
+      if (i > 0) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      try {
+        const res = await fetch(`${info.url}/api/health`, {
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!res.ok) continue; // transient (503 while booting) → re-probe
+        const body = await res.json();
+        if (!body?.ok) continue;
+        if (serviceName && body.service !== serviceName) return null; // definitive: not ours
+        return info;
+      } catch {
+        // unreachable / timed out / malformed body → re-probe, then treat as not running
+      }
     }
+    return null;
   }
 
   return {

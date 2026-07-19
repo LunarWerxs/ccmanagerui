@@ -23,7 +23,12 @@ export interface InstancePointer {
   updateInstanceInfo(fields: Record<string, unknown>): void;
   readInstanceInfo(): InstanceInfo | null;
   clearInstanceInfo(): void;
-  findLiveInstance(timeoutMs?: number): Promise<InstanceInfo | null>;
+  /**
+   * Probe the recorded instance's /api/health. `attempts` > 1 re-probes before reporting
+   * "nothing running" — pass >= 2 anywhere the answer decides whether to SPAWN a daemon,
+   * so one missed probe against a briefly-busy daemon can't produce a duplicate instance.
+   */
+  findLiveInstance(timeoutMs?: number, attempts?: number): Promise<InstanceInfo | null>;
 }
 
 export function createInstancePointer(opts: InstancePointerOptions): InstancePointer;

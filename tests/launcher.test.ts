@@ -371,8 +371,84 @@ describe.skipIf(!win)('tray launcher', () => {
 
     const engine = readFileSync(ENGINE, 'utf8')
     expect(engine).toContain('$watchdogRequiresOwnership')
+    // Match the GATE, not the exact body: the watchdog also clears its consecutive-miss counter
+    // when it stands down here, so pinning a literal `{ return }` would fail on an unrelated
+    // (and correct) change. What must hold is that this condition still short-circuits the tick.
     expect(engine).toMatch(
-      /if \(\$useToken -and -not \$script:startedByUs -and \$watchdogRequiresOwnership\) \{ return \}/,
+      /if \(\$useToken -and -not \$script:startedByUs -and \$watchdogRequiresOwnership\) \{[^}]*\breturn\b[^}]*\}/,
     )
+  })
+
+  // --- watchdog false-positive guard (the duplicate-daemon fix) -----------------------------
+  // ONE failed /api/health probe used to be enough for the watchdog to declare the daemon dead,
+  // balloon "stopped unexpectedly - restarting", and spawn a replacement. On a loaded box a LIVE
+  // daemon misses a probe now and then, so the tray manufactured crashes that never happened:
+  // the replacement's own single-instance guard also mis-probed, it hopped to PORT+1, rewrote
+  // runtime.json, and left TWO live daemons with open tabs stranded on the old port. Confirmed
+  // in the field from daemon.log (paired starts ~6.4s apart, the second logging "port N was
+  // busy") while the "dead" daemon was still serving. These pin the three parts of the fix.
+
+  test('the watchdog requires CONSECUTIVE failed probes before declaring the daemon dead', () => {
+    const engine = readFileSync(ENGINE, 'utf8')
+    // Configurable, and defaulting above 1 — a default of 1 IS the old hair-trigger.
+    const threshold = engine.match(/ReviveAfterMisses'\s+(\d+)/)
+    expect(threshold).not.toBeNull()
+    expect(Number(threshold?.[1] ?? 0)).toBeGreaterThan(1)
+
+    // The counter must actually gate the relaunch...
+    expect(engine).toContain('$script:healthMisses++')
+    expect(engine).toMatch(/if \(\$script:healthMisses -lt \$reviveAfterMisses\) \{[\s\S]*?return/)
+    // ...and reset, or a slow probe once an hour would eventually add up to a bogus "crash".
+    expect(engine).toContain('$script:healthMisses = 0')
+  })
+
+  test('the health probe gives a live-but-busy daemon more than one second to answer', () => {
+    const engine = readFileSync(ENGINE, 'utf8')
+    const timeout = engine.match(/function Test-Daemon\([^)]*\$timeoutSec\s*=\s*(\d+)\)/)
+    expect(timeout).not.toBeNull()
+    expect(Number(timeout?.[1] ?? 0)).toBeGreaterThan(1)
+    // The budget must come from that parameter, not a hard-coded literal creeping back in.
+    // Assert on the actual CALL rather than a slice of the file: nearby comments legitimately
+    // mention the old "-TimeoutSec 1" while explaining why it was wrong, so anything coarser
+    // than this trips over its own prose.
+    expect(engine).toMatch(
+      /Invoke-RestMethod\s+-Uri\s+"\$u\/api\/health"\s+-TimeoutSec\s+\$timeoutSec/,
+    )
+    expect(engine).not.toMatch(/Invoke-RestMethod[^\n]*-TimeoutSec\s+\d/)
+  })
+
+  test('a health probe is gated on the port actually having a listener (UI-thread stall guard)', () => {
+    // Invoke-RestMethod does NOT fail fast on a refused loopback connection — it burns the whole
+    // -TimeoutSec. Get-RunningUrl probes up to twice and the health timer runs on the WinForms UI
+    // THREAD, so without this gate a dead daemon freezes the tray menu for two full timeouts on
+    // EVERY tick (measured ~4s; with the gate, ~6ms). Raising the timeout without keeping this
+    // gate would reintroduce the stall, which is exactly why it is pinned here.
+    const engine = readFileSync(ENGINE, 'utf8')
+    expect(engine).toContain('function Test-DaemonAt')
+    expect(engine).toMatch(
+      /if \(\$p -gt 0 -and -not \(Test-PortListening \$p\)\) \{ return \$false \}/,
+    )
+
+    // ...and Get-RunningUrl must actually route through the gated helper, not call Test-Daemon raw.
+    const getRunningUrl = engine.slice(
+      engine.indexOf('function Get-RunningUrl('),
+      engine.indexOf('function Get-PortFromUrl('),
+    )
+    expect(getRunningUrl).toContain('Test-DaemonAt')
+    expect(getRunningUrl).not.toMatch(/\bTest-Daemon\s+\$/)
+  })
+
+  test('the watchdog logs its restart decisions into the log the balloon tells users to read', () => {
+    const engine = readFileSync(ENGINE, 'utf8')
+    expect(engine).toContain('function Write-TrayLog')
+
+    const watchdog = engine.slice(
+      engine.indexOf('$healthTimer.Add_Tick'),
+      engine.indexOf('$watchTimer = $null'),
+    )
+    // A balloon that points at a log containing no trace of the restart reads as "the log is
+    // empty, so nothing was wrong" — exactly backwards, and it cost a real debugging session.
+    expect(watchdog).toMatch(/Write-TrayLog\s+'WARN'/)
+    expect(watchdog).toContain('relaunching')
   })
 })

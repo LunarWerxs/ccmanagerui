@@ -180,6 +180,14 @@ function Start-TrayHost($Config) {
 
   $CrashLoopMax       = Get-TrayConfigValue $Config 'CrashLoopMax' 4          # restarts…
   $CrashLoopWindowSec = Get-TrayConfigValue $Config 'CrashLoopWindowSec' 120  # …within this many seconds ⇒ pause
+  # Consecutive failed health probes before the watchdog declares the daemon dead. MUST be > 1:
+  # a single missed probe is not evidence of death (see Test-Daemon), and acting on one produced
+  # duplicate daemons in the field — the tray relaunched a daemon that was alive the whole time,
+  # the successor's own single-instance guard also mis-probed, and it hopped to PORT+1. At the
+  # 5s tick this trades ~10s of extra recovery latency on a REAL crash (which answers instantly
+  # with connection-refused, so misses accrue every tick) for not inventing crashes that never
+  # happened. Set to 1 only if an app truly wants the old hair-trigger behavior.
+  $reviveAfterMisses  = Get-TrayConfigValue $Config 'ReviveAfterMisses' 3
   $restartRetries     = Get-TrayConfigValue $Config 'RestartRetries' 0        # extra worker retries (ReDesign: 1)
   $usePortFreeWait    = Get-TrayConfigValue $Config 'UsePortFreeWait' $false  # wait for the socket to release (ReDesign)
   $startupWaitSec     = Get-TrayConfigValue $Config 'StartupWaitSec' 15
@@ -199,6 +207,20 @@ function Start-TrayHost($Config) {
 
   # Stray-daemon policy when we win the mutex but a daemon is already alive.
   $onStray = Get-TrayConfigValue $Config 'OnStrayDaemon' 'attach'
+
+  # Append a tray-side line to the daemon log, so the watchdog's decisions land in the SAME file
+  # the balloons tell the user to open. Without this a "stopped unexpectedly - restarting" balloon
+  # pointed at a log containing no trace of the restart, which reads as "the log is empty, so
+  # nothing was wrong" — exactly backwards. Format matches the daemon's own writer (log-file.mjs:
+  # "[ISO] LEVEL text") so the two interleave cleanly. Best-effort: a logging failure (the daemon
+  # holds the handle, disk full, mid-rotation) must never take the tray down.
+  function Write-TrayLog($level, $text) {
+    if (-not $logPath) { return }
+    try {
+      $stamp = [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'")
+      Add-Content -LiteralPath $logPath -Value "[$stamp] $($level.PadRight(5)) [tray] $text" -ErrorAction Stop
+    } catch {}
+  }
 
   # Full-shutdown sentinel (web-UI "Shut Down" / `<app> stop`). $null ⇒ no sentinel.
   $script:shutdownRequestFile = $Config.SentinelFile
@@ -227,24 +249,56 @@ function Start-TrayHost($Config) {
     # is empty we validate only body.ok, which is a WEAK check every adapter should now avoid:
     # anything answering that port passes it (a Vite dev server returns 200 + its SPA fallback for
     # /api/health). Every app in the family stamps `service` and names it here as of 2026-07-15.
-    function Test-Daemon($u, $service) {
+    # $timeoutSec defaults to 2, not 1: a 1-second budget is not enough for a daemon that is
+    # ALIVE but momentarily busy (boot-time session scanning, a slow sync tick, a loaded box
+    # running many concurrent workloads). A probe that times out against a healthy daemon reads
+    # as "dead" and, on the watchdog path, spawns a duplicate. Keep this modest anyway — the
+    # health timer ticks on the UI THREAD, so the worst-case tick blocks the tray menu for
+    # 2x this (Get-RunningUrl probes the pointer, then the preferred port). The real resilience
+    # comes from requiring consecutive misses, not from one long timeout.
+    function Test-Daemon($u, $service, $timeoutSec = 2) {
       if (-not $u) { return $false }
       try {
-        $r = Invoke-RestMethod -Uri "$u/api/health" -TimeoutSec 1 -ErrorAction Stop
+        $r = Invoke-RestMethod -Uri "$u/api/health" -TimeoutSec $timeoutSec -ErrorAction Stop
         if ($service) { return ($r.ok -eq $true -and $r.service -eq $service) }
         return [bool]$r.ok
       } catch { return $false }
     }
+    # Health-probe a URL, but ONLY if something is actually bound to its port.
+    #
+    # Invoke-RestMethod does NOT fail fast on a refused local connection — it burns the whole
+    # -TimeoutSec (measured on loopback: ~1.0s at -TimeoutSec 1, ~2.0s at 2). Get-RunningUrl can
+    # probe twice, and the health timer runs on the WinForms UI THREAD, so a plainly-dead daemon
+    # used to freeze the tray menu for two full timeouts EVERY tick. GetActiveTcpListeners answers
+    # "is anything bound to this port" in ~1ms with no timeout at all.
+    #
+    # This can only skip a probe that was already certain to fail: the listener check matches on
+    # port alone (any address, IPv4 AND IPv6), so anything listening still falls through to the
+    # real /api/health call. Net effect: a dead daemon is detected instantly, and the generous
+    # HTTP timeout is spent only where it does some good — on a daemon that IS up but busy.
+    function Test-DaemonAt($u, $service) {
+      if (-not $u) { return $false }
+      $p = Get-PortFromUrl $u
+      if ($p -gt 0 -and -not (Test-PortListening $p)) { return $false }
+      return (Test-Daemon $u $service)
+    }
     # The URL of a live instance (runtime pointer, else preferred port), or $null.
     function Get-RunningUrl($infoFile, $port, $service, $urlHost) {
+      $fallback = "http://${urlHost}:$port"
+      $pointerUrl = $null
       if (Test-Path $infoFile) {
         try {
           $info = Get-Content $infoFile -Raw | ConvertFrom-Json
-          if ($info.url -and (Test-Daemon $info.url $service)) { return $info.url }
+          if ($info.url) {
+            $pointerUrl = $info.url
+            if (Test-DaemonAt $info.url $service) { return $info.url }
+          }
         } catch { }
       }
-      $u = "http://${urlHost}:$port"
-      if (Test-Daemon $u $service) { return $u }
+      # When the pointer already named the preferred port there is nothing new to try: probing the
+      # same hung endpoint a second time only doubles the stall for an answer we already have.
+      if ($pointerUrl -eq $fallback) { return $null }
+      if (Test-DaemonAt $fallback $service) { return $fallback }
       return $null
     }
     function Get-PortFromUrl($u) { try { return ([uri]$u).Port } catch { return 0 } }
@@ -751,9 +805,11 @@ function Start-TrayHost($Config) {
   #                            externally-owned instance alone).
   #   · reviveGraceUntil   — after firing a relaunch, wait for it to bind before trying again.
   #   · crash-loop guard   — >= MAX restarts within WINDOW seconds ⇒ pause + notify.
+  #   · healthMisses       — CONSECUTIVE failed probes; only >= $reviveAfterMisses means "dead".
   $script:intentionalStop = $false
   $script:autoRestartPaused = $false
   $script:reviveGraceUntil = [DateTime]::MinValue
+  $script:healthMisses = 0
   $script:restartTimes = New-Object System.Collections.Generic.List[DateTime]
   # Re-entrancy guard: the Quit menu item and the watch timer can both fire the full teardown.
   $script:quitting = $false
@@ -930,7 +986,7 @@ function Start-TrayHost($Config) {
     # Deliberate close, a Rebuild/Restart worker owns the daemon, or (attach apps) this tray never
     # launched the daemon → stand down. The visibility live-sync below still needs to run on every
     # tick, so do it BEFORE this early-return only when we're not shutting down.
-    if ($script:intentionalStop -or $script:busy) { return }
+    if ($script:intentionalStop -or $script:busy) { $script:healthMisses = 0; return }
 
     # Live-sync the tray icon's visibility with the web Settings toggle (hideTrayIcon).
     $wantHidden = Get-HideTrayIcon
@@ -938,10 +994,30 @@ function Start-TrayHost($Config) {
 
     # Attach apps: only supervise a daemon we started — UNLESS the app opts out via
     # WatchdogRequiresOwnership=$false (a sibling app: OLD revived regardless of ownership).
-    if ($useToken -and -not $script:startedByUs -and $watchdogRequiresOwnership) { return }
+    if ($useToken -and -not $script:startedByUs -and $watchdogRequiresOwnership) { $script:healthMisses = 0; return }
 
     $u = Get-LiveUrl
-    if ($u) { $script:url = $u; return }         # healthy (track where it actually bound)
+    if ($u) {                                    # healthy (track where it actually bound)
+      $script:url = $u
+      # Recovered after one or more misses without ever being dead — that is the false positive
+      # this counter exists to absorb. Record it: a box that logs these regularly wants a higher
+      # ReviveAfterMisses, and without a line here the near-miss is invisible.
+      if ($script:healthMisses -gt 0) {
+        Write-TrayLog 'INFO' "health probe recovered after $($script:healthMisses) missed probe(s) - no restart needed"
+      }
+      $script:healthMisses = 0
+      return
+    }
+
+    # A probe failed. Not the same thing as "the daemon died" — require consecutive misses
+    # before believing it, so one slow/timed-out probe against a live daemon cannot spawn a
+    # duplicate. A genuinely dead daemon refuses connections instantly, so it still trips this
+    # within $reviveAfterMisses ticks.
+    $script:healthMisses++
+    if ($script:healthMisses -lt $reviveAfterMisses) {
+      Write-TrayLog 'WARN' "health probe missed ($($script:healthMisses)/$reviveAfterMisses) - not restarting yet"
+      return
+    }
 
     # Down. Wait out the grace window after a relaunch so a still-booting daemon isn't
     # double-spawned, and honour a crash-loop pause.
@@ -955,6 +1031,7 @@ function Start-TrayHost($Config) {
     }
     if ($script:restartTimes.Count -ge $CrashLoopMax) {
       $script:autoRestartPaused = $true
+      Write-TrayLog 'ERROR' "auto-restart PAUSED - $($script:restartTimes.Count) restarts within ${CrashLoopWindowSec}s (crash-loop guard)"
       $tray.ShowBalloonTip(6000, $displayName, "$displayName keeps crashing - auto-restart paused. See $logPath, then use Restart to try again.", [System.Windows.Forms.ToolTipIcon]::Error)
       return
     }
@@ -963,8 +1040,15 @@ function Start-TrayHost($Config) {
     $script:restartTimes.Add((Get-Date))
     $script:reviveGraceUntil = (Get-Date).AddSeconds(20)
     $script:startedByUs = $true
+    Write-TrayLog 'WARN' "daemon unreachable for $($script:healthMisses) consecutive probes - relaunching"
     $relaunched = Start-DaemonHere $null
     if ($relaunched) { $script:shared.serverPid = $relaunched.Id }
+    $script:healthMisses = 0
+    if ($relaunched) {
+      Write-TrayLog 'INFO' "relaunch spawned (pid $($relaunched.Id))"
+    } else {
+      Write-TrayLog 'ERROR' 'relaunch FAILED to spawn a successor'
+    }
     $tray.ShowBalloonTip(4000, $displayName, "$displayName stopped unexpectedly - restarting. Log: $logPath", [System.Windows.Forms.ToolTipIcon]::Warning)
   })
 

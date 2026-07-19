@@ -142,3 +142,81 @@ test("findLiveInstance resolves null for a stale pointer whose port answers noth
   ptr.writeInstanceInfo(1);
   expect(await ptr.findLiveInstance(300)).toBeNull();
 });
+
+// --- retry semantics (the duplicate-daemon guard) ------------------------------------------
+// A single probe is a coin flip: a live-but-busy daemon that misses one probe reads as "nothing
+// running", and a caller deciding whether to SPAWN then starts a second daemon that hops to
+// PORT+1. These pin that `attempts` absorbs a transient miss, that the default stays a single
+// cheap probe, and that a foreign service is answered definitively without burning retries.
+
+test("findLiveInstance retries a transient failure and succeeds when attempts > 1", async () => {
+  const configDir = tempDir();
+  let hits = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      hits++;
+      // Two "busy" replies, then healthy — a daemon that was alive the whole time.
+      if (hits < 3) return new Response("busy", { status: 503 });
+      return Response.json({ ok: true, service: "testapp" });
+    },
+  });
+  try {
+    const ptr = createInstancePointer({ configDir, serviceName: "testapp" });
+    const port = server.port ?? 0;
+    ptr.writeInstanceInfo(port);
+
+    // Default (single probe) sees only the 503 and wrongly concludes "nothing running".
+    expect(await ptr.findLiveInstance(500)).toBeNull();
+    expect(hits).toBe(1);
+
+    // With retries the daemon is correctly found, so no duplicate would be spawned.
+    const live = await ptr.findLiveInstance(500, 3);
+    expect(live?.port).toBe(port);
+    expect(hits).toBe(3);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("findLiveInstance gives up after exactly `attempts` probes", async () => {
+  const configDir = tempDir();
+  let hits = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      hits++;
+      return new Response("busy", { status: 503 });
+    },
+  });
+  try {
+    const ptr = createInstancePointer({ configDir, serviceName: "testapp" });
+    const port = server.port ?? 0;
+    ptr.writeInstanceInfo(port);
+    expect(await ptr.findLiveInstance(500, 3)).toBeNull();
+    expect(hits).toBe(3);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("findLiveInstance does not retry a service mismatch — a foreign server is definitive", async () => {
+  const configDir = tempDir();
+  let hits = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch() {
+      hits++;
+      return Response.json({ ok: true, service: "some-other-app" });
+    },
+  });
+  try {
+    const ptr = createInstancePointer({ configDir, serviceName: "testapp" });
+    const port = server.port ?? 0;
+    ptr.writeInstanceInfo(port);
+    expect(await ptr.findLiveInstance(500, 5)).toBeNull();
+    expect(hits).toBe(1); // answered on the first probe; retrying it would be pointless
+  } finally {
+    server.stop(true);
+  }
+});
