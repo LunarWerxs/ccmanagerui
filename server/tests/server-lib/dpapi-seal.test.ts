@@ -51,7 +51,7 @@ describe("dpapi-seal", () => {
   });
 
   test("unseal returns null for an undecryptable DPAPIv1 blob (foreign machine/user)", () => {
-    const result = unseal("DPAPIv1:" + Buffer.from("garbage-not-a-dpapi-blob").toString("base64"));
+    const result = unseal(`DPAPIv1:${Buffer.from("garbage-not-a-dpapi-blob").toString("base64")}`);
     expect(result).toBeNull();
   });
 
@@ -92,7 +92,7 @@ describe("dpapi-seal", () => {
   });
 
   test("wrapTokenStore.get returns null when the sealed token can't be decrypted", () => {
-    const { store: inner } = memStore({ [TOKEN_KEY]: "DPAPIv1:" + Buffer.from("nope").toString("base64") });
+    const { store: inner } = memStore({ [TOKEN_KEY]: `DPAPIv1:${Buffer.from("nope").toString("base64")}` });
     const store = wrapTokenStore(inner, TOKEN_KEY);
     expect(store.get(TOKEN_KEY)).toBeNull();
   });
