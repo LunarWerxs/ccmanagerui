@@ -6,6 +6,8 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-21
+
 ### Added
 
 - **The Instances table has a Plan column.** The account type (Free, Pro, Max, Max 20×, …) now has
