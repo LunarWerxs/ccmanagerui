@@ -43,7 +43,7 @@ it under its real title, or copying it out.
 
 ## Queue work and let it run
 
-![The run queue drawer: five runs, one running and the rest queued, each showing its project, model, effort and scheduled time](.github/screenshots/queue.png)
+![The run queue drawer: five runs, one running, three queued and one finished, each showing its project, model, effort and scheduled time](.github/screenshots/queue.png)
 
 Build a list of `claude` runs, each with its own prompt, working directory, model, effort,
 permission mode and account. Run one on demand, or let the scheduler drain the queue for you, one at
@@ -62,7 +62,7 @@ Two things make this survive contact with reality:
 
 ## Manage isolated instances
 
-![The instances view: four isolated Claude Desktop instances, each with its account, live memory and uptime](.github/screenshots/instances.png)
+![The instances view: four isolated Claude Desktop instances, each with its account, plan, remaining weekly quota, live memory and uptime](.github/screenshots/instances.png)
 
 If you keep separate Claude Desktop instances for separate accounts, this is where they live. Each
 row shows which account it is signed into, its plan, and, while it is running, its process, memory
