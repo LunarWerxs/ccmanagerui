@@ -57,6 +57,32 @@ export function prettyTier(tier: string | null | undefined): string | null {
   }
 }
 
+/**
+ * The account's plan / "type" as one display-ready label ("Max 20×" | "Pro" | "Free" | …), or
+ * null when it genuinely can't be determined. This reconciles two imperfect signals:
+ *  - `prettyTierLabel` (an already-`prettyTier`'d rate-limit tier) is the nicest answer because it
+ *    carries the 5×/20× granularity — BUT the org can report a generic `default_claude_*`
+ *    passthrough even for a paid account (observed: a real Max account arriving as
+ *    "default_claude_ai"), so it is only trustworthy once it is a mapped, non-`default_*` label.
+ *  - `plan` ("max" | "pro" | "free", set from the profile's has_claude_max / has_claude_pro flags)
+ *    is the authoritative type, and the fallback when the tier is that generic passthrough.
+ * Never returns a raw `default_*` string; returns null (callers render "—") when neither knows.
+ */
+export function resolvePlanLabel(
+  plan: string | null,
+  prettyTierLabel: string | null,
+): string | null {
+  if (prettyTierLabel && !/^default_claude/i.test(prettyTierLabel)) return prettyTierLabel
+  const p = plan?.toLowerCase()
+  if (p) {
+    if (p.includes('max')) return 'Max'
+    if (p.includes('pro')) return 'Pro'
+    if (p.includes('free')) return 'Free'
+    return plan // some other subscriptionType passthrough (already not a raw default_*)
+  }
+  return null
+}
+
 // ----------------------------------------------------------------------------
 // DTO shapes (from the internal tool's shared/dto.ts) — instance + instance-account only.
 // ----------------------------------------------------------------------------
@@ -113,8 +139,12 @@ export interface CMAccount {
   name: string | null
   /** Normalized plan string, e.g. "max" | "pro" | "free" | subscriptionType passthrough. */
   plan: string | null
-  /** Pretty rate-limit tier label, e.g. "Max 20×" (see prettyTier above). */
+  /** Pretty rate-limit tier label, e.g. "Max 20×" (see prettyTier above). Can be a generic
+   *  `default_*` passthrough even for a paid account — use `planLabel` for display. */
   rateLimitTier: string | null
+  /** Display-ready account type ("Max 20×" | "Pro" | "Free" | …), reconciled from `plan` +
+   *  `rateLimitTier` by resolvePlanLabel. Null when it can't be determined (render as "—"). */
+  planLabel: string | null
   accountUuid: string | null
   orgUuid: string | null
   orgName: string | null

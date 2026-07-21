@@ -28,7 +28,7 @@ import path from 'node:path'
 import { decryptSafeStorage } from './crypto/index'
 import { accountsCacheFile, appDataDir, normalizeInstancePath } from './paths'
 import type { CMAccount, CMAccountCacheEntry } from './shared'
-import { OAUTH_BETA_HEADER, PROFILE_API_URL, prettyTier } from './shared'
+import { OAUTH_BETA_HEADER, PROFILE_API_URL, prettyTier, resolvePlanLabel } from './shared'
 
 // ----------------------------------------------------------------------------
 // Small internal helpers (all defensive — never throw out of this module)
@@ -61,12 +61,17 @@ function buildLabel(
 }
 
 function newAccount(partial: Partial<CMAccount> & { status: CMAccount['status'] }): CMAccount {
+  const plan = partial.plan ?? null
+  const rateLimitTier = partial.rateLimitTier ?? null
   return {
     status: partial.status,
     email: partial.email ?? null,
     name: partial.name ?? null,
-    plan: partial.plan ?? null,
-    rateLimitTier: partial.rateLimitTier ?? null,
+    plan,
+    rateLimitTier,
+    // Derived here, at the single construction point, so every account (live/cache/offline)
+    // carries the same display-ready value and no view has to reconcile plan vs tier itself.
+    planLabel: partial.planLabel ?? resolvePlanLabel(plan, rateLimitTier),
     accountUuid: partial.accountUuid ?? null,
     orgUuid: partial.orgUuid ?? null,
     orgName: partial.orgName ?? null,

@@ -14,7 +14,7 @@ import { describe, expect, test } from 'bun:test'
 import type { CMAccount } from '../../server/src/core/shared'
 import { accountName, displayName } from '../src/lib/instance-appearance'
 
-/** A CMAccount is 10 fields and these functions read exactly two — build from a base so each test
+/** A CMAccount is 11 fields and these functions read exactly two — build from a base so each test
  *  states only the field it is actually about. */
 function account(patch: Partial<CMAccount> = {}): CMAccount {
   return {
@@ -23,6 +23,7 @@ function account(patch: Partial<CMAccount> = {}): CMAccount {
     name: null,
     plan: null,
     rateLimitTier: null,
+    planLabel: null,
     accountUuid: null,
     orgUuid: null,
     orgName: null,

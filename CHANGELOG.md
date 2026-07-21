@@ -6,8 +6,24 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **The Instances table has a Plan column.** The account type (Free, Pro, Max, Max 20×, …) now has
+  its own sortable column to the right of Usage, instead of being tucked on the end of the account
+  cell. The value is worked out server-side from two signals, because neither is reliable alone: an
+  account's rate-limit tier is sometimes a generic passthrough even for a paid plan (a real Max
+  account can arrive labelled `default_claude_ai`), so the normalized plan is used as the fallback
+  and a raw internal string is never shown; the column reads "—" only when the plan genuinely can't
+  be determined.
+
 ### Changed
 
+- **Usage refreshes on load.** Opening the Instances view now re-checks every desktop and CLI
+  instance's usage right away, instead of showing the last cached numbers until you pressed "Refresh
+  all usage". Reading quota does not consume any, so this costs nothing.
+- **The account cell shows a name, not an address.** It used to print the full email (and the tier);
+  it now shows the account's short name, reveals the email on hover, and hands the tier to the new
+  Plan column.
 - **The README now shows the app.** It had no screenshots at all, so the only way to find out what
   the thing looked like was to install it. There are now three, one per view, captured from a
   throwaway daemon pointed at a synthetic home directory so no real session titles, account

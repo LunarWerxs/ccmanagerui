@@ -21,7 +21,7 @@ import {
   Unlink,
 } from '@lucide/vue'
 import { useStorage } from '@vueuse/core'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import CliInstancesSection from '@/components/CliInstancesSection.vue'
@@ -62,6 +62,7 @@ import {
 } from '@/lib/api'
 import { formatBytes, formatUptime } from '@/lib/format'
 import {
+  accountName,
   colorValue,
   displayName,
   iconComponent,
@@ -109,7 +110,8 @@ const { sortedRows, toggleSort, indicatorFor } = useSortable(
     { key: 'running', accessor: (i: CMInstance) => i.isRunning },
     // sort by what the cell actually shows (the display label, falling back to folder name)
     { key: 'name', accessor: (i: CMInstance) => displayName(i) },
-    { key: 'account', accessor: (i: CMInstance) => i.account?.email ?? i.account?.label ?? null },
+    // Sort by what the cell actually shows (see accountCellName).
+    { key: 'account', accessor: (i: CMInstance) => accountCellName(i) },
     { key: 'pid', accessor: (i: CMInstance) => i.pid ?? undefined },
     { key: 'uptime', accessor: (i: CMInstance) => (i.isRunning ? i.startTime : null) },
     { key: 'memory', accessor: (i: CMInstance) => i.memoryBytes ?? undefined },
@@ -120,6 +122,7 @@ const { sortedRows, toggleSort, indicatorFor } = useSortable(
         return snap ? (bindingWeeklyPct(snap) ?? undefined) : undefined
       },
     },
+    { key: 'plan', accessor: (i: CMInstance) => i.account?.planLabel ?? undefined },
   ],
 )
 
@@ -142,12 +145,19 @@ const editTarget = ref<CMInstance | null>(null)
 const editing = ref(false)
 const editError = ref<string | null>(null)
 
-function accountLabel(inst: CMInstance): string | null {
-  const acc = inst.account
-  if (!acc) return null
-  if (acc.label) return acc.label
-  if (acc.email) return acc.rateLimitTier ? `${acc.email} · ${acc.rateLimitTier}` : acc.email
-  return null
+// The account cell shows a short NAME only (email hidden, tier moved to its own column). Reuse the
+// canonical resolver (profile name, else the email's local-part like "4claude") that displayName
+// already uses, with the account's own label as a last resort so a logged-out/nameless row still
+// reads "(not logged in)" instead of collapsing to "Resolving…".
+function accountCellName(inst: CMInstance): string | null {
+  return accountName(inst.account) ?? inst.account?.label ?? null
+}
+
+// Full email, revealed only on hover over the name. accountCellName never renders the full address
+// itself (it shows a name or the local-part), so this is always an additive reveal; null when
+// there's no email (e.g. a logged-out row), which also drops the hover affordance.
+function accountEmail(inst: CMInstance): string | null {
+  return inst.account?.email ?? null
 }
 
 function accountBadgeVariant(inst: CMInstance) {
@@ -283,6 +293,34 @@ async function onRefreshAllUsage() {
     refreshingAllUsage.value = false
   }
 }
+
+// --- cold-start usage: force one real probe per instance as the lists first load ----------------
+// The background usage poll only HYDRATES from the server's cache (a plain read), which is empty or
+// stale right after launch — so without this the table sits on "—" until the server's own ~15-min
+// sweep runs or the user clicks "Refresh all usage". This does on load what that button does on
+// click. Desktop and CLI lists arrive on independent polls (and Settings can hide either), so each
+// gets its own one-shot guard and watches its show-flag too: a single shared flag, or watching only
+// the list, would skip whichever became ready second.
+const didInitialDesktopUsage = ref(false)
+const didInitialCliUsage = ref(false)
+watch(
+  [instances, showDesktopInstances],
+  ([list, show]) => {
+    if (didInitialDesktopUsage.value || !show || list.length === 0) return
+    didInitialDesktopUsage.value = true
+    void Promise.all(list.map((i) => checkDesktop(i.dir)))
+  },
+  { immediate: true },
+)
+watch(
+  [cliInstances, showCliInstances],
+  ([list, show]) => {
+    if (didInitialCliUsage.value || !show || list.length === 0) return
+    didInitialCliUsage.value = true
+    void Promise.all(list.map((i) => checkCliUsage(i.id)))
+  },
+  { immediate: true },
+)
 
 async function onOpen(inst: CMInstance) {
   const result = await open(inst.dir)
@@ -637,11 +675,18 @@ onUnmounted(() => {
                 <ArrowDown v-else-if="indicatorFor('usage') === 'desc'" class="size-3" />
               </span>
             </TableHead>
+            <TableHead class="cursor-pointer select-none" @click="toggleSort('plan')">
+              <span class="inline-flex items-center gap-0.5">
+                {{ $t('instances.colPlan') }}
+                <ArrowUp v-if="indicatorFor('plan') === 'asc'" class="size-3" />
+                <ArrowDown v-else-if="indicatorFor('plan') === 'desc'" class="size-3" />
+              </span>
+            </TableHead>
             <TableHead class="text-right">{{ $t('instances.colActions') }}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody v-if="instances.length === 0" class="[&>tr]:transition-colors [&>tr]:duration-200">
-          <TableEmpty v-if="!loading" :colspan="8">
+          <TableEmpty v-if="!loading" :colspan="9">
             <div class="flex flex-col items-center gap-1 text-center">
               <Boxes class="mb-1 size-6 opacity-40" />
               <p class="font-medium text-foreground">{{ $t('instances.empty') }}</p>
@@ -660,6 +705,7 @@ onUnmounted(() => {
             <TableCell><Skeleton class="h-3 w-12" /></TableCell>
             <TableCell><Skeleton class="h-3 w-14" /></TableCell>
             <TableCell><Skeleton class="h-5 w-14" /></TableCell>
+            <TableCell><Skeleton class="h-5 w-16" /></TableCell>
             <TableCell>
               <div class="flex justify-end"><Skeleton class="h-6 w-20" /></div>
             </TableCell>
@@ -718,10 +764,17 @@ onUnmounted(() => {
             <TableCell>
               <!-- No "Resolve" button: every instance resolves itself (see
                    useInstances.autoResolveAccounts), so a missing account is a moment, not a
-                   state you act on. A logged-out instance still lands here as a badge — its
-                   account.label reads "(not logged in)". -->
-              <Badge v-if="accountLabel(inst)" :variant="accountBadgeVariant(inst)">
-                {{ accountLabel(inst) }}
+                   state you act on. The cell shows the account NAME; the email is hidden and
+                   revealed on hover (title), and the plan/tier is its own column now. A
+                   logged-out instance still lands here as a badge — its account.label reads
+                   "(not logged in)". -->
+              <Badge
+                v-if="accountCellName(inst)"
+                :variant="accountBadgeVariant(inst)"
+                :title="accountEmail(inst) ?? undefined"
+                :class="accountEmail(inst) ? 'cursor-help' : undefined"
+              >
+                {{ accountCellName(inst) }}
               </Badge>
               <span v-else class="text-xs text-muted-foreground">
                 {{ $t('instances.resolving') }}
@@ -739,6 +792,15 @@ onUnmounted(() => {
                 :usage-key="usageKeyFor(inst)"
                 @check="onCheckUsage(inst)"
               />
+            </TableCell>
+            <TableCell>
+              <!-- Plan / account type ("Max 20×", "Pro", "Free"), pulled out of the account cell
+                   so it reads at a glance and sorts on its own. `account.planLabel` is computed
+                   server-side (resolvePlanLabel) so a generic rate-limit tier never leaks here. -->
+              <Badge v-if="inst.account?.planLabel" variant="outline">
+                {{ inst.account.planLabel }}
+              </Badge>
+              <span v-else class="text-xs text-muted-foreground">—</span>
             </TableCell>
             <TableCell>
               <div class="flex items-center justify-end gap-1">

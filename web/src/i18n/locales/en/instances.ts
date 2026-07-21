@@ -13,6 +13,7 @@ export default {
   colUptime: 'Uptime',
   colMemory: 'Memory',
   colUsage: 'Usage',
+  colPlan: 'Plan',
   colActions: 'Actions',
   running: 'Running',
   stopped: 'Stopped',
