@@ -6,6 +6,8 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-21
+
 ### Changed
 
 - **The interface follows Claude's own surfaces.** The window used to be a single near-black sheet:
