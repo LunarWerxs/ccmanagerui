@@ -6,6 +6,30 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **The interface follows Claude's own surfaces.** The window used to be a single near-black sheet:
+  every region painted the same token and leaned on hairline borders for structure, so there was
+  effectively one shade on screen. There are now three grounds, using Claude's values directly — the
+  top bar and session list as the darkest chrome, the working area a step above it, and cards,
+  popovers and table headers raised above that. The accent moves from magenta to Claude's dusty rose.
+  The greys are deliberately neutral; an earlier revision of this work derived them and landed a
+  visible brown cast on every surface instead.
+- **The accent is no longer used as a background wash.** The selected session row and your own chat
+  bubbles were tinted with the accent at 10–15%, which composites over a dark ground into a muddy
+  maroon rather than reading as a highlight. Both are the neutral raised grey now, and the accent is
+  kept for things that are actually accents (Send, Queue, checked states).
+- **Text fields paint their own surface.** The kit draws them at 30% alpha, so the token never
+  reached its real value: the search and composer boxes came out darker than intended and had no
+  visible edge, and the composer additionally drew a filled field inside its own filled box. Text
+  fields now paint the surface outright and carry a real outline, while outline buttons and badges
+  keep the translucent fill that suits them.
+
+### Fixed
+
+- The release workflow no longer trips GitHub's Node 20 deprecation warning: `upload-artifact`,
+  `download-artifact` and `setup-qemu-action` move to their current majors.
+
 ## [0.8.0] - 2026-07-21
 
 ### Added

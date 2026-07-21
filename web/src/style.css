@@ -3,6 +3,112 @@
 @import "./styles/kit-base.css";
 @import "./styles/kit-accent.css";
 
+/* ---------------------------------------------------------------------------
+   CC Manager UI "Claude" theme layer — app-local on purpose.
+
+   This app is the Claude Code manager, so it uses Claude's own surface values,
+   taken from their site and applied verbatim as hex rather than re-derived: three
+   near-neutral dark greys plus a dusty-rose accent. They are deliberately NOT hex
+   approximations of an oklch guess — a previous revision did exactly that and put a
+   visible brown cast on every surface.
+
+   This lives here, after both kit imports, so it wins the cascade and stays SCOPED
+   TO THIS APP — kit-base.css is shared across every LunarWerx app (warming it there
+   would drag DevWebUI / RēDesign / RepoYeti along), and kit-accent.css is a synced
+   file we must not edit in-app. An app-owned override is the one place a per-app
+   look belongs, and it survives `bun run check:kit`.
+
+   The neutrals must stay neutral (R≈G≈B). Any real chroma on these greys reads as a
+   colour cast across the whole window, which is the failure mode this file exists to
+   avoid. --primary / --ring also override the accent file's magenta with the rose.
+   --------------------------------------------------------------------------- */
+:root {
+  /* Light: the same near-neutral family, inverted. Greys stay grey (R≈G≈B) — no ivory/brown cast.
+     Sidebar recesses below the page; cards lift above it. */
+  --background: #f7f7f5;
+  --foreground: #1a1a19;
+  --card: #ffffff;
+  --card-foreground: #1a1a19;
+  --popover: #ffffff;
+  --popover-foreground: #1a1a19;
+  --secondary: #efefed;
+  --secondary-foreground: #232321;
+  --muted: #efefed;
+  --muted-foreground: #6b6b68;
+  --accent: #e7e7e4;
+  --accent-foreground: #232321;
+  --border: #e2e2df;
+  --input: #e2e2df;
+  --primary: #d06c74;
+  --primary-foreground: #ffffff;
+  --ring: #d06c74;
+  --sidebar: #efefed;
+  --sidebar-foreground: #1a1a19;
+  --sidebar-primary: #d06c74;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e7e7e4;
+  --sidebar-accent-foreground: #232321;
+  --sidebar-border: #e2e2df;
+  --sidebar-ring: #d06c74;
+}
+.dark {
+  /* Dark: Claude's own values, sampled from their site, used VERBATIM. These are near-neutral
+     greys (#232321 is R35 G35 B33 — R=G, B one lower), NOT warm/brown. An earlier pass here
+     invented an oklch palette at hue ~70-85 / chroma ~0.007, which is a brown tint on every
+     surface; that was the bug. Keep chroma at essentially zero.
+
+       chrome  #181817   header + session list (darkest)
+       ground  #1a1a19   the working area
+       raised  #232321   cards, popovers, table headers, hover
+       accent  #d06c74   dusty rose */
+  --background: #1a1a19;
+  --foreground: #ededeb;
+  --card: #232321;
+  --card-foreground: #ededeb;
+  --popover: #232321;
+  --popover-foreground: #ededeb;
+  --secondary: #232321;
+  --secondary-foreground: #ededeb;
+  --muted: #232321;
+  --muted-foreground: #9a9a97;
+  /* #2c2c2b is Claude's value for the raised interactive surface: the text input/composer box
+     and the row-hover tone. It replaces a lighter grey that had been guessed at here. */
+  --accent: #2c2c2b;
+  --accent-foreground: #ededeb;
+  --border: #2e2e2c;
+  --input: #2c2c2b;
+  --primary: #d06c74;
+  --primary-foreground: #ffffff;
+  --ring: #d06c74;
+  --sidebar: #181817;
+  --sidebar-foreground: #ededeb;
+  --sidebar-primary: #d06c74;
+  --sidebar-primary-foreground: #ffffff;
+  /* hover inside the sidebar rises to the raised tone, not past it */
+  --sidebar-accent: #232321;
+  --sidebar-accent-foreground: #ededeb;
+  --sidebar-border: #2e2e2c;
+  --sidebar-ring: #d06c74;
+}
+
+/* Text fields paint their token SOLID.
+   The kit ships text fields at `bg-input/30`, so --input only ever rendered at 30% over whatever
+   sat behind it and the box never actually reached its token value (on the sidebar it came out
+   ~#1f1f1e instead of #2c2c2b). The search/composer box is a real raised surface in Claude, so the
+   text-field family paints the token outright. Deliberately scoped to text fields by data-slot:
+   outline buttons and outline badges also use bg-input/30 and should KEEP the translucent
+   treatment, or every secondary control would turn into a filled block.
+
+   `:not(.bg-transparent)` matters: the session composer deliberately makes its Textarea transparent
+   and lets the WRAPPER be the box. Without the exclusion this rule out-specifies that opt-out and
+   paints a solid field inside an already-solid box, which reads as a double outline. */
+.dark [data-slot="input"]:not(.bg-transparent),
+.dark [data-slot="textarea"]:not(.bg-transparent),
+.dark [data-slot="select-trigger"]:not(.bg-transparent) {
+  background-color: var(--input);
+  border-color: var(--border);
+}
+
 /* Deep-link landing flash.
    A deep link into Settings (the queue drawer's scheduler indicator, the header's scheduler chip,
    the composer's tomorrow gear) scrolls a section into view — but on a long settings page a scroll

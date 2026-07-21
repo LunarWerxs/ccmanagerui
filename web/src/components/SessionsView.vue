@@ -456,8 +456,11 @@ function copy(text: string) {
   <div class="flex h-full min-h-0">
     <!-- sidebar: session list in its own scroll column; collapses to a slim rail with an
          animated width morph (the toggle button rides the sliding right edge) -->
+    <!-- bg-sidebar, not transparent: the list is the recessed ground of the two-pane split. Without
+         its own surface every region painted --background and the whole app read as one flat sheet,
+         separated only by the hairline border. -->
     <aside
-      class="relative min-h-0 shrink-0 overflow-hidden border-r border-border"
+      class="relative min-h-0 shrink-0 overflow-hidden border-r border-border bg-sidebar"
       :class="resizing ? '' : 'transition-[width] duration-300 ease-in-out'"
       :style="asideStyle"
     >
@@ -761,8 +764,11 @@ function copy(text: string) {
                 <button
                   class="mb-1.5 w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
                   :class="[
+                    // Selected is a RAISED GREY, not an accent tint. bg-primary/10 composited to a
+                    // maroon (#352626) against the dark ground, which read as a colour wash rather
+                    // than a selection. Ladder in the sidebar: rest → hover (accent/50) → selected.
                     (selectMode ? isChecked(s) : s.session_id === selectedId)
-                      ? 'border-primary/50 bg-primary/10'
+                      ? 'border-border bg-accent'
                       : 'border-transparent hover:border-border hover:bg-accent/50',
                     // done rows stay in place and stay readable; they just stop competing for the eye
                     s.done && s.session_id !== selectedId ? 'opacity-55' : '',
@@ -843,7 +849,7 @@ function copy(text: string) {
       <div
         v-show="!collapsed"
         class="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors"
-        :class="resizing ? 'bg-primary/40' : 'hover:bg-primary/25'"
+        :class="resizing ? 'bg-accent' : 'hover:bg-accent/60'"
         :title="$t('sessions.resizeSidebar')"
         @pointerdown.prevent="startResize"
         @dblclick="sidebarWidth = SIDEBAR_DEFAULT"
@@ -1021,11 +1027,13 @@ function copy(text: string) {
                   </button>
                 </div>
 
-                <!-- chat bubbles -->
+                <!-- chat bubbles: user = raised grey, assistant = flatter muted. The user bubble was
+                     bg-primary/15, which composited to #352626 — a maroon block behind every message
+                     you sent, rather than a neutral raised surface. -->
                 <div
                   v-else
                   class="min-w-0 max-w-[85%] rounded-2xl px-3.5 py-2 text-sm"
-                  :class="ev.role === 'user' ? 'rounded-br-md bg-primary/15' : 'rounded-bl-md bg-muted/50'"
+                  :class="ev.role === 'user' ? 'rounded-br-md bg-accent' : 'rounded-bl-md bg-muted/50'"
                 >
                   <div
                     class="whitespace-pre-wrap break-words"

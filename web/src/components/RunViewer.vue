@@ -66,7 +66,7 @@ onBeforeUnmount(disconnect)
           class="rounded-lg border px-3 py-2"
           :class="
             ev.role === 'assistant'
-              ? 'border-primary/25 bg-primary/5'
+              ? 'border-border bg-accent'
               : 'border-border bg-muted/40'
           "
         >

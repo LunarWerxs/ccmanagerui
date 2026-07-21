@@ -104,7 +104,7 @@ onMounted(handleConnectRedirect)
          push-panel padding shift with the main content, or an open drawer would cover the
          right-side buttons instead of nudging them over. -->
     <header
-      class="flex shrink-0 items-center gap-3 bg-background px-4 py-2 transition-[padding] duration-300 ease-in-out"
+      class="flex shrink-0 items-center gap-3 bg-sidebar px-4 py-2 transition-[padding] duration-300 ease-in-out"
       :style="headerStyle"
     >
       <div class="flex items-center gap-2.5">

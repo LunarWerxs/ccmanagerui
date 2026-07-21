@@ -376,7 +376,7 @@ onUnmounted(stopPolling)
     <!-- v-show rather than a height animation, for the same reason as the Instances table: an
          overflow-hidden wrapper would break this table's `sticky top-0` header. -->
     <Table v-show="cliOpen">
-        <TableHeader class="sticky top-0 z-10 bg-background">
+        <TableHeader class="sticky top-0 z-10 bg-card">
           <TableRow>
             <TableHead class="w-10 cursor-pointer select-none" @click="toggleSort('loggedIn')">
               <span class="inline-flex items-center gap-0.5">

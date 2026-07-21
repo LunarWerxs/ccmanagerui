@@ -124,7 +124,7 @@ onBeforeUnmount(() => clearTimeout(applyTimer))
               :key="k"
               type="button"
               class="inline-flex size-8 items-center justify-center rounded-md border transition-colors"
-              :class="k === icon ? 'border-primary bg-primary/10' : 'border-transparent hover:bg-accent'"
+              :class="k === icon ? 'border-primary bg-accent' : 'border-transparent hover:bg-accent'"
               :aria-label="k"
               :aria-pressed="k === icon"
               @click="icon = k"

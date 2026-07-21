@@ -621,7 +621,7 @@ onUnmounted(() => {
            scrollport sticky resolves against, so the header would silently stop sticking. The
            chevron carries the state change instead. -->
       <Table v-show="showDesktopInstances && desktopOpen">
-        <TableHeader class="sticky top-0 z-10 bg-background">
+        <TableHeader class="sticky top-0 z-10 bg-card">
           <TableRow>
             <TableHead
               class="w-10 cursor-pointer select-none"

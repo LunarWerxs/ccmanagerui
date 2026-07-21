@@ -197,7 +197,10 @@ function onKeydown(e: KeyboardEvent) {
         {{ scheduler?.enabled ? $t('composer.busyHintAuto') : $t('composer.busyHintManual') }}
       </p>
 
-      <div class="rounded-xl border border-border bg-input/10 focus-within:border-ring">
+      <!-- bg-input (solid), not bg-input/10: this wrapper IS the composer box, so it carries the
+           same raised surface + outline as every other text field. The Textarea inside stays
+           transparent. -->
+      <div class="rounded-xl border border-border bg-input focus-within:border-ring">
         <Textarea
           v-model="text"
           class="max-h-48 min-h-12 border-0 bg-transparent px-3 pt-2.5 focus-visible:ring-0 dark:bg-transparent"
