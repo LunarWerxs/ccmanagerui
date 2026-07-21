@@ -6,6 +6,18 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`bun run screenshots` regenerates the README images.** They used to be taken by hand against a
+  throwaway daemon, which is why they sat two releases out of date showing a theme the app no longer
+  had. The command starts its own web server on a private port, drives headless Chrome, and writes
+  one PNG per view at a viewport sized to that view's shell. Since the images are public, it does
+  not point a daemon at a synthetic home directory; it replaces `fetch` before the SPA boots so every
+  `/api/` response is invented and no daemon runs at all. A request that finds no fixture is
+  recorded and **fails the run**, so a fixture gap cannot quietly put live data into a committed
+  image, and each shot carries a predicate that must hold before the shutter fires, so a stale
+  fixture fails loudly instead of producing a screenshot of empty loading skeletons.
+
 ## [0.9.0] - 2026-07-21
 
 ### Changed

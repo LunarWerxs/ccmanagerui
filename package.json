@@ -16,6 +16,7 @@
     "compile": "bun build --compile --outfile=tmp/ccmanagerui server/src/main.ts",
     "start": "bun run --cwd server start",
     "mcp": "bun server/src/mcp.ts",
+    "screenshots": "bun scripts/screenshots/capture.mjs",
     "check": "biome check . && bun run --cwd web check:i18n && bun run check:kit",
     "check:kit": "node ../lunarwerx-ui/sync.mjs --check --app ccmanagerui",
     "lint": "biome check .",

@@ -99,7 +99,32 @@ server/    Bun + Hono daemon: sqlite, session reader, transcript tail, dispatch,
 web/       Vue 3 SPA (Sessions / Queue / Instances views)
 tests/     launcher.test.ts (the tray guard, Windows-gated) + server/instance unit tests
 misc/      the Windows launcher toolkit (tray .ps1 / .vbs / .ico / Create-Shortcut / Make-Icon / Rebuild.bat)
+scripts/   repo tooling (screenshots/: regenerate the README images)
 ```
+
+## Screenshots
+
+The three README images are generated, not hand-taken:
+
+```
+bun run screenshots                 # shoot and install into .github/screenshots/
+bun run screenshots -- --keep       # write to tmp/screenshots/ instead, to eyeball first
+bun run screenshots -- --url <url>  # reuse a server you already have running
+```
+
+It starts its own web server on a private port (5199, so an open dev session on 5173 is neither
+disturbed nor photographed), drives headless Chrome over the DevTools protocol, and writes one PNG
+per view at a viewport sized to that view's max-width shell.
+
+**Nothing real is ever in frame.** These images are public, so instead of pointing a daemon at a
+synthetic home directory, `scripts/screenshots/page-fixtures.js` replaces `window.fetch` before the
+SPA boots: every `/api/` response is invented and no daemon runs at all. Any request that finds no
+fixture is recorded, and the run **fails** rather than keeping images that could contain live data.
+Adding a shot means adding an entry to `SHOTS` in `capture.mjs`; each one carries an `expect`
+predicate that must hold before the shutter fires, so a fixture that stops matching the UI fails
+the run instead of silently producing a screenshot of empty skeletons.
+
+Requires a Chromium-based browser; set `CHROME_PATH` if it is not in a standard location.
 
 ## Checks
 
