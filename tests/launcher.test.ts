@@ -325,11 +325,12 @@ describe.skipIf(!win)('tray launcher', () => {
     expect(openAppUi).not.toContain('tray.Visible')
   })
 
-  test('CC Manager UI has no shutdown sentinel — quit is in-memory intentionalStop only', () => {
-    // new: documents a real divergence from the sentinel-based siblings (ReDesign/RepoYeti/
-    // DevWebUI) so a future engine change can't silently wire one in for this app.
+  test('CC Manager UI declares its full-shutdown sentinel (web-UI "Shut down" tears the app down)', () => {
+    // The tray polls this sentinel; the daemon drops it on a UI-source shutdown without the tray
+    // token (server/src/index.ts), so a web-UI "Shut down" quits the whole app (icon + daemon)
+    // instead of the watchdog reviving it. Path sits beside runtime.json in $cmHome.
     const ps = readFileSync(TRAY, 'utf8')
-    expect(ps).toMatch(/SentinelFile\s*=\s*\$null/)
+    expect(ps).toMatch(/SentinelFile\s*=\s*Join-Path \$cmHome "shutdown\.request"/)
   })
 
   test('CC Manager UI uses the token/HTTP graceful-shutdown protocol, not force-kill', () => {

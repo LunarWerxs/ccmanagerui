@@ -187,6 +187,16 @@ async function copyFile(id: string) {
   }
 }
 
+async function copyFileLocation(id: string) {
+  try {
+    const { path } = await api.getSessionFileLocation(id)
+    await navigator.clipboard.writeText(path)
+    toast.success(t('sessions.copyFileLocationDone'))
+  } catch {
+    toast.error(t('sessions.copyFileLocationFailed'))
+  }
+}
+
 const search = ref('')
 const selectedId = ref<string | null>(null)
 const tail = ref<TailResult | null>(null)
@@ -826,6 +836,10 @@ function copy(text: string) {
                   <ClipboardCopy />
                   {{ $t('sessions.copyFile') }}
                 </ContextMenuItem>
+                <ContextMenuItem @select="copyFileLocation(s.session_id)">
+                  <Copy />
+                  {{ $t('sessions.copyFileLocation') }}
+                </ContextMenuItem>
                 <ContextMenuSeparator />
                 <ContextMenuItem @select="copy(s.title)">
                   <Copy />
@@ -932,6 +946,19 @@ function copy(text: string) {
                   @click="copyFile(selected.session_id)"
                 >
                   <ClipboardCopy />
+                </Button>
+              </IconTooltip>
+              <IconTooltip
+                :label="$t('sessions.copyFileLocation')"
+                :description="$t('sessions.copyFileLocationHint')"
+              >
+                <Button
+                  variant="outline"
+                  size="sm"
+                  :aria-label="$t('sessions.copyFileLocation')"
+                  @click="copyFileLocation(selected.session_id)"
+                >
+                  <Copy />
                 </Button>
               </IconTooltip>
               <IconTooltip :label="$t('sessions.copySessionId')">

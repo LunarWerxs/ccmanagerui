@@ -128,6 +128,9 @@ export const setSessionDone = (id: string, done: boolean) =>
  *  Vite dev origin instead of the daemon. */
 export const sessionFileUrl = (id: string) =>
   `${API_BASE}/api/sessions/${encodeURIComponent(id)}/file`
+/** Get the original transcript's absolute path on the daemon's machine. */
+export const getSessionFileLocation = (id: string) =>
+  j<{ path: string }>(`/api/sessions/${encodeURIComponent(id)}/file-location`)
 /** Open the transcript on the daemon's machine with the OS default handler. */
 export const openSessionFile = (id: string) =>
   j<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/open-file`, { method: 'POST' })
@@ -279,6 +282,17 @@ export interface AutoUpdateSettings {
 export const getAutoUpdateSettings = () => j<AutoUpdateSettings>('/api/update/settings')
 export const updateAutoUpdateSettings = (b: Partial<AutoUpdateSettings>) =>
   j<AutoUpdateSettings>('/api/update/settings', { method: 'POST', body: JSON.stringify(b) })
+
+// --- app shutdown -------------------------------------------------------------
+/** Full app shutdown from the UI. The daemon drops the tray's shutdown sentinel and exits, so the
+ *  tray tears the WHOLE app down (window + daemon + tray icon) rather than reviving the daemon.
+ *  Same-origin and token-free by design: the `-shutdown-source: ui` header (no tray token) is what
+ *  the daemon treats as a user "Shut down" (see server/src/index.ts /api/shutdown). */
+export const shutdownApp = () =>
+  j<{ ok: boolean }>('/api/shutdown', {
+    method: 'POST',
+    headers: { 'x-ccmanagerui-shutdown-source': 'ui' },
+  })
 
 // --- app settings (portable mode, hide tray icon, usage auto-refresh + section visibility) -------
 /** Everything /api/settings returns: the window/tray settings plus the usage settings. */
