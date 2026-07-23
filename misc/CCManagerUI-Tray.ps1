@@ -63,7 +63,10 @@ $TrayConfig = @{
   RebuildCommand       = "bun run build"
   RebuildLogName       = "CCManagerUI-Rebuild.log"
   IsDevTree            = $isDevTree
-  SentinelFile         = $null                          # CCManagerUI has no shutdown sentinel (in-memory intentionalStop only)
+  # Full-shutdown sentinel: the daemon drops this when a user picks "Shut down" in the web UI, so
+  # the tray tears the WHOLE app down (icon + daemon) instead of reviving it. Sits beside
+  # runtime.json in $cmHome; matches server/src/index.ts SHUTDOWN_REQUEST_FILE.
+  SentinelFile         = Join-Path $cmHome "shutdown.request"
   ShutdownTokenEnvVar  = "CCMANAGERUI_SHUTDOWN_TOKEN"
   ShutdownHeaderPrefix = "x-ccmanagerui"
   OnStrayDaemon        = "attach"                        # adopt a live daemon rather than spawning a 2nd one

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { basename, join, relative } from 'node:path'
 import { type Context, Hono } from 'hono'
@@ -446,6 +446,13 @@ app.get('/api/sessions/:id/file', async (c) => {
       'content-disposition': contentDispositionAttachment(filename),
     },
   })
+})
+// Return the original transcript's absolute location so the SPA can copy it as plain text.
+// Resolve it here rather than reconstructing it in the browser: project-folder encoding is lossy,
+// and findTranscript also handles the rare case where the same session id exists in two folders.
+app.get('/api/sessions/:id/file-location', (c) => {
+  const tf = findTranscript(c.req.param('id'))
+  return tf ? c.json({ path: tf.path }) : c.json({ error: 'session not found' }, 404)
 })
 // Open the transcript in an editor (loopback daemon: same posture as the portable-window spawn;
 // the file opens on the machine the daemon runs on). .jsonl has no OS file association, so handing
@@ -1180,13 +1187,45 @@ app.post('/api/portable-window', async (c) => {
   return c.json(await openPortableWindow(target, { profileDir, initialSize: PORTABLE_WINDOW_SIZE }))
 })
 
+// --- full-shutdown sentinel (web-UI "Shut down") -----------------------------
+// A marker file the PowerShell tray host polls (misc/Tray-Host.ps1 watch timer) so a user "Shut
+// down" from the web UI tears the WHOLE app down — window + daemon + tray icon — instead of the
+// watchdog reviving the daemon. Lives beside runtime.json in CONFIG_DIR (matches the tray's
+// SentinelFile = <cmHome>\shutdown.request). Written ONLY for a UI-source shutdown that lacks the
+// tray's session token (the tray's own Restart/Quit carry it, so they don't trip this). Cleared on
+// boot so a stale one from a hard-killed run never causes a spurious quit. Best-effort throughout.
+const SHUTDOWN_REQUEST_FILE = join(CONFIG_DIR, 'shutdown.request')
+function writeShutdownRequest(): void {
+  try {
+    writeFileSync(SHUTDOWN_REQUEST_FILE, JSON.stringify({ ts: Date.now() }), { mode: 0o600 })
+  } catch {
+    /* best-effort: a tray that misses the sentinel still has its own Quit */
+  }
+}
+function clearShutdownRequest(): void {
+  try {
+    rmSync(SHUTDOWN_REQUEST_FILE, { force: true })
+  } catch {
+    /* best-effort */
+  }
+}
+
 // --- graceful shutdown (tray Quit calls this before falling back to taskkill) ---
 const SHUTDOWN_TOKEN = process.env.CCMANAGERUI_SHUTDOWN_TOKEN
 app.post('/api/shutdown', (c) => {
-  const token = c.req.header('x-ccmanagerui-shutdown-token')
-  if (SHUTDOWN_TOKEN && token !== SHUTDOWN_TOKEN) return c.json({ error: 'forbidden' }, 403)
+  const trayHeader = c.req.header('x-ccmanagerui-shutdown-token') ?? ''
+  const uiSource = c.req.header('x-ccmanagerui-shutdown-source') === 'ui'
+  // The tray's Restart/Quit carry the session token (source=ui + token). A user "Shut down" from
+  // the web UI is source=ui WITHOUT the token — allowed, and it drops the sentinel so the tray
+  // tears the whole app down rather than reviving the daemon. A non-UI request must still bear the
+  // token (or be rejected). Harmless when no tray is running: nobody polls the sentinel, and the
+  // next boot clears it.
+  const tokenOk = !!SHUTDOWN_TOKEN && trayHeader === SHUTDOWN_TOKEN
+  if (!uiSource && !tokenOk) return c.json({ error: 'forbidden' }, 403)
+  if (uiSource && !tokenOk) writeShutdownRequest()
   setTimeout(() => {
     clearInstanceInfo()
+    stopAutoUpdate()
     process.exit(0)
   }, 150)
   return c.json({ ok: true })
@@ -1280,6 +1319,10 @@ writeInstanceInfo(boundPort, {
   portableMode: portableModeEnabled(),
   hideTrayIcon: hideTrayIconEnabled(),
 })
+// Clear any stale full-shutdown sentinel left by a previous (possibly hard-killed) run, so a
+// leftover file can't make the tray quit the instant it next polls. The tray clears it at its own
+// startup too; this covers a daemon started without the tray (dev).
+clearShutdownRequest()
 process.on('exit', () => clearInstanceInfo())
 for (const sig of ['SIGINT', 'SIGTERM'] as const)
   process.on(sig, () => {

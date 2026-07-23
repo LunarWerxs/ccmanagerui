@@ -19,7 +19,6 @@ import {
   RefreshCw,
   RotateCcw,
   SlidersHorizontal,
-  SunMoon,
   Terminal,
   Timer,
   User,
@@ -31,6 +30,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { USAGE_REFRESH_INTERVALS, useAppSettings } from '@/composables/useAppSettings'
 import { useData } from '@/composables/useData'
 import { useMonitor } from '@/composables/useMonitor'
@@ -111,6 +111,49 @@ const applyMessage = ref<string | null>(null)
 const applyError = ref<string | null>(null)
 const restartRequired = ref(false)
 
+// The version number IS the update control now (owner request): it reads green when up to date,
+// amber when an update is waiting, red when blocked / there is no update source. Its tooltip
+// spells out the state, and clicking it re-checks (or applies a waiting update) — folding away the
+// old always-visible "Up to date." / "Update available" / "Update blocked" status rows.
+type UpdateState = 'checking' | 'up-to-date' | 'available' | 'blocked' | 'no-source' | 'unknown'
+const updateState = computed<UpdateState>(() => {
+  if (updateChecking.value || updateApplying.value) return 'checking'
+  const s = updateStatus.value
+  if (!s) return 'unknown'
+  if (!s.remote) return 'no-source'
+  if (s.updateAvailable) return s.canApply ? 'available' : 'blocked'
+  return 'up-to-date'
+})
+const versionColorClass = computed(() => {
+  switch (updateState.value) {
+    case 'up-to-date':
+      return 'text-success'
+    case 'available':
+      return 'text-warning'
+    case 'blocked':
+    case 'no-source':
+      return 'text-destructive'
+    default:
+      return 'text-muted-foreground'
+  }
+})
+const versionTip = computed(() => {
+  switch (updateState.value) {
+    case 'checking':
+      return t('settings.versionCheckingTip')
+    case 'available':
+      return t('settings.versionUpdateAvailableTip')
+    case 'blocked':
+      return updateBlockedReason.value
+        ? `${t('settings.versionUpdateBlockedTip')} ${updateBlockedReason.value}`
+        : t('settings.versionUpdateBlockedTip')
+    case 'no-source':
+      return `${t('settings.versionNoSourceTip')} ${t('settings.noUpdateSourceHint')}`
+    default:
+      return t('settings.versionUpToDateTip')
+  }
+})
+
 onMounted(() => {
   checkForUpdate()
 })
@@ -130,6 +173,15 @@ async function onApplyUpdate() {
   } catch (e) {
     applyError.value = e instanceof Error ? e.message : String(e)
   }
+}
+// One click, state-dependent: apply a waiting update, otherwise (re-)check for one.
+async function onVersionClick() {
+  if (updateChecking.value || updateApplying.value) return
+  if (updateState.value === 'available') {
+    await onApplyUpdate()
+    return
+  }
+  await onCheckForUpdate()
 }
 
 // --- portable mode ---
@@ -204,6 +256,11 @@ async function patchUsageSettings(patch: Partial<api.UsageSettings>) {
 // destination you go looking for, not something the panel puts in front of you.
 const editorOpen = ref(false)
 
+// Appearance "Advanced" disclosure (mirrors the Scheduler group): tucks the tooltips toggle and
+// the transcript-editor override away by default (owner request) so the section leads with the
+// everyday choices.
+const appearanceAdvancedOpen = ref(false)
+
 async function saveTranscriptEditor() {
   if (!(await updateAppSettings({ transcriptEditor: transcriptEditor.value.trim() })))
     toast.error(t('settings.transcriptEditorToastFailed'))
@@ -221,13 +278,10 @@ const editorOverrideIgnored = computed(() => {
   return !!typed && !!transcriptEditorResolved.value && typed !== transcriptEditorResolved.value
 })
 
-// --- theme (moved here from the app header) + cloud sync -----------------------
+// --- theme + cloud sync -----------------------
+// The theme PICKER now lives as an icon in the settings panel header (App.vue); this composable
+// stays here only so cloud sync can read/apply the theme (applyAppearance / currentAppearance).
 const { mode: themeMode, setTheme } = useTheme()
-const themeOptions = [
-  { value: 'light' as const, label: t('settings.themeLight') },
-  { value: 'dark' as const, label: t('settings.themeDark') },
-  { value: 'system' as const, label: t('settings.themeSystem') },
-]
 const syncStatus = ref<SyncStatus>({
   ok: true,
   enabled: false,
@@ -526,32 +580,9 @@ defineExpose({ save })
 
     <!-- appearance -->
     <SettingsGroup :label="$t('settings.appearance')">
-      <!-- theme: moved here from the app header (owner request); system mode finally
-           gets a direct control instead of only being reachable via cloud-sync restore -->
-      <SettingsRow :icon="SunMoon" :label="$t('settings.themeLabel')">
-        <template #control>
-          <div class="flex items-center gap-1">
-            <Button
-              v-for="o in themeOptions"
-              :key="o.value"
-              :variant="themeMode === o.value ? 'secondary' : 'ghost'"
-              size="xs"
-              :aria-pressed="themeMode === o.value"
-              @click="setTheme(o.value)"
-            >
-              {{ o.label }}
-            </Button>
-          </div>
-        </template>
-      </SettingsRow>
-      <SettingsRow :icon="MessageCircleQuestion" :label="$t('settings.showTooltipsLabel')">
-        <template #info>
-          <InfoHint :text="$t('settings.showTooltipsHint')" />
-        </template>
-        <template #control>
-          <Switch v-model="showTooltips" />
-        </template>
-      </SettingsRow>
+      <!-- Theme + Shut down moved to icons in the settings panel header (App.vue). Show tooltips
+           and the transcript-editor override moved into the "Advanced" disclosure at the bottom of
+           this group (owner request), so Appearance leads with the everyday choices. -->
       <SettingsRow :icon="AppWindow" :label="$t('settings.portableModeLabel')">
         <template #info>
           <InfoHint :text="$t('settings.portableModeHint')" />
@@ -568,73 +599,6 @@ defineExpose({ save })
           <Switch :model-value="hideTrayIcon" @update:model-value="toggleHideTrayIcon" />
         </template>
       </SettingsRow>
-      <!-- Progressive disclosure, because the ANSWER is what matters and the input almost never is:
-           auto-detect gets this right for everyone with VS Code / Cursor / Notepad++ / Sublime
-           installed, so the old always-visible path box sat empty and unexplained, asking for an
-           absolute path to solve a problem the user did not have. The row now states which editor
-           will actually open a transcript; the field appears only if you go looking for it. -->
-      <SettingsRow
-        :icon="FilePenLine"
-        :label="$t('settings.transcriptEditorLabel')"
-        clickable
-        @click="editorOpen = !editorOpen"
-      >
-        <template #info>
-          <InfoHint :text="$t('settings.transcriptEditorHint')" />
-        </template>
-        <template #control>
-          <span
-            class="max-w-44 truncate"
-            :class="editorOverrideIgnored ? 'text-warning' : ''"
-            :title="transcriptEditorResolved || undefined"
-          >
-            {{
-              transcriptEditorResolved
-                ? baseName(transcriptEditorResolved)
-                : $t('settings.transcriptEditorPlaceholder')
-            }}
-          </span>
-          <!-- auto-detect is the norm, so say when it is NOT in play rather than when it is -->
-          <Badge v-if="transcriptEditor.trim()" variant="secondary">
-            {{ $t('settings.transcriptEditorCustomBadge') }}
-          </Badge>
-          <ChevronDown
-            class="size-4 transition-transform duration-200"
-            :class="editorOpen ? 'rotate-180' : ''"
-          />
-        </template>
-      </SettingsRow>
-      <ExpandTransition :open="editorOpen">
-        <div class="space-y-1.5 px-3.5 pb-3.5 pt-1">
-          <Input
-            v-model="transcriptEditor"
-            type="text"
-            :placeholder="$t('settings.transcriptEditorPlaceholder')"
-            class="w-full font-mono text-xs"
-            @change="saveTranscriptEditor"
-          />
-          <!-- A path that points at nothing makes the Open button a silent no-op, so the one piece
-               of feedback this field can give is what will REALLY run. -->
-          <p
-            class="text-[11px]"
-            :class="editorOverrideIgnored ? 'text-warning' : 'text-muted-foreground'"
-          >
-            {{
-              editorOverrideIgnored
-                ? $t('settings.transcriptEditorNotFound', { editor: baseName(transcriptEditorResolved) })
-                : $t('settings.transcriptEditorResolved', { editor: baseName(transcriptEditorResolved) })
-            }}
-          </p>
-          <Button
-            v-if="transcriptEditor.trim()"
-            variant="ghost"
-            size="xs"
-            @click="resetTranscriptEditor"
-          >
-            <RotateCcw /> {{ $t('settings.transcriptEditorReset') }}
-          </Button>
-        </div>
-      </ExpandTransition>
       <!-- which instance tables to show is an appearance choice (moved here from Usage) -->
       <SettingsRow :icon="Monitor" :label="$t('settings.showDesktopInstancesLabel')">
         <template #info>
@@ -658,6 +622,99 @@ defineExpose({ save })
           />
         </template>
       </SettingsRow>
+
+      <!-- Advanced disclosure (mirrors the Scheduler group): tooltips toggle + transcript-editor
+           override live here so the section leads with the everyday choices. -->
+      <SettingsRow
+        :icon="SlidersHorizontal"
+        :label="$t('settings.advanced')"
+        clickable
+        @click="appearanceAdvancedOpen = !appearanceAdvancedOpen"
+      >
+        <template #control>
+          <ChevronDown
+            class="size-4 transition-transform duration-200"
+            :class="appearanceAdvancedOpen ? 'rotate-180' : ''"
+          />
+        </template>
+      </SettingsRow>
+      <ExpandTransition :open="appearanceAdvancedOpen">
+        <!-- divide-y restated on the direct wrapper: SettingsGroup draws its hairlines on the one
+             div wrapping its slot, and ExpandTransition inserts wrappers of its own, so without
+             this the rows inside render back-to-back with no separator. -->
+        <div class="divide-y divide-border/60">
+          <SettingsRow :icon="MessageCircleQuestion" :label="$t('settings.showTooltipsLabel')">
+            <template #info>
+              <InfoHint :text="$t('settings.showTooltipsHint')" />
+            </template>
+            <template #control>
+              <Switch v-model="showTooltips" />
+            </template>
+          </SettingsRow>
+          <!-- Transcript editor: auto-detect is right for nearly everyone (VS Code / Cursor /
+               Notepad++ / Sublime), so the path field is a nested disclosure the row states the
+               resolved editor and reveals the input only if you go looking for it. -->
+          <SettingsRow
+            :icon="FilePenLine"
+            :label="$t('settings.transcriptEditorLabel')"
+            clickable
+            @click="editorOpen = !editorOpen"
+          >
+            <template #info>
+              <InfoHint :text="$t('settings.transcriptEditorHint')" />
+            </template>
+            <template #control>
+              <span
+                class="max-w-44 truncate"
+                :class="editorOverrideIgnored ? 'text-warning' : ''"
+                :title="transcriptEditorResolved || undefined"
+              >
+                {{
+                  transcriptEditorResolved
+                    ? baseName(transcriptEditorResolved)
+                    : $t('settings.transcriptEditorPlaceholder')
+                }}
+              </span>
+              <Badge v-if="transcriptEditor.trim()" variant="secondary">
+                {{ $t('settings.transcriptEditorCustomBadge') }}
+              </Badge>
+              <ChevronDown
+                class="size-4 transition-transform duration-200"
+                :class="editorOpen ? 'rotate-180' : ''"
+              />
+            </template>
+          </SettingsRow>
+          <ExpandTransition :open="editorOpen">
+            <div class="space-y-1.5 px-3.5 pb-3.5 pt-1">
+              <Input
+                v-model="transcriptEditor"
+                type="text"
+                :placeholder="$t('settings.transcriptEditorPlaceholder')"
+                class="w-full font-mono text-xs"
+                @change="saveTranscriptEditor"
+              />
+              <p
+                class="text-[11px]"
+                :class="editorOverrideIgnored ? 'text-warning' : 'text-muted-foreground'"
+              >
+                {{
+                  editorOverrideIgnored
+                    ? $t('settings.transcriptEditorNotFound', { editor: baseName(transcriptEditorResolved) })
+                    : $t('settings.transcriptEditorResolved', { editor: baseName(transcriptEditorResolved) })
+                }}
+              </p>
+              <Button
+                v-if="transcriptEditor.trim()"
+                variant="ghost"
+                size="xs"
+                @click="resetTranscriptEditor"
+              >
+                <RotateCcw /> {{ $t('settings.transcriptEditorReset') }}
+              </Button>
+            </div>
+          </ExpandTransition>
+        </div>
+      </ExpandTransition>
     </SettingsGroup>
 
     <!-- usage: keep the quota numbers warm -->
@@ -700,40 +757,39 @@ defineExpose({ save })
 
     <!-- updates -->
     <SettingsGroup :label="$t('settings.updates')">
+      <!-- The version number IS the status indicator + control now (owner request): green = up to
+           date, amber = update available (click to apply & restart), red = blocked / no update
+           source. Hover spells out the exact state; clicking re-checks, or applies a waiting update.
+           This folds away the old always-visible "Up to date." / "Update available" / "Update
+           blocked" / "no source" status rows. -->
       <SettingsRow :icon="CloudDownload" :label="$t('settings.currentVersion')">
-        <template #description>
-          {{ updateStatus?.currentVersion ?? '—' }}
-          <span v-if="updateStatus?.currentCommit">· {{ updateStatus.currentCommit.slice(0, 7) }}</span>
-        </template>
         <template #control>
-          <Button size="sm" variant="outline" :disabled="updateChecking" @click="onCheckForUpdate">
-            <RefreshCw :class="updateChecking ? 'animate-spin' : ''" />
-            {{ updateChecking ? $t('settings.checkingForUpdates') : $t('settings.checkForUpdates') }}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <!-- The colour lives on the version-number span, not the <button>: the kit's base
+                   reset sets `button { color: inherit }` unlayered, which beats a `text-*` utility
+                   on the button itself — and "the version number is green/red" is the literal ask. -->
+              <button
+                type="button"
+                class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium tabular-nums transition-colors hover:bg-muted disabled:cursor-default disabled:opacity-70"
+                :disabled="updateApplying"
+                @click="onVersionClick"
+              >
+                <RefreshCw
+                  v-if="updateChecking || updateApplying"
+                  class="size-3.5 animate-spin"
+                  :class="versionColorClass"
+                />
+                <span :class="versionColorClass">{{ updateStatus?.currentVersion ?? '—' }}</span>
+                <span v-if="updateStatus?.currentCommit" class="text-muted-foreground/80">
+                  · {{ updateStatus.currentCommit.slice(0, 7) }}
+                </span>
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{{ versionTip }}</TooltipContent>
+          </Tooltip>
         </template>
       </SettingsRow>
-      <SettingsRow v-if="updateStatus?.updateAvailable && updateStatus?.canApply" :label="$t('settings.updateAvailable')">
-        <template #description>
-          {{ updateStatus.remoteCommit?.slice(0, 7) }}
-        </template>
-        <template #control>
-          <Button size="sm" :disabled="updateApplying" @click="onApplyUpdate">
-            <RefreshCw :class="updateApplying ? 'animate-spin' : ''" />
-            {{ updateApplying ? $t('settings.applyingUpdate') : $t('settings.updateAndRestart') }}
-          </Button>
-        </template>
-      </SettingsRow>
-      <SettingsRow
-        v-else-if="updateStatus?.updateAvailable && !updateStatus?.canApply"
-        :label="$t('settings.updateBlocked')"
-        :description="updateBlockedReason"
-      />
-      <SettingsRow
-        v-else-if="noUpdateSource"
-        :label="$t('settings.noUpdateSource')"
-        :description="$t('settings.noUpdateSourceHint')"
-      />
-      <SettingsRow v-else-if="updateStatus" :label="$t('settings.upToDate')" />
       <p v-if="applyMessage" class="px-3.5 pb-2.5 text-xs text-muted-foreground">
         {{ applyMessage }}
         <span v-if="restartRequired">{{ $t('settings.restartGuidance') }}</span>

@@ -59,20 +59,31 @@ export function prettyTier(tier: string | null | undefined): string | null {
 
 /**
  * The account's plan / "type" as one display-ready label ("Max 20×" | "Pro" | "Free" | …), or
- * null when it genuinely can't be determined. This reconciles two imperfect signals:
- *  - `prettyTierLabel` (an already-`prettyTier`'d rate-limit tier) is the nicest answer because it
- *    carries the 5×/20× granularity — BUT the org can report a generic `default_claude_*`
- *    passthrough even for a paid account (observed: a real Max account arriving as
- *    "default_claude_ai"), so it is only trustworthy once it is a mapped, non-`default_*` label.
- *  - `plan` ("max" | "pro" | "free", set from the profile's has_claude_max / has_claude_pro flags)
- *    is the authoritative type, and the fallback when the tier is that generic passthrough.
- * Never returns a raw `default_*` string; returns null (callers render "—") when neither knows.
+ * null when it genuinely can't be determined.
+ *
+ * The RATE-LIMIT TIER is the source of truth for the CURRENT plan, because Anthropic derives it
+ * from the active subscription: a live paid plan reports a SPECIFIC tier
+ * ("default_claude_max_20x" → "Max 20×"), while a free / default account reports the GENERIC
+ * "default_claude_ai". The profile's has_claude_max / has_claude_pro flags are NOT reliable for
+ * the current plan — they stay `true` for an account that WAS Max/Pro and has since lapsed back to
+ * free (owner-confirmed, 2026-07-22: several accounts were higher-tier, expired, and are now free,
+ * yet still report has_claude_max=true). So we trust the tier and do NOT upgrade off those flags;
+ * `plan` is only a last-resort fallback when there is no tier information at all.
+ *
+ * Never returns a raw `default_*` string; returns null (callers render "—") when nothing is known.
  */
 export function resolvePlanLabel(
   plan: string | null,
   prettyTierLabel: string | null,
 ): string | null {
+  // A specific, recognized tier is the current plan — trust it (keeps the 5×/20× granularity).
   if (prettyTierLabel && !/^default_claude/i.test(prettyTierLabel)) return prettyTierLabel
+  // A generic, unmapped `default_claude_*` passthrough (e.g. "default_claude_ai") is what Anthropic
+  // reports for a free / default account — INCLUDING one that used to be Max/Pro and expired. It is
+  // not an active paid tier, so it resolves to Free, and the stale has_claude_max/pro-derived plan
+  // is deliberately ignored here.
+  if (prettyTierLabel) return 'Free'
+  // No tier information at all: last-resort best-effort from the plan flags.
   const p = plan?.toLowerCase()
   if (p) {
     if (p.includes('max')) return 'Max'

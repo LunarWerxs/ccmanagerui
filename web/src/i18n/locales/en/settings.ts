@@ -6,6 +6,12 @@ export default {
   themeLight: 'Light',
   themeDark: 'Dark',
   themeSystem: 'System',
+  // header controls (theme + shut down now live as icons in the settings panel header; the theme
+  // trigger reuses `themeLabel` above)
+  shutdownTooltip: 'Shut down CC Manager UI (closes the app and its tray icon)',
+  shutdownConfirmTooltip: 'Click again to shut down',
+  shutdownToast: 'Shutting down…',
+  shutdownToastFailed: 'Failed to shut down.',
   showTooltipsLabel: 'Show tooltips',
   showTooltipsHint: 'Hover help on buttons and controls. Info icons stay on.',
   portableModeLabel: 'Portable window',
@@ -45,22 +51,23 @@ export default {
     'Show the CLI instances table. Turn this off if you only use the desktop app.',
   usageToastFailed: 'Failed to save usage setting.',
 
-  // updates section
+  // updates section — the version number itself is the status + control now (see the tips below),
+  // so the old standalone "Check for updates" / "Update available" / "Update blocked" / "Up to
+  // date" strings are gone.
   updates: 'Updates',
   currentVersion: 'Current version',
-  checkForUpdates: 'Check for updates',
-  checkingForUpdates: 'Checking…',
-  updateAvailable: 'Update available',
-  updateAndRestart: 'Update & restart',
-  applyingUpdate: 'Updating…',
-  updateBlocked: 'Update blocked',
-  noUpdateSource: "Updates can't be checked",
   noUpdateSourceHint:
     'This install is not linked to a Git remote, so there is nowhere to pull new versions ' +
     'from. Link one (git remote add origin <url>) or set CCMANAGERUI_UPDATE_REPO, and the ' +
     'update check and auto-update come to life.',
-  upToDate: 'Up to date',
   restartGuidance: ' Restart CC Manager UI from the tray icon to run the new code.',
+  // the version number itself is the status indicator now: green = up to date, amber = update
+  // available (click to apply), red = blocked / no source. Tooltip spells out the state + action.
+  versionUpToDateTip: 'Up to date. Click to check again.',
+  versionCheckingTip: 'Checking for updates…',
+  versionUpdateAvailableTip: 'Update available. Click to update and restart.',
+  versionUpdateBlockedTip: 'Update available but blocked. Click to re-check.',
+  versionNoSourceTip: "Updates can't be checked from this install.",
 
   // auto-update section
   autoUpdate: 'Auto-update',

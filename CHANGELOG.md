@@ -6,8 +6,21 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-23
+
 ### Added
 
+- **A session's original file location can be copied as text.** The transcript header and the
+  session row's right-click menu now include **Copy the session file location to the clipboard**.
+  It resolves the original file server-side, so the copied value is the exact absolute `.jsonl`
+  path rather than a path reconstructed from the session id.
+- **Settings can shut down the complete app.** A two-click power control beside the Settings close
+  button exits the daemon and signals the tray host to quit too. Previously, stopping the daemon
+  from the web UI left the tray watchdog running, so it could immediately start the daemon again.
+- **Codex, ChatGPT and OpenCode support has a concrete scoping document.** The new research note
+  records the session-store formats found on this machine, the Claude-specific seams in the current
+  architecture, the feasibility of Codex transcript support, and the remaining OpenCode storage
+  blocker so future implementation can start from verified evidence.
 - **`bun run screenshots` regenerates the README images.** They used to be taken by hand against a
   throwaway daemon, which is why they sat two releases out of date showing a theme the app no longer
   had. The command starts its own web server on a private port, drives headless Chrome, and writes
@@ -17,6 +30,27 @@ All notable changes to CC Manager UI are documented here. The format is based on
   recorded and **fails the run**, so a fixture gap cannot quietly put live data into a committed
   image, and each shot carries a predicate that must hold before the shutter fires, so a stale
   fixture fails loudly instead of producing a screenshot of empty loading skeletons.
+- **The shared tray launcher can forward dropped files and folders.** Paths dropped onto a shortcut
+  are passed to adapters through an opt-in environment variable, without changing ordinary launches
+  or breaking apps whose adapters do not consume drops.
+
+### Changed
+
+- **Settings puts the everyday controls up front.** Theme selection moves into the panel header,
+  beside the new shutdown control. Tooltip visibility and the transcript-editor override move under
+  an Appearance **Advanced** disclosure, leaving portable mode, tray visibility and instance-table
+  visibility as the immediately visible choices.
+- **The version number is now the update status and control.** It is green when current, amber when
+  an update can be applied, and red when checking is blocked or no update source exists. Hovering
+  explains the state; clicking checks again or applies an available update. This replaces the
+  separate status rows and update buttons.
+- **Generic Anthropic tiers are treated as Free.** `default_claude_ai` is the active free/default
+  tier even when historical `has_claude_max` or `has_claude_pro` flags remain true after a paid plan
+  expires. The Instances Plan column now trusts a specific live tier first, treats a generic tier as
+  Free, and uses the historical plan flags only when no tier is available.
+- **The README screenshots now match the current interface.** Sessions, Instances and Queue were
+  recaptured against synthetic data on the Claude-aligned theme; their captions now include the
+  Plan column and the finished-run state actually shown.
 
 ## [0.9.0] - 2026-07-21
 

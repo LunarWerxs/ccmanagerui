@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { Boxes, ListChecks, MessagesSquare, Settings2 } from '@lucide/vue'
+import {
+  Boxes,
+  ListChecks,
+  MessagesSquare,
+  Monitor,
+  Moon,
+  Power,
+  Settings2,
+  Sun,
+} from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
@@ -10,11 +19,20 @@ import SchedulerStatus from '@/components/SchedulerStatus.vue'
 import SessionsView from '@/components/SessionsView.vue'
 import SettingsView from '@/components/SettingsView.vue'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useData } from '@/composables/useData'
 import { usePanels } from '@/composables/usePanels'
 import { SHELL_BASE_MAX, SHELL_WIDE_MAX, useShellWidth } from '@/composables/useShellWidth'
+import { shutdownApp } from '@/lib/api'
+import { type ThemeMode, useTheme } from '@/lib/theme'
 import { applyWindowSizeHint } from '@/lib/window-size-hint'
 import SettingsPanel from '@/shell/SettingsPanel.vue'
 import Sidebar from '@/shell/Sidebar.vue'
@@ -58,6 +76,34 @@ const headerStyle = computed(() =>
 const settingsView = ref<{ save: () => Promise<void> } | null>(null)
 function saveSettings() {
   settingsView.value?.save()
+}
+
+// --- settings-panel header controls: theme picker + shut down (moved out of the Appearance
+// section into icons beside the panel's ✕, owner request) ---------------------------------------
+const { mode: themeMode, isDark, setTheme } = useTheme()
+// Reflect the ACTIVE theme in the trigger glyph: sun/moon for an explicit light/dark, a monitor
+// for "follow the system".
+const themeIcon = computed(() =>
+  themeMode.value === 'system' ? Monitor : isDark.value ? Moon : Sun,
+)
+
+// Two-step so an errant click can't kill the app: first click arms (button turns red + tooltip
+// changes), second confirms. Loses the armed state on blur, matching the cloud-sync disconnect.
+const confirmShutdown = ref(false)
+async function onShutdown() {
+  if (!confirmShutdown.value) {
+    confirmShutdown.value = true
+    return
+  }
+  confirmShutdown.value = false
+  toast(t('settings.shutdownToast'))
+  try {
+    await shutdownApp()
+  } catch {
+    // The daemon answers { ok } BEFORE it exits, so a rejection here is a genuine failure (not just
+    // the socket dropping as it goes down).
+    toast.error(t('settings.shutdownToastFailed'))
+  }
 }
 
 const nav: { id: View; labelKey: string; icon: typeof MessagesSquare }[] = [
@@ -188,8 +234,44 @@ onMounted(handleConnectRedirect)
       <QueueView />
     </Sidebar>
 
-    <!-- settings: the shared push-in panel -->
+    <!-- settings: the shared push-in panel. Custom header carries the theme picker + shut-down
+         icons beside the panel's ✕ (owner request). -->
     <SettingsPanel v-model:open="settingsOpen" :side="side" :title="$t('app.settings')" :width-px="widthPx">
+      <template #header>
+        <span class="text-xs font-semibold">{{ $t('app.settings') }}</span>
+        <div class="ml-auto flex items-center gap-0.5">
+          <!-- theme picker (moved out of the Appearance section) -->
+          <DropdownMenu>
+            <DropdownMenuTrigger as-child>
+              <Button variant="ghost" size="icon-sm" :title="$t('settings.themeLabel')">
+                <component :is="themeIcon" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" class="w-44">
+              <DropdownMenuRadioGroup
+                :model-value="themeMode"
+                @update:model-value="(v) => setTheme(v as ThemeMode)"
+              >
+                <DropdownMenuRadioItem value="light"><Sun /> {{ $t('settings.themeLight') }}</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="dark"><Moon /> {{ $t('settings.themeDark') }}</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="system"><Monitor /> {{ $t('settings.themeSystem') }}</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <!-- shut down: closes the whole app (window + daemon + tray). Two-step to prevent a
+               mis-click; see onShutdown. -->
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            :title="confirmShutdown ? $t('settings.shutdownConfirmTooltip') : $t('settings.shutdownTooltip')"
+            :class="confirmShutdown ? 'text-destructive' : ''"
+            @click="onShutdown"
+            @blur="confirmShutdown = false"
+          >
+            <Power />
+          </Button>
+        </div>
+      </template>
       <SettingsView ref="settingsView" />
       <template #footer>
         <div class="flex justify-end">

@@ -1,12 +1,13 @@
-// server/tests/plan-label.test.ts — resolvePlanLabel: the plan-vs-tier reconciliation that feeds
-// CMAccount.planLabel (the "Plan" column). The interesting cases are the ones where the two
-// signals disagree, especially a paid account whose org reports a generic `default_claude_*` tier.
+// server/tests/plan-label.test.ts — resolvePlanLabel: how CMAccount.planLabel (the "Plan" column)
+// is derived. The rate-limit TIER is authoritative for the current plan; the has_claude_max/pro
+// flags are stale entitlement history (owner-confirmed 2026-07-22: accounts that expired from a
+// paid plan back to free still report the flag). A generic `default_claude_ai` tier ⇒ Free.
 
 import { describe, expect, test } from 'bun:test'
 import { prettyTier, resolvePlanLabel } from '../src/core/shared'
 
 describe('resolvePlanLabel', () => {
-  test('trusts a friendly, mapped tier and keeps its 5×/20× granularity', () => {
+  test('trusts a specific, recognized tier and keeps its 5×/20× granularity', () => {
     expect(resolvePlanLabel('max', prettyTier('default_claude_max_20x'))).toBe('Max 20×')
     expect(resolvePlanLabel('max', prettyTier('default_claude_max_5x'))).toBe('Max 5×')
     expect(resolvePlanLabel('pro', prettyTier('default_claude_pro'))).toBe('Pro')
@@ -15,24 +16,23 @@ describe('resolvePlanLabel', () => {
     expect(resolvePlanLabel(null, prettyTier('default_claude_enterprise_x'))).toBe('Enterprise')
   })
 
-  test('falls back to `plan` when the tier is a generic default_* passthrough', () => {
-    // The real-world case: a Max account whose org reports the generic tier. The raw string must
-    // never surface — plan wins.
-    expect(resolvePlanLabel('max', 'default_claude_ai')).toBe('Max')
-    expect(resolvePlanLabel('pro', 'default_claude_ai')).toBe('Pro')
+  test('a generic default_* tier ⇒ Free, ignoring the stale has_claude_max/pro plan flags', () => {
+    // The real-world case (owner-confirmed): an account that was Max/Pro and lapsed to free still
+    // reports has_claude_max/pro=true, but Anthropic drops its rate-limit tier to the generic
+    // "default_claude_ai". The tier is the current-plan truth, so all of these are Free.
+    expect(resolvePlanLabel('max', 'default_claude_ai')).toBe('Free')
+    expect(resolvePlanLabel('pro', 'default_claude_ai')).toBe('Free')
     expect(resolvePlanLabel('free', 'default_claude_ai')).toBe('Free')
+    expect(resolvePlanLabel('claude_max', 'default_claude_ai')).toBe('Free')
+    expect(resolvePlanLabel(null, 'default_claude_ai')).toBe('Free')
   })
 
-  test('normalizes subscriptionType-style plan strings', () => {
-    expect(resolvePlanLabel('claude_max', 'default_claude_ai')).toBe('Max')
+  test('with no tier at all, falls back to the plan flags (best-effort)', () => {
+    expect(resolvePlanLabel('max', null)).toBe('Max')
     expect(resolvePlanLabel('claude_pro', null)).toBe('Pro')
     // An unrecognized non-default plan passes through as-is rather than being dropped.
-    expect(resolvePlanLabel('startup', 'default_claude_ai')).toBe('startup')
-  })
-
-  test('returns null (→ "—") when neither signal is informative', () => {
+    expect(resolvePlanLabel('startup', null)).toBe('startup')
     expect(resolvePlanLabel(null, null)).toBeNull()
-    expect(resolvePlanLabel(null, 'default_claude_ai')).toBeNull()
     expect(resolvePlanLabel(null, '')).toBeNull()
   })
 
