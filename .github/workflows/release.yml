@@ -1,8 +1,8 @@
-# Release: compile real executables for every OS and attach them to a DRAFT GitHub release.
+# Release: compile real executables for every OS and publish them with versioned changelog notes.
 #
-# Trigger: pushing a version tag (v0.2.1). The maintainer edits the draft's notes and publishes —
-# matching how the existing releases carry hand-written Highlights prose. workflow_dispatch runs
-# build + smoke only (no release), for validating the pipeline without a tag.
+# Trigger: pushing a version tag (v0.2.1). The release is published automatically only after every
+# build and smoke job succeeds. workflow_dispatch runs build + smoke only (no release), for
+# validating the pipeline without a tag.
 #
 # Design notes (verified 2026-07-16 against a real compiled exe on Windows):
 # - `bun build --compile` cross-compiles every POSIX target (minified) from one Linux runner. The
@@ -209,34 +209,54 @@ jobs:
             arm64v8/debian:stable-slim ./ccmanagerui --version
 
   release:
-    name: draft the GitHub release
+    name: publish the GitHub release
     if: github.ref_type == 'tag'
     needs: [build, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v version="$version" '
+            index($0, "## [" version "]") == 1 { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if ! grep -q '[^[:space:]]' RELEASE_NOTES.md; then
+            echo "::error::CHANGELOG.md has no release section for ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
           path: out
 
-      # DRAFT on purpose: the maintainer writes the Highlights prose and publishes by hand,
-      # consistent with the existing releases. IDEMPOTENT: if a release for this tag already
-      # exists (e.g. a re-pushed/moved tag during pipeline iteration), delete it first so a retry
-      # UPDATES rather than piling up duplicate orphaned drafts. --cleanup-tag is intentionally NOT
-      # used — the tag itself is managed by the push that triggered us, not by this job.
-      - name: Create draft release with binaries attached
+      # Idempotent: a retry updates the existing release in place and replaces its platform assets
+      # instead of deleting the release or creating an orphaned draft.
+      - name: Publish release with binaries attached
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists — deleting it so this run replaces it"
-            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
+            gh release upload "$GITHUB_REF_NAME" out/*.zip out/*.tar.gz \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "CC Manager UI ${GITHUB_REF_NAME#v}" \
+              --notes-file RELEASE_NOTES.md \
+              --draft=false
+          else
+            gh release create "$GITHUB_REF_NAME" out/*.zip out/*.tar.gz \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "CC Manager UI ${GITHUB_REF_NAME#v}" \
+              --notes-file RELEASE_NOTES.md
           fi
-          gh release create "$GITHUB_REF_NAME" out/*.zip out/*.tar.gz \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "CC Manager UI ${GITHUB_REF_NAME#v}" \
-            --generate-notes \
-            --draft

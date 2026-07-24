@@ -6,6 +6,12 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Version tags now publish their tested platform bundles automatically using the matching
+  versioned changelog section. Release retries update the existing release in place instead of
+  deleting it or leaving another unpublished draft.
+
 ## [0.11.1] - 2026-07-23
 
 ### Changed
