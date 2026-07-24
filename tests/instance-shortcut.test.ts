@@ -29,6 +29,8 @@ describe('safeShortcutBase', () => {
 })
 
 describe.skipIf(!win)('createInstanceShortcut (win32)', () => {
+  // Real PowerShell + WScript.Shell COM can take just over Bun's 5s default on a cold Windows
+  // runner. Keep the end-to-end assertion and give it the same allowance as launcher.test.ts.
   test('writes a .lnk that launches the instance with an isolated --user-data-dir', async () => {
     const workDir = mkdtempSync(join(tmpdir(), 'cmui-shortcut-'))
     const instanceDir = join(workDir, 'instances', 'test-inst')
@@ -69,5 +71,5 @@ describe.skipIf(!win)('createInstanceShortcut (win32)', () => {
     } finally {
       rmSync(workDir, { recursive: true, force: true })
     }
-  })
+  }, 20_000)
 })

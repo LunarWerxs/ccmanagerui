@@ -6,10 +6,18 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-23
+
 ### Changed
 
 - Completed session-sharing research and the obsolete CLI/monitor handoff were consolidated into
   the live reference and source safety comments; their standalone Markdown notes were removed.
+
+### Fixed
+
+- The Windows shortcut integration test now allows cold PowerShell/COM startup the same bounded
+  time as the equivalent launcher test, preventing a correct run from failing at the five-second
+  default by a few milliseconds.
 
 ## [0.11.0] - 2026-07-23
 
