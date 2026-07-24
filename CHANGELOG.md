@@ -6,6 +6,11 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- Completed session-sharing research and the obsolete CLI/monitor handoff were consolidated into
+  the live reference and source safety comments; their standalone Markdown notes were removed.
+
 ## [0.11.0] - 2026-07-23
 
 ### Added

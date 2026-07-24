@@ -4,8 +4,10 @@ Everything the README deliberately leaves out. The README is for deciding whethe
 this file is for running, configuring and hacking on it.
 
 - [MCP server](#mcp-server)
+- [Claude Desktop session mapping](#claude-desktop-session-mapping)
 - [Config (env)](#config-env)
 - [Auto-update](#auto-update)
+- [Instance appearance](#instance-appearance)
 - [Stack](#stack)
 - [Layout](#layout)
 - [Checks](#checks)
@@ -55,6 +57,25 @@ near 100, and switching the flagship model doesn't dodge the shared weekly bucke
 check its own quota before a heavy multi-agent fan-out and pace accordingly, routing heavy work to
 whichever account has the lowest weekly %.
 
+## Claude Desktop session mapping
+
+Claude Desktop and the `claude` CLI write the same transcript store under
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. Desktop separately keeps per-chat metadata
+under `<user-data-dir>/claude-code-sessions/<org>/<user>/local_*.json`; the metadata's
+`cliSessionId` is the only reliable link to the shared transcript. The scanner in
+`server/src/instance-sessions.ts` therefore:
+
+- matches only by `cliSessionId`, never metadata filenames or titles;
+- scans both `%APPDATA%/Claude/` and every `~/.claude-instances/<name>/` store; and
+- treats Desktop activity timestamps as advisory because externally appended turns do not
+  reliably update them.
+
+Never use `claude://resume?session=<uuid>` to refresh a live chat. It is a one-way import for a
+finished CLI session: it rewrites the shared transcript without thinking blocks and creates a
+second Desktop chat. External dispatch can append valid turns to a Desktop-backed transcript, but
+whether reopening an existing Desktop chat causes the renderer to request those turns is not a
+stable interface and must not be assumed by product logic.
+
 ## Config (env)
 
 | Var | Default | Meaning |
@@ -96,6 +117,19 @@ A dirty tree is never touched.
 Because updates are a `git pull --ff-only` against `origin/main`, **pushing `main` is the release**:
 as soon as `main` moves, every instance with auto-update enabled fast-forwards to it on its next
 check. Treat a push to `main` as user-facing rather than as a staging step.
+
+## Instance appearance
+
+Renaming an instance changes only its display label; it never renames the profile folder. Windows
+can hold a running profile folder open, and the folder name is also the stable session/instance id.
+The removed `POST /api/instances/:dir/rename` endpoint must not be restored as a live folder rename.
+
+Appearance metadata `{ label, icon, color }` lives in
+`~/.ccmanagerui/instance-meta.json`, keyed by normalized folder path and cleaned up when the
+instance is deleted. `POST /api/instances/:dir/meta` applies a present value, clears a field when it
+is `null`, and leaves an absent field unchanged. The curated icon/color keys live in
+`server/src/core/shared.ts`; the web mapping and deterministic defaults live in
+`web/src/lib/instance-appearance.ts`.
 
 ## Stack
 

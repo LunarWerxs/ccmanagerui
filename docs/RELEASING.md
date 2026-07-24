@@ -50,31 +50,3 @@ to each binary, not embedded, since Vite's hashed filenames aren't known at comp
 maintainer then edits the draft's release notes and publishes it manually; the workflow does not
 publish automatically. `workflow_dispatch` on that same workflow runs the build and a boot smoke
 test only, with no tag and no release, for validating the pipeline without cutting a version.
-
-## Instance appearance: rename is a display label, not a folder rename
-
-This is unrelated to the release mechanics above, but is release-adjacent operational knowledge
-worth keeping next to it: renaming an instance in the Instances manager only ever changes a
-display label. It never renames the instance's underlying folder.
-
-- This was a deliberate choice over renaming the folder, because Windows holds a running
-  instance's profile folder open; renaming it live is unsafe or outright impossible. A display
-  label works even while the instance is running.
-- The old folder-rename endpoint, `POST /api/instances/:dir/rename`, and its handler
-  `renameInstance()` (`core/lifecycle.ts`), were **removed**. Do not reintroduce a folder-rename
-  endpoint; if instance renaming needs revisiting, extend the label instead.
-- The folder `name` is unchanged by a rename and remains the **stable ID** that sessions are
-  tagged against (`instance-sessions.ts` scans by folder name, not by label).
-- Per-instance UI metadata, `{ label, icon, color }`, persists in
-  `~/.ccmanagerui/instance-meta.json` (`server/src/core/instance-meta.ts`), keyed by the
-  normalized folder path, written atomically the same way as the account cache, and cleaned up
-  when the instance is deleted. It's set via `POST /api/instances/:dir/meta`: a present field
-  applies, `null` clears it back to the computed default, and an absent field is left unchanged.
-- The icon and color **key** sets are defined once, in `server/src/core/shared.ts`
-  (`INSTANCE_ICON_KEYS`, 16 glyphs; `INSTANCE_COLOR_KEYS`, 10 colors), re-exported as values from
-  `server/src/types.ts`, and consumed on the web side by `web/src/lib/instance-appearance.ts`
-  (key to Lucide component, key to a fixed oklch color, plus a deterministic default derived from
-  a hash of the folder name so un-customized rows still look visually distinct from each other).
-- `CMInstance` carries `label`, `icon`, and `color`, all nullable. The UI shows `label ?? name`
-  wherever an instance is displayed (filter dropdown, instance chips), but always filters and
-  links by the underlying folder `name`.

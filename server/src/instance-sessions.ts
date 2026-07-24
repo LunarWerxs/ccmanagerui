@@ -1,7 +1,10 @@
-// Read docs/DESKTOP_CLI_SESSION_SHARING.md before changing the session-linking logic in this
-// file, especially anything touching cliSessionId matching or claude://resume. It documents the
-// measurement traps this file's scan avoids, and why claude://resume must never be treated as a
-// "refresh" for a live session.
+// Safety constraints for this scan:
+// - Match Desktop metadata to transcripts ONLY by cliSessionId, never the metadata filename/title.
+// - Scan both the default Desktop store and every isolated instance store.
+// - Never use claude://resume as a "refresh" for a live session. It is a lossy one-way import that
+//   rewrites the shared transcript without thinking blocks and creates a duplicate Desktop chat.
+// - Desktop's lastActivityAt does not reliably advance for externally appended turns, so it cannot
+//   support an honest "stale in Desktop" warning.
 //
 // server/src/instance-sessions.ts — which Claude Desktop instance did a session run in?
 //
