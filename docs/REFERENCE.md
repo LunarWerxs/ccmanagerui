@@ -60,6 +60,7 @@ whichever account has the lowest weekly %.
 | Var | Default | Meaning |
 |---|---|---|
 | `PORT` | `7787` | preferred API/UI port (hops if busy) |
+| `HOST` | `127.0.0.1` | loopback bind host; only `127.0.0.1`, `localhost`, and `::1` are accepted because the local API is intentionally passwordless |
 | `CCMANAGERUI_PORT_FIXED` | unset | `1` = bind `PORT` exactly, skip the single-instance/port-hop |
 | `CCMANAGERUI_HOME` | `~/.ccmanagerui` | config dir (`runtime.json`, instance-identity cache) |
 | `CCMANAGERUI_SHUTDOWN_TOKEN` | unset | if set, `/api/shutdown` requires a matching `x-ccmanagerui-shutdown-token` header (the tray sets it) |
@@ -72,6 +73,12 @@ whichever account has the lowest weekly %.
 
 `/api/health` returns `service: "ccmanagerui"`, which is load-bearing for the single-instance
 pointer.
+
+Manually added dispatch API keys and OAuth tokens are stored as plain values in the per-user SQLite
+database so the database remains portable. The state directories and database receive owner-only
+POSIX modes where supported, and the daemon cannot bind beyond loopback. This protects the local
+service boundary but is not a password vault: anyone who can read files as the same OS user can
+read those manually supplied credentials.
 
 ## Auto-update
 

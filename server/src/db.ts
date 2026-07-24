@@ -104,7 +104,7 @@ create table if not exists session_marks (
 );
 `)
 
-// The short-lived 0.10.0 hardening change stored manually added account credentials as DPAPI
+// A short-lived pre-0.11 hardening change stored manually added account credentials as DPAPI
 // blobs. Return those rows to portable plaintext SQLite when the same Windows user can decrypt
 // them. Unreadable foreign/corrupt blobs are left untouched rather than destroyed.
 {

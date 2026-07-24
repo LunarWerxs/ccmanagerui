@@ -6,6 +6,8 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-23
+
 ### Added
 
 - **Claude, Codex, and OpenCode conversations now share one Sessions view.** Every row is
@@ -23,8 +25,45 @@ All notable changes to CC Manager UI are documented here. The format is based on
   discovery, and Desktop-instance filtering remain explicitly Claude-only, while Codex and
   OpenCode are read-only conversation sources. OpenCode's database is never offered as a raw
   transcript download.
+- **OpenCode full-body search now filters and extracts text inside SQLite.** Large tool payloads
+  are no longer loaded and parsed in JavaScript; against the 260 MB local store this reduced the
+  measured search allocation from roughly 49 MiB to 5 MiB.
+- **Development now uses Bun's native parallel workspace runner.** Removing `concurrently`
+  eliminates a redundant dependency and its shell-command dependency chain. Biome, Hono, Vue,
+  Tailwind, Lucide, and other compatible dependencies move to their current non-breaking releases.
+- **Manually added dispatch credentials remain portable SQLite values.** The app briefly sealed
+  this one column with Windows DPAPI during the pre-release hardening pass, but that added
+  machine/user coupling without changing the local database threat model enough to justify it.
+  A compatibility migration converts any such rows back when the same Windows user can decrypt
+  them; the per-user state directory and database still receive restrictive filesystem modes.
 - The completed Codex/ChatGPT/OpenCode research note and the original merge plan were removed after
   their work was implemented and verified.
+
+### Fixed
+
+- Session metadata caching now replaces an active transcript's previous parse instead of retaining
+  one cache entry for every appended turn.
+- Scheduler and monitor numeric settings are finite and bounded, and changing the scheduler poll
+  interval now updates the live timer immediately rather than waiting for a restart.
+- Filesystem containment uses resolved path components instead of string prefixes, preventing a
+  sibling such as `instances-elsewhere` from being treated as a child of `instances`.
+- Queue writes reject malformed statuses, booleans, positions, account references, and launch
+  options before they can create invalid persisted state or reach a terminal command.
+- A selected dispatch account that cannot be read now fails the run instead of silently falling
+  back to the ambient login.
+- Child-process tests use the exact Bun executable running the suite, avoiding Windows `bun.cmd`
+  quote loss in updater fixtures.
+
+### Security
+
+- The passwordless daemon now refuses every non-loopback bind host, and OAuth callback origins are
+  restricted to the same loopback set. API bodies are capped at 2 MiB.
+- User-supplied session-search regular expressions are length-bounded and structurally checked
+  before execution, preventing synchronous catastrophic backtracking from bypassing the search
+  deadline.
+- Terminal launch model and effort values are allowlisted before crossing the shell boundary.
+- GitHub Actions defaults to read-only repository contents; only the release job receives write
+  access.
 
 ## [0.10.0] - 2026-07-23
 
