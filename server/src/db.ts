@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
-import { protectAccountSecret } from './account-secrets'
 import { DATA_DIR, DB_PATH, RUN_LOG_DIR } from './config'
+import { unseal } from './dpapi-seal.mjs'
 import { classifyLimit } from './rate-limit-signal'
 import type { QueueItem } from './types'
 
@@ -104,15 +104,19 @@ create table if not exists session_marks (
 );
 `)
 
-// Existing manually-pasted credentials predate at-rest sealing. On Windows, migrate each legacy
-// plaintext value to a CurrentUser-scoped DPAPI blob in place; on other platforms seal() is a
-// documented passthrough and the owner-only DB permissions above are the protection.
+// The short-lived 0.10.0 hardening change stored manually added account credentials as DPAPI
+// blobs. Return those rows to portable plaintext SQLite when the same Windows user can decrypt
+// them. Unreadable foreign/corrupt blobs are left untouched rather than destroyed.
 {
-  const rows = db.query<{ id: string; secret: string }, []>('select id, secret from accounts').all()
+  const rows = db
+    .query<{ id: string; secret: string }, []>(
+      "select id, secret from accounts where secret like 'DPAPIv1:%'",
+    )
+    .all()
   const update = db.query('update accounts set secret = ? where id = ?')
   for (const row of rows) {
-    const protectedSecret = protectAccountSecret(row.secret)
-    if (protectedSecret !== row.secret) update.run(protectedSecret, row.id)
+    const plaintext = unseal(row.secret)
+    if (plaintext !== null && !plaintext.startsWith('DPAPIv1:')) update.run(plaintext, row.id)
   }
 }
 

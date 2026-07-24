@@ -23,7 +23,6 @@
 
 import { Database } from 'bun:sqlite'
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
-import { revealAccountSecret } from './account-secrets'
 import { resolveCliConfigDirToken, resolveInstanceToken } from './core/accounts'
 import { DEFAULT_OAUTH_SCOPES } from './usage'
 
@@ -134,8 +133,7 @@ async function buildChildEnv(
     } catch {
       acct = null
     }
-    const secret = acct ? revealAccountSecret(acct.secret) : null
-    if (!acct || !secret) {
+    if (!acct) {
       return {
         error:
           "couldn't read the selected dispatch account's credential — re-add that account before running it",
@@ -145,9 +143,9 @@ async function buildChildEnv(
       delete env.ANTHROPIC_API_KEY
       delete env.ANTHROPIC_AUTH_TOKEN
       delete env.CLAUDE_CODE_OAUTH_TOKEN
-      env.ANTHROPIC_API_KEY = secret
+      env.ANTHROPIC_API_KEY = acct.secret
     } else {
-      injectOauth(env, secret, null)
+      injectOauth(env, acct.secret, null)
     }
   }
   return { env }

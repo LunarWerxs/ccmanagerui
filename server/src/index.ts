@@ -7,7 +7,6 @@ import { bodyLimit } from 'hono/body-limit'
 import { serveStatic } from 'hono/bun'
 import { cors } from 'hono/cors'
 import { streamSSE } from 'hono/streaming'
-import { protectAccountSecret, revealAccountSecret } from './account-secrets'
 import {
   autoUpdateEnabled,
   getAutoUpdateIntervalSecs,
@@ -248,16 +247,13 @@ function listAccounts(): Account[] {
       []
     >('select * from accounts order by created_at asc')
     .all()
-    .map((r) => {
-      const secret = revealAccountSecret(r.secret)
-      return {
-        id: r.id,
-        label: r.label,
-        auth_type: r.auth_type as Account['auth_type'],
-        secret_masked: secret ? maskSecret(secret) : 'unavailable',
-        created_at: r.created_at,
-      }
-    })
+    .map((r) => ({
+      id: r.id,
+      label: r.label,
+      auth_type: r.auth_type as Account['auth_type'],
+      secret_masked: maskSecret(r.secret),
+      created_at: r.created_at,
+    }))
 }
 
 const app = new Hono()
@@ -669,7 +665,7 @@ app.post('/api/accounts', async (c) => {
   const id = crypto.randomUUID()
   db.query(
     'insert into accounts (id, label, auth_type, secret, created_at) values (?, ?, ?, ?, ?)',
-  ).run(id, body.label, body.auth_type, protectAccountSecret(body.secret), Date.now())
+  ).run(id, body.label, body.auth_type, body.secret, Date.now())
   return c.json(listAccounts().find((a) => a.id === id))
 })
 app.delete('/api/accounts/:id', (c) => {

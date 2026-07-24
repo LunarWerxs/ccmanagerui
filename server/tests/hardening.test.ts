@@ -1,5 +1,4 @@
 import { expect, test } from 'bun:test'
-import { protectAccountSecret, revealAccountSecret } from '../src/account-secrets'
 import { validateBindHost } from '../src/config'
 import {
   CLAUDE_LAUNCH_EFFORTS,
@@ -58,14 +57,4 @@ test('scheduler settings are finite, bounded, and integral', () => {
   expect(normalizeSchedulerNumber('poll_seconds', 3.6)).toBe(4)
   expect(normalizeSchedulerNumber('max_concurrent', 1000)).toBe(100)
   expect(normalizeSchedulerNumber('max_concurrent', Number.POSITIVE_INFINITY)).toBe(3)
-})
-
-test('dispatch account secrets round-trip through at-rest protection', () => {
-  const secret = `secret-${crypto.randomUUID()}`
-  const stored = protectAccountSecret(secret)
-  expect(revealAccountSecret(stored)).toBe(secret)
-  if (process.platform === 'win32') {
-    expect(stored).not.toBe(secret)
-    expect(stored.startsWith('DPAPIv1:')).toBe(true)
-  }
 })
