@@ -159,8 +159,8 @@ export function hasConnection(): boolean {
 }
 
 /** Build the authorize URL for a sign-in that redirects back to `${origin}/oauth/callback`.
- *  The live origin rides the SDK's per-attempt redirectUri override (the daemon may be reached
- *  as localhost, 127.0.0.1, or a LAN IP — the callback must match whichever the browser used). */
+ *  The live loopback origin rides the SDK's per-attempt redirectUri override (the daemon may be
+ *  reached as localhost, 127.0.0.1, or ::1). */
 export async function buildAuthorizeUrl(origin: string): Promise<string> {
   const client = await connect()
   return client.signIn({ redirect: false, redirectUri: `${origin}/oauth/callback` })

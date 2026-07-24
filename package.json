@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "prepare": "git config core.hooksPath .githooks || true",
-    "dev": "concurrently -k -n server,web -c blue,green \"bun run dev:server\" \"bun run dev:web\"",
+    "dev": "bun run --parallel --workspaces dev",
     "dev:server": "bun run --cwd server dev",
     "dev:web": "bun run --cwd web dev",
     "build": "bun run --cwd web build",
@@ -25,7 +25,6 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.2.0",
-    "concurrently": "^9.1.0"
+    "@biomejs/biome": "^2.5.5"
   }
 }

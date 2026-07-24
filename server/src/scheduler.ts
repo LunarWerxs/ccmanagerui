@@ -6,9 +6,25 @@ import type { QueueItem, SchedulerState } from './types'
 let timer: ReturnType<typeof setInterval> | null = null
 let lastDispatchAt = 0
 
-function num(key: string, fallback: number): number {
+const SCHEDULER_NUMBER_SETTINGS = {
+  spacing_seconds: { fallback: 60, min: 0, max: 86_400 },
+  poll_seconds: { fallback: 5, min: 1, max: 3_600 },
+  max_concurrent: { fallback: 3, min: 1, max: 100 },
+} as const
+
+type SchedulerNumberSetting = keyof typeof SCHEDULER_NUMBER_SETTINGS
+
+/** Normalize both API input and legacy/corrupt persisted values through one set of bounds. */
+export function normalizeSchedulerNumber(key: SchedulerNumberSetting, value: unknown): number {
+  const { fallback, min, max } = SCHEDULER_NUMBER_SETTINGS[key]
+  const n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+function num(key: SchedulerNumberSetting): number {
   const n = Number(getSetting(key))
-  return Number.isFinite(n) ? n : fallback
+  return normalizeSchedulerNumber(key, n)
 }
 
 /** "HH:MM" (24h) or the 09:00 default; anything malformed in the kv store falls back. */
@@ -23,8 +39,8 @@ function tick() {
   // in `active` yet, so isSessionActive() below would wrongly say "free" and we'd double-dispatch
   // that session. See boot-state.ts. The timer keeps ticking; it just waits out the boot window.
   if (!isDispatchReady()) return
-  const maxConcurrent = num('max_concurrent', 3)
-  const spacingSeconds = num('spacing_seconds', 60)
+  const maxConcurrent = num('max_concurrent')
+  const spacingSeconds = num('spacing_seconds')
 
   if (activeCount() >= maxConcurrent) return
   if (Date.now() - lastDispatchAt < spacingSeconds * 1000) return
@@ -50,8 +66,9 @@ function tick() {
 // bun:sqlite returns integers for our boolean columns; coerce to real booleans
 export function startScheduler() {
   if (timer) return
-  const pollSeconds = Math.max(1, num('poll_seconds', 5))
+  const pollSeconds = num('poll_seconds')
   timer = setInterval(tick, pollSeconds * 1000)
+  timer.unref?.()
 }
 
 export function stopScheduler() {
@@ -69,6 +86,38 @@ export function setSchedulerEnabled(enabled: boolean) {
   }
 }
 
+export interface SchedulerSettingsPatch {
+  enabled?: boolean
+  spacing_seconds?: number
+  poll_seconds?: number
+  max_concurrent?: number
+  tomorrow_time?: string
+}
+
+/** Persist a validated settings patch. Re-arm the timer when its cadence changes so the API's
+ * response describes live behavior, not a value that only takes effect after restart. */
+export function setSchedulerSettings(patch: SchedulerSettingsPatch): SchedulerState {
+  let pollChanged = false
+  for (const key of Object.keys(SCHEDULER_NUMBER_SETTINGS) as SchedulerNumberSetting[]) {
+    const requested = patch[key]
+    if (typeof requested !== 'number' || !Number.isFinite(requested)) continue
+    const next = normalizeSchedulerNumber(key, requested)
+    if (key === 'poll_seconds' && next !== num('poll_seconds')) pollChanged = true
+    setSetting(key, String(next))
+  }
+  if (
+    typeof patch.tomorrow_time === 'string' &&
+    /^([01]?\d|2[0-3]):[0-5]\d$/.test(patch.tomorrow_time)
+  )
+    setSetting('tomorrow_time', patch.tomorrow_time)
+  if (typeof patch.enabled === 'boolean') setSchedulerEnabled(patch.enabled)
+  if (pollChanged) {
+    stopScheduler()
+    startScheduler()
+  }
+  return schedulerState()
+}
+
 export function schedulerState(): SchedulerState {
   const counts = db
     .query<{ status: string; c: number }, []>(
@@ -80,9 +129,9 @@ export function schedulerState(): SchedulerState {
     enabled: getSetting('scheduler_enabled') === '1',
     running_count: activeCount(),
     queued_count: byStatus.queued ?? 0,
-    spacing_seconds: num('spacing_seconds', 60),
-    poll_seconds: num('poll_seconds', 5),
-    max_concurrent: num('max_concurrent', 3),
+    spacing_seconds: num('spacing_seconds'),
+    poll_seconds: num('poll_seconds'),
+    max_concurrent: num('max_concurrent'),
     tomorrow_time: tomorrowTime(),
   }
 }

@@ -3,9 +3,11 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { basename, join, relative } from 'node:path'
 import { type Context, Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { serveStatic } from 'hono/bun'
 import { cors } from 'hono/cors'
 import { streamSSE } from 'hono/streaming'
+import { protectAccountSecret, revealAccountSecret } from './account-secrets'
 import {
   autoUpdateEnabled,
   getAutoUpdateIntervalSecs,
@@ -68,6 +70,11 @@ import {
   quitInstance,
   revealInstanceFolder,
 } from './core/instances'
+import {
+  CLAUDE_LAUNCH_EFFORTS,
+  CODEX_LAUNCH_EFFORTS,
+  launchOptionError,
+} from './core/launch-options'
 import { createInstance, removeInstance } from './core/lifecycle'
 import { INSTANCE_COLOR_KEYS, INSTANCE_ICON_KEYS } from './core/shared'
 import { createInstanceShortcut } from './core/shortcut'
@@ -106,7 +113,7 @@ import {
   startMonitor,
 } from './monitor'
 import { openPortableWindow } from './portable-window.mjs'
-import { schedulerState, setSchedulerEnabled } from './scheduler'
+import { schedulerState, setSchedulerSettings } from './scheduler'
 import { searchSessionBodies } from './session-search'
 import { getSession, listSessions, sessionMarkKey } from './sessions'
 import { skipSingleInstanceGuard } from './single-instance'
@@ -195,6 +202,15 @@ function setHideTrayIcon(value: boolean): void {
 // rejected here, never passed through to the CLI. A null/absent value is fine (CLI default).
 const VALID_PERMISSION_MODES = new Set(['default', 'acceptEdits', 'bypassPermissions', 'plan'])
 const VALID_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const VALID_QUEUE_STATUSES = new Set([
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'rate_limited',
+  'overloaded',
+  'canceled',
+])
 /** Returns an error string if the field is present-but-invalid, else null. */
 function invalidEnum(value: unknown, valid: Set<string>, field: string): string | null {
   if (value == null) return null
@@ -218,6 +234,13 @@ function maskSecret(secret: string): string {
   return `${secret.slice(0, 4)}…${secret.slice(-4)}`
 }
 
+function boundedQueryInt(raw: string | undefined, fallback: number, max: number): number {
+  if (raw === undefined) return fallback
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(max, Math.max(1, Math.trunc(parsed)))
+}
+
 function listAccounts(): Account[] {
   return db
     .query<
@@ -225,13 +248,16 @@ function listAccounts(): Account[] {
       []
     >('select * from accounts order by created_at asc')
     .all()
-    .map((r) => ({
-      id: r.id,
-      label: r.label,
-      auth_type: r.auth_type as Account['auth_type'],
-      secret_masked: maskSecret(r.secret),
-      created_at: r.created_at,
-    }))
+    .map((r) => {
+      const secret = revealAccountSecret(r.secret)
+      return {
+        id: r.id,
+        label: r.label,
+        auth_type: r.auth_type as Account['auth_type'],
+        secret_masked: secret ? maskSecret(secret) : 'unavailable',
+        created_at: r.created_at,
+      }
+    })
 }
 
 const app = new Hono()
@@ -243,6 +269,15 @@ app.use('/api/*', cors({ origin: (origin) => (origin && isLoopbackOrigin(origin)
 // preflight OPTIONS is answered by cors; applies to every /api/* verb. NOT applied to /oauth/*
 // (those are legitimate cross-site top-level navigations returning from the OAuth provider).
 app.use('/api/*', loopbackGuard)
+// No API route needs a multi-megabyte body. Bound parser memory even for a deliberate local/MCP
+// misuse; the provenance guard runs first so a rejected browser origin is never allowed to stream.
+app.use(
+  '/api/*',
+  bodyLimit({
+    maxSize: 2 * 1024 * 1024,
+    onError: (c) => c.json({ error: 'request body exceeds 2 MiB' }, 413),
+  }),
+)
 
 // --- health (also the single-instance probe: body.service must equal SERVICE_NAME) ---
 app.get('/api/health', (c) =>
@@ -328,7 +363,9 @@ app.post('/api/settings', async (c) => {
 // family pattern (DevWebUI).
 app.get('/oauth/login', async (c) => {
   try {
-    const url = await buildAuthorizeUrl(new URL(c.req.url).origin)
+    const origin = new URL(c.req.url).origin
+    if (!isLoopbackOrigin(origin)) return c.redirect('/?connect=failed')
+    const url = await buildAuthorizeUrl(origin)
     return c.redirect(url)
   } catch {
     return c.redirect('/?connect=failed')
@@ -336,6 +373,7 @@ app.get('/oauth/login', async (c) => {
 })
 app.get('/oauth/callback', async (c) => {
   const origin = new URL(c.req.url).origin
+  if (!isLoopbackOrigin(origin)) return c.redirect('/?connect=failed')
   const code = c.req.query('code')
   const stateTok = c.req.query('state')
   let ok = false
@@ -417,7 +455,7 @@ app.get('/api/sessions', async (c) => {
   const source = isSessionSource(rawSource) ? rawSource : 'all'
   return c.json(
     await listSessions(
-      limit ? Number(limit) : 200,
+      boundedQueryInt(limit, 200, 500),
       instance || undefined,
       scope,
       periodCutoffMs(period),
@@ -589,7 +627,7 @@ app.get('/api/sessions/:id/tail', async (c) => {
     await tailTranscript(
       c.req.param('id'),
       {
-        limit: limit ? Number(limit) : 40,
+        limit: boundedQueryInt(limit, 40, 200),
         textOnly: textOnly === '1' || textOnly === 'true',
       },
       source,
@@ -631,7 +669,7 @@ app.post('/api/accounts', async (c) => {
   const id = crypto.randomUUID()
   db.query(
     'insert into accounts (id, label, auth_type, secret, created_at) values (?, ?, ?, ?, ?)',
-  ).run(id, body.label, body.auth_type, body.secret, Date.now())
+  ).run(id, body.label, body.auth_type, protectAccountSecret(body.secret), Date.now())
   return c.json(listAccounts().find((a) => a.id === id))
 })
 app.delete('/api/accounts/:id', (c) => {
@@ -661,6 +699,21 @@ app.post('/api/queue', async (c) => {
   ) {
     return c.json({ error: 'title, cwd, and prompt are required' }, 400)
   }
+  if ('new_chat' in body && typeof body.new_chat !== 'boolean')
+    return c.json({ error: 'new_chat must be a boolean' }, 400)
+  if ('fork' in body && typeof body.fork !== 'boolean')
+    return c.json({ error: 'fork must be a boolean' }, 400)
+  if (body.session_id != null && (typeof body.session_id !== 'string' || !body.session_id.trim()))
+    return c.json({ error: 'session_id must be a non-empty string' }, 400)
+  for (const field of ['model', 'account_id', 'instance_ref'] as const) {
+    if (body[field] != null && typeof body[field] !== 'string')
+      return c.json({ error: `${field} must be a string or null` }, 400)
+  }
+  if (
+    typeof body.account_id === 'string' &&
+    !db.query('select 1 from accounts where id = ?').get(body.account_id)
+  )
+    return c.json({ error: `unknown account '${body.account_id}'` }, 400)
   const id = crypto.randomUUID()
   const sessionId = body.new_chat ? (body.session_id ?? crypto.randomUUID()) : body.session_id
   if (!sessionId)
@@ -721,6 +774,30 @@ app.patch('/api/queue/:id', async (c) => {
   if ('session_id' in body && (typeof body.session_id !== 'string' || !body.session_id.trim())) {
     return c.json({ error: 'session_id must be a non-empty string' }, 400)
   }
+  for (const field of ['title', 'cwd', 'prompt'] as const) {
+    if (field in body && (typeof body[field] !== 'string' || !(body[field] as string).trim()))
+      return c.json({ error: `${field} must be a non-empty string` }, 400)
+  }
+  for (const field of ['model', 'account_id', 'instance_ref'] as const) {
+    if (field in body && body[field] != null && typeof body[field] !== 'string')
+      return c.json({ error: `${field} must be a string or null` }, 400)
+  }
+  if (
+    'status' in body &&
+    (typeof body.status !== 'string' || !VALID_QUEUE_STATUSES.has(body.status))
+  )
+    return c.json({ error: `status must be one of: ${[...VALID_QUEUE_STATUSES].join(', ')}` }, 400)
+  if ('position' in body && (typeof body.position !== 'number' || !Number.isFinite(body.position)))
+    return c.json({ error: 'position must be a finite number' }, 400)
+  for (const field of ['new_chat', 'fork'] as const) {
+    if (field in body && typeof body[field] !== 'boolean')
+      return c.json({ error: `${field} must be a boolean` }, 400)
+  }
+  if (
+    typeof body.account_id === 'string' &&
+    !db.query('select 1 from accounts where id = ?').get(body.account_id)
+  )
+    return c.json({ error: `unknown account '${body.account_id}'` }, 400)
   // Same server-side enum guard as POST: never patch a garbage permission_mode/effort into a row
   // (permission_mode reaches `claude --permission-mode <v>`). Only checked when the field is present.
   const patchEnumError =
@@ -739,7 +816,7 @@ app.patch('/api/queue/:id', async (c) => {
     account_id: (v) => (v == null ? null : String(v)),
     instance_ref: (v) => (v == null ? null : String(v)),
     status: String,
-    position: Number,
+    position: (v) => Math.trunc(Number(v)),
     // normalized to UTC ISO (unparseable → null); scheduler compares these as text
     not_before: (v) => {
       if (v == null) return null
@@ -845,18 +922,15 @@ app.get('/api/queue/:id/stream', (c) => {
 app.get('/api/scheduler', (c) => c.json(schedulerState()))
 app.post('/api/scheduler', async (c) => {
   const body = await jsonBody(c)
-  if (typeof body.spacing_seconds === 'number')
-    setSetting('spacing_seconds', String(body.spacing_seconds))
-  if (typeof body.poll_seconds === 'number') setSetting('poll_seconds', String(body.poll_seconds))
-  if (typeof body.max_concurrent === 'number')
-    setSetting('max_concurrent', String(body.max_concurrent))
-  if (
-    typeof body.tomorrow_time === 'string' &&
-    /^([01]?\d|2[0-3]):[0-5]\d$/.test(body.tomorrow_time)
+  return c.json(
+    setSchedulerSettings({
+      spacing_seconds: typeof body.spacing_seconds === 'number' ? body.spacing_seconds : undefined,
+      poll_seconds: typeof body.poll_seconds === 'number' ? body.poll_seconds : undefined,
+      max_concurrent: typeof body.max_concurrent === 'number' ? body.max_concurrent : undefined,
+      tomorrow_time: typeof body.tomorrow_time === 'string' ? body.tomorrow_time : undefined,
+      enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+    }),
   )
-    setSetting('tomorrow_time', body.tomorrow_time)
-  if (typeof body.enabled === 'boolean') setSchedulerEnabled(body.enabled)
-  return c.json(schedulerState())
 })
 
 // --- multi-instance (isolated Claude Desktop instances) --------------------
@@ -1110,6 +1184,8 @@ app.post('/api/cli-instances', async (c) => {
 })
 app.post('/api/cli-instances/:id/launch', async (c) => {
   const body = await jsonBody(c)
+  const optionError = launchOptionError(body, CLAUDE_LAUNCH_EFFORTS)
+  if (optionError) return c.json({ error: optionError }, 400)
   return c.json(
     launchCliInstance(c.req.param('id'), {
       model: typeof body.model === 'string' ? body.model : undefined,
@@ -1184,6 +1260,8 @@ app.post('/api/codex-instances', async (c) => {
 })
 app.post('/api/codex-instances/:id/launch', async (c) => {
   const body = await jsonBody(c)
+  const optionError = launchOptionError(body, CODEX_LAUNCH_EFFORTS)
+  if (optionError) return c.json({ error: optionError }, 400)
   return c.json(
     launchCodexInstance(c.req.param('id'), {
       model: typeof body.model === 'string' ? body.model : undefined,

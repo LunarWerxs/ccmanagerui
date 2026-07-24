@@ -20,6 +20,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { join } from 'node:path'
 import { CONFIG_DIR, resolveClaudeExe } from '../config'
 import type { CliInstance, UsageSnapshot } from '../types'
+import { CLAUDE_LAUNCH_EFFORTS, type LaunchOptionsInput, launchOptionError } from './launch-options'
+import { isPathInside } from './paths'
 import type { CMActionResult } from './shared'
 
 export type { CliInstance } from '../types'
@@ -286,7 +288,7 @@ export function deleteCliInstance(id: string, confirmName?: string): CMActionRes
     }
   }
   // Defensive: only ever rm a path under our own root.
-  if (rec.configDir.startsWith(CLI_INSTANCES_ROOT)) {
+  if (isPathInside(CLI_INSTANCES_ROOT, rec.configDir)) {
     try {
       rmSync(rec.configDir, { recursive: true, force: true })
     } catch {
@@ -306,11 +308,9 @@ export function deleteCliInstance(id: string, confirmName?: string): CMActionRes
 
 // --- launch / login helper (opens a REAL terminal for the user) --------------
 
-export interface LaunchOpts {
+export interface LaunchOpts extends LaunchOptionsInput {
   /** true = a bare `claude` for the user to `/login`; false = a normal session. */
   login?: boolean
-  model?: string
-  effort?: string
 }
 
 /**
@@ -334,11 +334,21 @@ export function launchCliInstance(id: string, opts: LaunchOpts = {}): CMActionRe
       data: { id },
     }
 
+  const optionError = opts.login ? null : launchOptionError(opts, CLAUDE_LAUNCH_EFFORTS)
+  if (optionError)
+    return {
+      ok: false,
+      action: 'cli-launch',
+      dir: rec.configDir,
+      message: optionError,
+      data: { id },
+    }
+
   const exe = resolveClaudeExe()
   const claudeArgs: string[] = []
   if (!opts.login) {
-    if (opts.model) claudeArgs.push('--model', opts.model)
-    if (opts.effort) claudeArgs.push('--effort', opts.effort)
+    if (typeof opts.model === 'string') claudeArgs.push('--model', opts.model)
+    if (typeof opts.effort === 'string') claudeArgs.push('--effort', opts.effort)
   }
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),

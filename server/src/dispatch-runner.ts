@@ -23,6 +23,7 @@
 
 import { Database } from 'bun:sqlite'
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { revealAccountSecret } from './account-secrets'
 import { resolveCliConfigDirToken, resolveInstanceToken } from './core/accounts'
 import { DEFAULT_OAUTH_SCOPES } from './usage'
 
@@ -131,17 +132,22 @@ async function buildChildEnv(
         .get(spec.accountId)
       rdb.close()
     } catch {
-      acct = null // DB unreadable — run without the account credential rather than abort
+      acct = null
     }
-    if (acct) {
-      if (acct.auth_type === 'api_key') {
-        delete env.ANTHROPIC_API_KEY
-        delete env.ANTHROPIC_AUTH_TOKEN
-        delete env.CLAUDE_CODE_OAUTH_TOKEN
-        env.ANTHROPIC_API_KEY = acct.secret
-      } else {
-        injectOauth(env, acct.secret, null)
+    const secret = acct ? revealAccountSecret(acct.secret) : null
+    if (!acct || !secret) {
+      return {
+        error:
+          "couldn't read the selected dispatch account's credential — re-add that account before running it",
       }
+    }
+    if (acct.auth_type === 'api_key') {
+      delete env.ANTHROPIC_API_KEY
+      delete env.ANTHROPIC_AUTH_TOKEN
+      delete env.CLAUDE_CODE_OAUTH_TOKEN
+      env.ANTHROPIC_API_KEY = secret
+    } else {
+      injectOauth(env, secret, null)
     }
   }
   return { env }

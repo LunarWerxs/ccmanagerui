@@ -19,6 +19,7 @@
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { revealAccountSecret } from './account-secrets'
 import { resolveAccount, resolveCliConfigDirToken, resolveInstanceToken } from './core/accounts'
 import { cliInstanceForDesktop, getCliInstance, listCliInstances } from './core/cli-instances'
 import { listInstances } from './core/instances'
@@ -43,7 +44,9 @@ export function accountAuth(accountId: string): { auth: UsageAuth; label: string
     )
     .get(accountId)
   if (!row) return null
-  return { auth: { authType: row.auth_type as AuthType, secret: row.secret }, label: row.label }
+  const secret = revealAccountSecret(row.secret)
+  if (!secret) return null
+  return { auth: { authType: row.auth_type as AuthType, secret }, label: row.label }
 }
 
 /** Desktop instances authenticate via safeStorage (not the dispatch `accounts` table); match on the

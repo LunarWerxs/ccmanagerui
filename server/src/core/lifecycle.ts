@@ -18,7 +18,7 @@ import { basename } from 'node:path'
 import { linkCliInstanceToDesktop, listCliInstances } from './cli-instances'
 import { deleteInstanceMeta } from './instance-meta'
 import { openInstance } from './instances'
-import { defaultClaudeDir, instancesRoot, normalizePath } from './paths'
+import { defaultClaudeDir, instancesRoot, isPathInside, normalizePath } from './paths'
 import { listClaudeProcesses } from './process'
 import type { CMActionResult } from './shared'
 
@@ -309,11 +309,7 @@ export async function removeInstance(
 
   // --- Guard 2: must be under instancesRoot(). ---
   const root = normalizePath(instancesRoot())
-  const normDirLower = normDir.toLowerCase()
-  const rootLower = root.toLowerCase()
-  const isUnderRoot =
-    normDirLower.startsWith(`${rootLower}/`) || normDirLower.startsWith(`${rootLower}\\`)
-  if (!isUnderRoot) {
+  if (!isPathInside(root, normDir)) {
     return {
       ok: false,
       action: 'remove',

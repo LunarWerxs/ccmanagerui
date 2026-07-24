@@ -77,28 +77,35 @@ const MONITOR_POLL_MS = 30_000
 
 // --- settings ----------------------------------------------------------------
 
-function num(key: string, fallback: number): number {
+function num(key: string, fallback: number, min: number, max: number): number {
   const n = Number(getSetting(key))
-  return Number.isFinite(n) ? n : fallback
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.floor(n)))
 }
 
 export function getMonitorSettings(): MonitorSettings {
   return {
     enabled: getSetting('monitor_enabled') === '1',
-    maxAttempts: num('monitor_max_attempts', 3),
-    resumeBufferMin: num('monitor_resume_buffer_min', 3),
+    maxAttempts: num('monitor_max_attempts', 3, 1, 100),
+    resumeBufferMin: num('monitor_resume_buffer_min', 3, 0, 24 * 60),
     resumePrompt: getSetting('monitor_resume_prompt') || DEFAULT_RESUME_PROMPT,
   }
 }
 
 export function setMonitorSettings(patch: Partial<MonitorSettings>): MonitorSettings {
   if (typeof patch.enabled === 'boolean') setSetting('monitor_enabled', patch.enabled ? '1' : '0')
-  if (typeof patch.maxAttempts === 'number' && patch.maxAttempts > 0)
-    setSetting('monitor_max_attempts', String(Math.floor(patch.maxAttempts)))
-  if (typeof patch.resumeBufferMin === 'number' && patch.resumeBufferMin >= 0)
-    setSetting('monitor_resume_buffer_min', String(Math.floor(patch.resumeBufferMin)))
+  if (typeof patch.maxAttempts === 'number' && Number.isFinite(patch.maxAttempts))
+    setSetting(
+      'monitor_max_attempts',
+      String(Math.min(100, Math.max(1, Math.floor(patch.maxAttempts)))),
+    )
+  if (typeof patch.resumeBufferMin === 'number' && Number.isFinite(patch.resumeBufferMin))
+    setSetting(
+      'monitor_resume_buffer_min',
+      String(Math.min(24 * 60, Math.max(0, Math.floor(patch.resumeBufferMin)))),
+    )
   if (typeof patch.resumePrompt === 'string' && patch.resumePrompt.trim())
-    setSetting('monitor_resume_prompt', patch.resumePrompt.trim())
+    setSetting('monitor_resume_prompt', patch.resumePrompt.trim().slice(0, 1000))
   return getMonitorSettings()
 }
 

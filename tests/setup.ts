@@ -6,6 +6,13 @@ import { mkdirSync, mkdtempSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+// Child-process tests should run the exact Bun binary that is running the suite. On Windows an npm
+// install can put a quote-lossy `bun.cmd` shim earlier on PATH than bun.exe; the updater's real
+// `bun -e <script>` fixtures then fail inside cmd before the code under test even runs.
+process.env.PATH = [path.dirname(process.execPath), process.env.PATH]
+  .filter(Boolean)
+  .join(path.delimiter)
+
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'ccmanagerui-test-'))
 process.env.CCMANAGERUI_HOME = scratch
 process.env.CCMANAGERUI_DB = path.join(scratch, 'ccmanagerui-test.db')

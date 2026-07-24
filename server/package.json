@@ -17,7 +17,8 @@
   "dependencies": {
     "@cnct/connect": "0.3.0",
     "@cnct/locker": "0.1.1",
-    "hono": "^4.9.0"
+    "hono": "^4.12.31",
+    "safe-regex2": "^5.1.1"
   },
   "devDependencies": {
     "@types/bun": "latest",

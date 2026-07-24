@@ -42,15 +42,16 @@ interface ScannedMeta {
   substantive_turns: number
 }
 
-// Per-file cache keyed by path+mtime so unchanged transcripts parse only once.
-const metaCache = new Map<string, ScannedMeta>()
+// One entry per transcript. Keeping mtime in the value (instead of in the Map key) makes an active
+// transcript replace its old parse rather than leaking one cache entry on every appended turn.
+const metaCache = new Map<string, { mtimeMs: number; meta: ScannedMeta }>()
 
 async function scanMeta(tf: TranscriptFile): Promise<ScannedMeta> {
   // OpenCode sessions all point at one database path, and two rows can share a millisecond update
   // timestamp. Provider + id are therefore part of the cache identity, not just path + mtime.
-  const key = `${tf.source}:${tf.session_id}:${tf.path}:${tf.mtime_ms}`
+  const key = `${tf.source}:${tf.session_id}:${tf.path}`
   const cached = metaCache.get(key)
-  if (cached) return cached
+  if (cached?.mtimeMs === tf.mtime_ms) return cached.meta
 
   if (tf.source === 'opencode') {
     const content = readOpenCodeSession(tf.session_id)
@@ -68,7 +69,7 @@ async function scanMeta(tf: TranscriptFile): Promise<ScannedMeta> {
       last_text_preview: last ? oneLine(last.text) : null,
       substantive_turns: textEvents.length,
     }
-    metaCache.set(key, meta)
+    metaCache.set(key, { mtimeMs: tf.mtime_ms, meta })
     return meta
   }
 
@@ -169,7 +170,7 @@ async function scanMeta(tf: TranscriptFile): Promise<ScannedMeta> {
     last_text_preview: lastPreview,
     substantive_turns: substantive,
   }
-  metaCache.set(key, meta)
+  metaCache.set(key, { mtimeMs: tf.mtime_ms, meta })
   return meta
 }
 

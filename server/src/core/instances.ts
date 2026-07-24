@@ -22,6 +22,7 @@ import { readInstanceMetaMap } from './instance-meta'
 import {
   defaultClaudeDir,
   instancesRoot,
+  isPathInside,
   launchArgs,
   normalizePath,
   resolveLaunchBinary,
@@ -150,7 +151,7 @@ export async function listInstances(options: ListInstancesOptions = {}): Promise
     if (proc.isMain && !runningByDir.has(normDir)) runningByDir.set(normDir, proc)
 
     if (!known.has(normDir)) {
-      const isUnderRoot = normDir.toLowerCase().startsWith(root.toLowerCase())
+      const isUnderRoot = isPathInside(root, normDir)
       known.set(normDir, {
         name: basename(normDir),
         dir: normDir,

@@ -2,7 +2,11 @@ import { Database } from 'bun:sqlite'
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
 import { CONFIG_DIR } from '../src/config'
-import { listOpenCodeSessions, readOpenCodeSession } from '../src/opencode-sessions'
+import {
+  listOpenCodeSearchEvents,
+  listOpenCodeSessions,
+  readOpenCodeSession,
+} from '../src/opencode-sessions'
 
 test('OpenCode SQLite sessions are listed and rendered from message/part rows', () => {
   const path = join(CONFIG_DIR, `opencode-${crypto.randomUUID()}.db`)
@@ -73,5 +77,9 @@ test('OpenCode SQLite sessions are listed and rendered from message/part rows', 
   expect(content?.events.map((event) => [event.role, event.text])).toEqual([
     ['user', 'Please fix it.'],
     ['assistant', 'Fixed.'],
+  ])
+  expect(listOpenCodeSearchEvents(path).map((event) => event.text)).toEqual([
+    'Please fix it.',
+    'Fixed.',
   ])
 })

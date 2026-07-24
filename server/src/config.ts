@@ -68,7 +68,23 @@ export const RUN_LOG_DIR = process.env.CCMANAGERUI_RUN_LOG_DIR?.trim() || join(D
 export const CLIPBOARD_DIR = join(DATA_DIR, 'clipboard')
 
 export const PORT = Number(process.env.PORT ?? 7787)
-export const HOST = process.env.HOST ?? '127.0.0.1'
+
+const LOOPBACK_BIND_HOSTS = new Set(['127.0.0.1', 'localhost', '::1'])
+
+/**
+ * The REST API is intentionally unauthenticated for local tools, so binding it to a LAN interface
+ * would turn every process-launch/file-management route into a remote-control surface. Fail closed
+ * on a stray deployment-style HOST=0.0.0.0 instead of silently exposing it.
+ */
+export function validateBindHost(value: string | undefined): string {
+  const host = value?.trim() || '127.0.0.1'
+  if (LOOPBACK_BIND_HOSTS.has(host.toLowerCase())) return host
+  throw new Error(
+    `HOST must be loopback-only (127.0.0.1, localhost, or ::1); received ${JSON.stringify(host)}`,
+  )
+}
+
+export const HOST = validateBindHost(process.env.HOST)
 
 /** Service identity — used in /api/health and the runtime.json pointer (single-instance). */
 export const SERVICE_NAME = 'ccmanagerui'

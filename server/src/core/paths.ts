@@ -152,8 +152,8 @@ function compareVersions(a: number[], b: number[]): number {
   return 0
 }
 
-/** Normalizes a filesystem path for use as an identity/cache key: trims trailing slashes and
- *  lowercases. Never throws. */
+/** Normalizes a filesystem path for use as an identity/cache key: resolves it, trims trailing
+ *  slashes, and folds case only on Windows (POSIX paths are case-sensitive). Never throws. */
 export function normalizeInstancePath(p: string): string {
   try {
     const trimmed = p.replace(/[\\/]+$/, '')
@@ -164,9 +164,11 @@ export function normalizeInstancePath(p: string): string {
     } catch {
       resolved = trimmed
     }
-    return resolved.replace(/[\\/]+$/, '').toLowerCase()
+    const normalized = resolved.replace(/[\\/]+$/, '')
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized
   } catch {
-    return p.replace(/[\\/]+$/, '').toLowerCase()
+    const normalized = p.replace(/[\\/]+$/, '')
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized
   }
 }
 
@@ -174,6 +176,17 @@ export function normalizeInstancePath(p: string): string {
  *  core/lifecycle.ts. Kept as a thin re-export so both naming conventions resolve to one
  *  implementation. */
 export const normalizePath = normalizeInstancePath
+
+/** True only when `candidate` resolves strictly below `root` (never for the root itself or a
+ *  sibling whose name merely shares the same prefix). */
+export function isPathInside(root: string, candidate: string): boolean {
+  try {
+    const rel = path.relative(path.resolve(root), path.resolve(candidate))
+    return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
+  } catch {
+    return false
+  }
+}
 
 /** Alias for claudeUserDataDir — matches the shorter name used by core/lifecycle.ts. */
 export const defaultClaudeDir = claudeUserDataDir

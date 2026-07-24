@@ -225,30 +225,39 @@ export interface OpenCodeSearchEvent {
   text: string
 }
 
+interface OpenCodeSearchRow {
+  session_id: string
+  cwd: string | null
+  project: string | null
+  text: string | null
+}
+
 /**
  * Search input for OpenCode. Only text parts are returned: the UI hides reasoning, and raw tool
- * payloads contain far more noise than useful conversation text.
+ * payloads contain far more noise than useful conversation text. Filter/extract in SQLite so a
+ * search does not first materialize every tool payload in the (potentially hundreds-of-MiB) DB.
  */
 export function listOpenCodeSearchEvents(path = OPENCODE_DB_PATH): OpenCodeSearchEvent[] {
   const db = openDb(path)
   if (!db) return []
   try {
     const rows = db
-      .query<{ session_id: string; cwd: string | null; project: string | null; data: string }, []>(
-        `select p.session_id, s.directory as cwd, s.project_id as project, p.data
+      .query<OpenCodeSearchRow, []>(
+        `select p.session_id, s.directory as cwd, s.project_id as project,
+                case when json_valid(p.data) then json_extract(p.data, '$.text') end as text
          from part p join session s on s.id = p.session_id
+         where case when json_valid(p.data) then json_extract(p.data, '$.type') end = 'text'
          order by s.time_updated desc, p.time_created`,
       )
       .all()
     const out: OpenCodeSearchEvent[] = []
     for (const row of rows) {
-      const part = parseJson(row.data)
-      if (part?.type !== 'text' || typeof part.text !== 'string' || !part.text.trim()) continue
+      if (typeof row.text !== 'string' || !row.text.trim()) continue
       out.push({
         session_id: row.session_id,
         cwd: row.cwd || '',
         project: row.project || 'opencode',
-        text: part.text,
+        text: row.text,
       })
     }
     return out

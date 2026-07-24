@@ -1,15 +1,29 @@
 import { Database } from 'bun:sqlite'
-import { mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync } from 'node:fs'
+import { protectAccountSecret } from './account-secrets'
 import { DATA_DIR, DB_PATH, RUN_LOG_DIR } from './config'
 import { classifyLimit } from './rate-limit-signal'
 import type { QueueItem } from './types'
 
-mkdirSync(DATA_DIR, { recursive: true })
-mkdirSync(RUN_LOG_DIR, { recursive: true })
+mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
+mkdirSync(RUN_LOG_DIR, { recursive: true, mode: 0o700 })
+try {
+  chmodSync(DATA_DIR, 0o700)
+  chmodSync(RUN_LOG_DIR, 0o700)
+} catch {
+  // Windows ACLs, or a filesystem without POSIX modes; the per-user location/ACL remains in force.
+}
 
 export const db = new Database(DB_PATH, { create: true })
 db.exec('pragma journal_mode = WAL')
 db.exec('pragma foreign_keys = ON')
+try {
+  chmodSync(DB_PATH, 0o600)
+  chmodSync(`${DB_PATH}-wal`, 0o600)
+  chmodSync(`${DB_PATH}-shm`, 0o600)
+} catch {
+  // WAL/SHM may not exist yet; Windows permissions are ACL-based. Best effort is sufficient here.
+}
 
 db.exec(`
 create table if not exists accounts (
@@ -89,6 +103,18 @@ create table if not exists session_marks (
   updated_at integer not null
 );
 `)
+
+// Existing manually-pasted credentials predate at-rest sealing. On Windows, migrate each legacy
+// plaintext value to a CurrentUser-scoped DPAPI blob in place; on other platforms seal() is a
+// documented passthrough and the owner-only DB permissions above are the protection.
+{
+  const rows = db.query<{ id: string; secret: string }, []>('select id, secret from accounts').all()
+  const update = db.query('update accounts set secret = ? where id = ?')
+  for (const row of rows) {
+    const protectedSecret = protectAccountSecret(row.secret)
+    if (protectedSecret !== row.secret) update.run(protectedSecret, row.id)
+  }
+}
 
 // --- additive migrations ----------------------------------------------------
 // `create table if not exists` never alters an existing table, so columns added

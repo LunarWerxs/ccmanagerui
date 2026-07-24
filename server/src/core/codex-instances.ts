@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join } from 'node:path'
 import { CONFIG_DIR, resolveCodexExe } from '../config'
 import type { CodexInstance } from '../types'
+import { CODEX_LAUNCH_EFFORTS, type LaunchOptionsInput, launchOptionError } from './launch-options'
+import { isPathInside } from './paths'
 import type { CMActionResult } from './shared'
 
 const CODEX_INSTANCES_ROOT = join(CONFIG_DIR, 'codex-instances')
@@ -151,8 +153,7 @@ export function deleteCodexInstance(id: string, confirmName?: string): CMActionR
       data: { id },
     }
 
-  const rel = relative(CODEX_INSTANCES_ROOT, instance.codexHome)
-  if (rel && !rel.startsWith('..') && !rel.includes(':')) {
+  if (isPathInside(CODEX_INSTANCES_ROOT, instance.codexHome)) {
     try {
       rmSync(instance.codexHome, { recursive: true, force: true })
     } catch {
@@ -170,10 +171,8 @@ export function deleteCodexInstance(id: string, confirmName?: string): CMActionR
   }
 }
 
-export interface CodexLaunchOptions {
+export interface CodexLaunchOptions extends LaunchOptionsInput {
   login?: boolean
-  model?: string
-  effort?: string
 }
 
 export function launchCodexInstance(id: string, options: CodexLaunchOptions = {}): CMActionResult {
@@ -187,10 +186,20 @@ export function launchCodexInstance(id: string, options: CodexLaunchOptions = {}
       data: { id },
     }
 
+  const optionError = options.login ? null : launchOptionError(options, CODEX_LAUNCH_EFFORTS)
+  if (optionError)
+    return {
+      ok: false,
+      action: 'codex-launch',
+      dir: instance.codexHome,
+      message: optionError,
+      data: { id },
+    }
+
   const exe = resolveCodexExe()
   const args: string[] = options.login ? ['login'] : []
-  if (!options.login && options.model) args.push('--model', options.model)
-  if (!options.login && options.effort)
+  if (!options.login && typeof options.model === 'string') args.push('--model', options.model)
+  if (!options.login && typeof options.effort === 'string')
     args.push('-c', `model_reasoning_effort=${JSON.stringify(options.effort)}`)
   const env = {
     ...(process.env as Record<string, string>),

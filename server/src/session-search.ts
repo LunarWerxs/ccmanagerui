@@ -3,6 +3,7 @@
 // (bounded 12MB tail read) or transcript.ts's readTailBytes() (bounded byte-tail read). Kept in
 // its own module so the fast/simple metadata list path (sessions.ts, GET /api/sessions) stays
 // completely untouched; this is a separate, slower, opt-in code path.
+import safeRegex from 'safe-regex2'
 import { instanceSessionMap } from './instance-sessions'
 import { listOpenCodeSearchEvents } from './opencode-sessions'
 import { eventToTailEventsForSource, listTranscriptFiles, type TranscriptFile } from './transcript'
@@ -31,6 +32,7 @@ const DEFAULT_PER_FILE_LIMIT = 5
 const DEFAULT_BUDGET_MS = 7000
 const CONCURRENCY = 6
 const SNIPPET_LEN = 160
+const MAX_REGEX_LENGTH = 200
 
 function compact(s: string): string {
   return s.replace(/\s+/g, ' ').trim()
@@ -53,9 +55,12 @@ type Matcher = (haystack: string) => number // returns match index, or -1
 function buildMatcher(opts: SearchOptions): Matcher {
   const { query, regex, caseSensitive } = opts
   if (regex) {
-    // User-supplied regex: compiled once and reused across every line. A pathological
-    // pattern can still be slow per-line, so the overall wall-clock budget (below) is what
-    // actually bounds worst-case runtime, not this try/catch (which only guards syntax).
+    // A deadline cannot interrupt a synchronous RegExp.exec once catastrophic backtracking has
+    // started. Reject structurally unsafe (or unreasonable) patterns before compiling; the
+    // wall-clock budget below then bounds the ordinary multi-file work around each match.
+    if (query.length > MAX_REGEX_LENGTH)
+      throw new Error(`regular expression must be at most ${MAX_REGEX_LENGTH} characters`)
+    if (!safeRegex(query)) throw new Error('unsafe regular expression')
     const re = new RegExp(query, caseSensitive ? '' : 'i')
     return (haystack: string) => {
       const m = re.exec(haystack)
