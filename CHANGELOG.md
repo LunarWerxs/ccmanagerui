@@ -6,6 +6,26 @@ All notable changes to CC Manager UI are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Claude, Codex, and OpenCode conversations now share one Sessions view.** Every row is
+  source-tagged and the list, full-body search, transcript tail, done marks, REST API, and MCP
+  session tools all understand provider identity. Codex reads active and archived rollout JSONL;
+  OpenCode CLI and Desktop are both covered through the SQLite store they share. Injected Codex
+  runtime blocks and provider reasoning records stay out of the human transcript.
+- **Codex CLI instances can be managed alongside Claude instances.** Create an isolated
+  `CODEX_HOME`, open `codex login` for the user, launch it in a terminal, rename it, or delete it
+  with exact-name confirmation. The REST API and MCP expose the same lifecycle.
+
+### Changed
+
+- **Provider browsing cannot leak into Claude execution.** Queue/session composers, rate-limit
+  discovery, and Desktop-instance filtering remain explicitly Claude-only, while Codex and
+  OpenCode are read-only conversation sources. OpenCode's database is never offered as a raw
+  transcript download.
+- The completed Codex/ChatGPT/OpenCode research note and the original merge plan were removed after
+  their work was implemented and verified.
+
 ## [0.10.0] - 2026-07-23
 
 ### Added

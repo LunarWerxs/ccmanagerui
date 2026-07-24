@@ -1,0 +1,297 @@
+<script setup lang="ts">
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  EllipsisVertical,
+  LogIn,
+  Pencil,
+  Play,
+  Plus,
+  RefreshCw,
+  Terminal,
+  Trash2,
+} from '@lucide/vue'
+import { useStorage } from '@vueuse/core'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { toast } from 'vue-sonner'
+import CliInstanceNameDialog from '@/components/CliInstanceNameDialog.vue'
+import DeleteCliInstanceDialog from '@/components/DeleteCliInstanceDialog.vue'
+import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableEmpty,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { useCodexInstances } from '@/composables/useCodexInstances'
+import { useSortable } from '@/composables/useSortable'
+import type { CodexInstance } from '@/lib/api'
+
+const {
+  instances,
+  loading,
+  busyIds,
+  refresh,
+  startPolling,
+  stopPolling,
+  create,
+  launch,
+  login,
+  rename,
+  remove,
+} = useCodexInstances()
+const { t } = useI18n()
+const open = useStorage('ccmanagerui.instances.codexOpen', true)
+const isBusy = (instance: CodexInstance) => busyIds.value.has(instance.id)
+
+const { sortedRows, toggleSort, indicatorFor } = useSortable(
+  () => instances.value,
+  [
+    { key: 'loggedIn', accessor: (instance: CodexInstance) => instance.loggedIn },
+    { key: 'name', accessor: (instance: CodexInstance) => instance.name },
+    { key: 'codexHome', accessor: (instance: CodexInstance) => instance.codexHome },
+  ],
+)
+
+const createOpen = ref(false)
+const creating = ref(false)
+const createError = ref<string | null>(null)
+async function onCreate(name: string) {
+  creating.value = true
+  createError.value = null
+  try {
+    const result = await create(name)
+    if (result?.ok) {
+      createOpen.value = false
+      toast.success(t('codexInstances.toastCreated'))
+    } else createError.value = result?.message ?? t('codexInstances.toastCreateFailed')
+  } finally {
+    creating.value = false
+  }
+}
+
+const renameOpen = ref(false)
+const renameTarget = ref<CodexInstance | null>(null)
+const renaming = ref(false)
+const renameError = ref<string | null>(null)
+function openRename(instance: CodexInstance) {
+  renameTarget.value = instance
+  renameError.value = null
+  renameOpen.value = true
+}
+async function onRename(name: string) {
+  const target = renameTarget.value
+  if (!target) return
+  renaming.value = true
+  try {
+    const result = await rename(target.id, name)
+    if (result?.ok) {
+      renameOpen.value = false
+      toast.success(t('codexInstances.toastRenamed'))
+    } else renameError.value = result?.message ?? t('codexInstances.toastRenameFailed')
+  } finally {
+    renaming.value = false
+  }
+}
+
+const deleteOpen = ref(false)
+const deleteTarget = ref<CodexInstance | null>(null)
+const deleting = ref(false)
+const deleteError = ref<string | null>(null)
+function openDelete(instance: CodexInstance) {
+  deleteTarget.value = instance
+  deleteError.value = null
+  deleteOpen.value = true
+}
+async function onDelete(name: string) {
+  const target = deleteTarget.value
+  if (!target) return
+  deleting.value = true
+  try {
+    const result = await remove(target.id, name)
+    if (result?.ok) {
+      deleteOpen.value = false
+      toast.success(t('codexInstances.toastDeleted'))
+    } else deleteError.value = result?.message ?? t('codexInstances.toastDeleteFailed')
+  } finally {
+    deleting.value = false
+  }
+}
+
+async function onLaunch(instance: CodexInstance) {
+  const result = await launch(instance.id)
+  if (result?.ok) toast.success(t('codexInstances.toastLaunched'))
+  else toast.error(result?.message ?? t('codexInstances.toastLaunchFailed'))
+}
+
+async function onLogin(instance: CodexInstance) {
+  const result = await login(instance.id)
+  if (result?.ok) toast.success(t('codexInstances.toastLoginOpened'))
+  else toast.error(result?.message ?? t('codexInstances.toastLoginFailed'))
+}
+
+onMounted(startPolling)
+onUnmounted(stopPolling)
+</script>
+
+<template>
+  <div>
+    <div class="flex flex-wrap items-center justify-between gap-2 p-3">
+      <button
+        type="button"
+        class="flex items-center gap-2 rounded-md text-sm font-semibold transition-colors hover:text-muted-foreground"
+        :aria-expanded="open"
+        @click="open = !open"
+      >
+        <Terminal class="size-4" />
+        {{ $t('codexInstances.title') }}
+        <span class="text-muted-foreground">({{ instances.length }})</span>
+        <ChevronDown
+          class="size-4 text-muted-foreground transition-transform duration-200"
+          :class="open ? '' : '-rotate-90'"
+        />
+      </button>
+      <div class="flex items-center gap-1.5">
+        <Button
+          variant="outline"
+          size="icon"
+          :disabled="loading"
+          :aria-label="$t('codexInstances.refresh')"
+          @click="refresh()"
+        >
+          <RefreshCw :class="loading ? 'animate-spin' : ''" />
+        </Button>
+        <Button size="sm" :aria-label="$t('codexInstances.createInstance')" @click="createOpen = true">
+          <Plus /> {{ $t('codexInstances.createInstance') }}
+        </Button>
+      </div>
+    </div>
+
+    <Table v-show="open">
+      <TableHeader class="sticky top-0 z-10 bg-card">
+        <TableRow>
+          <TableHead class="w-10 cursor-pointer select-none" @click="toggleSort('loggedIn')">
+            <span class="inline-flex items-center gap-0.5">
+              ● <ArrowUp v-if="indicatorFor('loggedIn') === 'asc'" class="size-3" />
+              <ArrowDown v-else-if="indicatorFor('loggedIn') === 'desc'" class="size-3" />
+            </span>
+          </TableHead>
+          <TableHead class="cursor-pointer select-none" @click="toggleSort('name')">
+            <span class="inline-flex items-center gap-0.5">
+              {{ $t('codexInstances.colName') }}
+              <ArrowUp v-if="indicatorFor('name') === 'asc'" class="size-3" />
+              <ArrowDown v-else-if="indicatorFor('name') === 'desc'" class="size-3" />
+            </span>
+          </TableHead>
+          <TableHead class="cursor-pointer select-none" @click="toggleSort('codexHome')">
+            <span class="inline-flex items-center gap-0.5">
+              {{ $t('codexInstances.colHome') }}
+              <ArrowUp v-if="indicatorFor('codexHome') === 'asc'" class="size-3" />
+              <ArrowDown v-else-if="indicatorFor('codexHome') === 'desc'" class="size-3" />
+            </span>
+          </TableHead>
+          <TableHead class="text-right">{{ $t('codexInstances.colActions') }}</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody v-if="instances.length === 0">
+        <TableEmpty v-if="!loading" :colspan="4">
+          <div class="flex flex-col items-center gap-1 text-center">
+            <Terminal class="mb-1 size-6 opacity-40" />
+            <p class="font-medium text-foreground">{{ $t('codexInstances.empty') }}</p>
+            <p class="text-xs text-muted-foreground">{{ $t('codexInstances.emptyHint') }}</p>
+          </div>
+        </TableEmpty>
+        <TableRow v-for="i in 2" v-else :key="i">
+          <TableCell><Skeleton class="size-2 rounded-full" /></TableCell>
+          <TableCell><Skeleton class="h-4 w-28" /></TableCell>
+          <TableCell><Skeleton class="h-3 w-48" /></TableCell>
+          <TableCell><div class="flex justify-end"><Skeleton class="h-6 w-20" /></div></TableCell>
+        </TableRow>
+      </TableBody>
+      <TableBody v-else>
+        <TableRow v-for="instance in sortedRows" :key="instance.id">
+          <TableCell>
+            <span
+              class="inline-block size-2 rounded-full"
+              :class="instance.loggedIn ? 'bg-success' : 'bg-muted-foreground/40'"
+              :title="instance.loggedIn ? $t('codexInstances.loggedIn') : $t('codexInstances.loggedOut')"
+            />
+          </TableCell>
+          <TableCell class="font-medium">{{ instance.name }}</TableCell>
+          <TableCell class="mono max-w-[28rem] truncate text-[0.625rem] text-muted-foreground">
+            {{ instance.codexHome }}
+          </TableCell>
+          <TableCell>
+            <div class="flex items-center justify-end gap-1">
+              <Button variant="outline" size="sm" :disabled="isBusy(instance)" @click="onLaunch(instance)">
+                <Play /> {{ $t('codexInstances.launch') }}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger as-child>
+                  <Button variant="ghost" size="icon-sm" :aria-label="$t('codexInstances.moreActions')">
+                    <EllipsisVertical />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" class="w-52">
+                  <DropdownMenuItem :disabled="isBusy(instance)" @click="onLogin(instance)">
+                    <LogIn /> {{ $t('codexInstances.login') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem :disabled="isBusy(instance)" @click="openRename(instance)">
+                    <Pencil /> {{ $t('codexInstances.rename') }}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    :disabled="isBusy(instance)"
+                    @click="openDelete(instance)"
+                  >
+                    <Trash2 /> {{ $t('codexInstances.delete') }}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </TableCell>
+        </TableRow>
+      </TableBody>
+    </Table>
+
+    <CliInstanceNameDialog
+      v-model:open="createOpen"
+      namespace="codexInstances"
+      mode="create"
+      :submitting="creating"
+      :error-message="createError"
+      @submit="onCreate"
+    />
+    <CliInstanceNameDialog
+      v-model:open="renameOpen"
+      namespace="codexInstances"
+      mode="rename"
+      :current-name="renameTarget?.name ?? null"
+      :submitting="renaming"
+      :error-message="renameError"
+      @submit="onRename"
+    />
+    <DeleteCliInstanceDialog
+      v-model:open="deleteOpen"
+      namespace="codexInstances"
+      :instance-name="deleteTarget?.name ?? null"
+      :submitting="deleting"
+      :error-message="deleteError"
+      @confirm="onDelete"
+    />
+  </div>
+</template>

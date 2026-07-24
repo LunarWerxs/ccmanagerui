@@ -31,11 +31,16 @@ URL) or `CCMANAGERUI_PORT`.
 }
 ```
 
-Tools cover sessions (list / get / tail), the queue (list / add / update / run / cancel / events),
-accounts (secrets always masked), the scheduler (get / set), instances (list / launch / quit), CLI
-instances (list / create / launch / login helper), usage-check (`check_usage`, `check_my_usage`),
-and the auto-resume monitor (get / set), plus an update check. Mutating tools say `MUTATES:` in
-their description; there is deliberately no shutdown tool.
+Tools cover sessions (list / get / tail across Claude, Codex, and OpenCode), the queue (list / add /
+update / run / cancel / events), accounts (secrets always masked), the scheduler (get / set),
+Claude Desktop instances (list / launch / quit), Claude CLI instances and Codex CLI instances
+(list / create / launch / login helper), usage-check (`check_usage`, `check_my_usage`), and the
+auto-resume monitor (get / set), plus an update check. Mutating tools say `MUTATES:` in their
+description; there is deliberately no shutdown tool.
+
+`list_sessions`, `get_session`, and `tail_session` accept a `source` of `claude`, `codex`, or
+`opencode`; every returned session is source-tagged. Session viewing/search is unified, but queue
+dispatch, composing replies, and rate-limit auto-resume remain Claude-only.
 
 ### Usage-check
 
@@ -60,6 +65,10 @@ whichever account has the lowest weekly %.
 | `CCMANAGERUI_SHUTDOWN_TOKEN` | unset | if set, `/api/shutdown` requires a matching `x-ccmanagerui-shutdown-token` header (the tray sets it) |
 | `CCMANAGERUI_FAKE` | unset | dispatch uses the harmless fake CLI |
 | `CCMANAGERUI_DB` | `server/data/ccmanagerui.db` | sqlite path |
+| `CCMANAGERUI_RUN_LOG_DIR` | `server/data/run-logs` | detached-run log and sidecar directory |
+| `CCMANAGERUI_CODEX_HOME` | `~/.codex` | default Codex rollout store to scan |
+| `CCMANAGERUI_CODEX_PATH` | auto-detected / `codex` | Codex executable used by managed Codex instances |
+| `CCMANAGERUI_OPENCODE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode CLI/Desktop SQLite session store |
 
 `/api/health` returns `service: "ccmanagerui"`, which is load-bearing for the single-instance
 pointer.
@@ -86,7 +95,7 @@ check. Treat a push to `main` as user-facing rather than as a staging step.
 | Layer | Choice |
 |---|---|
 | Frontend | Vue 3 + Vite, a shared LunarWerx UI kit (shadcn-vue `reka-mira` on Reka UI), Tailwind v4, `@lucide/vue`, TypeScript |
-| Backend | **Bun + Hono**, `bun:sqlite` (queue / dispatch / scheduler / accounts) + JSON under `CONFIG_DIR`, SSE (`hono/streaming`) for live run output |
+| Backend | **Bun + Hono**, `bun:sqlite` (queue / dispatch / scheduler / accounts and read-only OpenCode access) + JSON under `CONFIG_DIR`, SSE (`hono/streaming`) for live run output |
 | Dispatch | `Bun.spawn` of the real `claude` CLI (no Agent SDK) |
 | Multi-instance | per-OS instance discovery / launch / quit / create (`server/src/core/*`): Windows DPAPI / macOS Keychain / Linux libsecret for reading each isolated instance's stored credentials |
 | Launcher | Windows browser + system-tray (`misc/`) |
@@ -94,8 +103,8 @@ check. Treat a push to `main` as user-facing rather than as a staging step.
 ## Layout
 
 ```
-server/    Bun + Hono daemon: sqlite, session reader, transcript tail, dispatch, scheduler,
-           instance pointer, core/ (multi-instance crypto/paths/process/instances/lifecycle/accounts)
+server/    Bun + Hono daemon: sqlite, Claude/Codex/OpenCode session readers, transcript tail,
+           dispatch, scheduler, instance pointer, core/ (Claude Desktop/CLI + Codex CLI instances)
 web/       Vue 3 SPA (Sessions / Queue / Instances views)
 tests/     launcher.test.ts (the tray guard, Windows-gated) + server/instance unit tests
 misc/      the Windows launcher toolkit (tray .ps1 / .vbs / .ico / Create-Shortcut / Make-Icon / Rebuild.bat)

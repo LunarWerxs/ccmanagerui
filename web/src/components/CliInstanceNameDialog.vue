@@ -13,11 +13,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { CLI_INSTANCE_DIALOG_KEYS, type CliDialogNamespace } from '@/lib/instance-dialog-i18n'
 
 const open = defineModel<boolean>('open', { default: false })
 
 const props = defineProps<{
   mode: 'create' | 'rename'
+  namespace?: CliDialogNamespace
   currentName?: string | null
   submitting?: boolean
   errorMessage?: string | null
@@ -33,21 +35,18 @@ watch(open, (isOpen) => {
   if (isOpen) name.value = props.mode === 'rename' ? (props.currentName ?? '') : ''
 })
 
+const keys = computed(() => CLI_INSTANCE_DIALOG_KEYS[props.namespace ?? 'cliInstances'])
 const titleKey = computed(() =>
-  props.mode === 'rename' ? 'cliInstances.renameDialogTitle' : 'cliInstances.createDialogTitle',
+  props.mode === 'rename' ? keys.value.renameDialogTitle : keys.value.createDialogTitle,
 )
 const descriptionKey = computed(() =>
-  props.mode === 'rename'
-    ? 'cliInstances.renameDialogDescription'
-    : 'cliInstances.createDialogDescription',
+  props.mode === 'rename' ? keys.value.renameDialogDescription : keys.value.createDialogDescription,
 )
 const submitKey = computed(() =>
-  props.mode === 'rename' ? 'cliInstances.renameDialogSubmit' : 'cliInstances.createDialogSubmit',
+  props.mode === 'rename' ? keys.value.renameDialogSubmit : keys.value.createDialogSubmit,
 )
 const submittingKey = computed(() =>
-  props.mode === 'rename'
-    ? 'cliInstances.renameDialogRenaming'
-    : 'cliInstances.createDialogCreating',
+  props.mode === 'rename' ? keys.value.renameDialogRenaming : keys.value.createDialogCreating,
 )
 
 function handleSubmit() {
@@ -68,12 +67,12 @@ function handleSubmit() {
 
         <div class="mt-3 flex flex-col gap-1.5">
           <label for="cli-instance-name" class="text-xs font-medium text-muted-foreground">
-            {{ $t('cliInstances.nameLabel') }}
+            {{ $t(keys.nameLabel) }}
           </label>
           <Input
             id="cli-instance-name"
             v-model="name"
-            :placeholder="$t('cliInstances.namePlaceholder')"
+            :placeholder="$t(keys.namePlaceholder)"
             :disabled="submitting"
             autofocus
           />

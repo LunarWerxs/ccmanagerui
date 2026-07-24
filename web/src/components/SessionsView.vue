@@ -32,6 +32,7 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import SessionComposer, { type ComposerTarget } from '@/components/SessionComposer.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
   ContextMenu,
@@ -64,6 +65,8 @@ import type {
   ArchivedScope,
   SessionPeriod,
   SessionSearchResult,
+  SessionSource,
+  SessionSourceScope,
   SessionSummary,
   TailResult,
 } from '@/lib/api'
@@ -81,6 +84,7 @@ const {
   sessionInstanceFilter,
   sessionArchivedScope,
   sessionPeriod,
+  sessionSourceFilter,
 } = useData()
 const { t } = useI18n()
 
@@ -104,6 +108,15 @@ const instanceLabelFor = (folder: string) =>
 onMounted(() => void refreshInstances({ silent: true }))
 // Every scope is applied server-side, so any of them changing needs a refetch, not a re-filter.
 watch([sessionInstanceFilter, sessionArchivedScope, sessionPeriod], () => refreshSessions())
+watch(sessionSourceFilter, (source) => {
+  // Desktop-instance metadata belongs to Claude sessions only. Clear a stale instance scope when
+  // switching providers so "Codex" or "OpenCode" cannot appear empty for an invisible old filter.
+  if (source !== 'all' && source !== 'claude' && sessionInstanceFilter.value) {
+    sessionInstanceFilter.value = ''
+    return
+  }
+  refreshSessions()
+})
 
 /** The ⋯ trigger reports "something is narrowing this list". Otherwise a filter set once and
  *  forgotten reads as an empty/short list with no visible cause, now that the controls are a
@@ -112,10 +125,19 @@ const filtersActive = computed(
   () =>
     !!sessionInstanceFilter.value ||
     sessionArchivedScope.value !== 'hide' ||
+    sessionSourceFilter.value !== 'all' ||
     // Only a WIDENED window counts. 24h is the default, so flagging it would light the trigger up
     // permanently and the signal would stop meaning anything.
     sessionPeriod.value !== '24h',
 )
+const SOURCE_LABEL: Record<SessionSourceScope, string> = {
+  all: 'sessions.sourceAll',
+  claude: 'sessions.sourceClaude',
+  codex: 'sessions.sourceCodex',
+  opencode: 'sessions.sourceOpenCode',
+}
+const sourceFilterLabel = computed(() => t(SOURCE_LABEL[sessionSourceFilter.value]))
+const sourceLabel = (source: SessionSource) => t(SOURCE_LABEL[source])
 const instanceFilterLabel = computed(() => {
   const v = sessionInstanceFilter.value
   if (!v) return t('sessions.instanceAll')
@@ -147,7 +169,7 @@ async function setDone(s: SessionSummary, done: boolean) {
   const prev = s.done
   s.done = done // optimistic: the row marks instantly, the write is a formality
   try {
-    await api.setSessionDone(s.session_id, done)
+    await api.setSessionDone(s.session_id, s.source, done)
   } catch {
     s.done = prev
     toast.error(t('sessions.markDoneFailed'))
@@ -159,10 +181,9 @@ async function clearDoneMarks() {
   await Promise.all(sessions.value.filter((s) => s.done).map((s) => setDone(s, false)))
 }
 
-const sessionFileUrl = api.sessionFileUrl
-async function openFile(id: string) {
+async function openFile(session: SessionSummary) {
   try {
-    const r = await api.openSessionFile(id)
+    const r = await api.openSessionFile(session.session_id, session.source)
     if (!r.ok) toast.error(t('sessions.openFileFailed'))
   } catch {
     toast.error(t('sessions.openFileFailed'))
@@ -173,10 +194,10 @@ async function openFile(id: string) {
 // It reports the name it staged, because that name (the session title, not the uuid) is the whole
 // point and is worth confirming before the user pastes somewhere.
 const copyingFile = ref(false)
-async function copyFile(id: string) {
+async function copyFile(session: SessionSummary) {
   copyingFile.value = true
   try {
-    const r = await api.copySessionFile(id)
+    const r = await api.copySessionFile(session.session_id, session.source)
     if (r.ok) toast.success(t('sessions.copyFileDone', { name: r.filename ?? '' }))
     else if (r.reason === 'unsupported') toast.error(t('sessions.copyFileUnsupported'))
     else toast.error(t('sessions.copyFileFailed'))
@@ -187,9 +208,9 @@ async function copyFile(id: string) {
   }
 }
 
-async function copyFileLocation(id: string) {
+async function copyFileLocation(session: SessionSummary) {
   try {
-    const { path } = await api.getSessionFileLocation(id)
+    const { path } = await api.getSessionFileLocation(session.session_id, session.source)
     await navigator.clipboard.writeText(path)
     toast.success(t('sessions.copyFileLocationDone'))
   } catch {
@@ -199,6 +220,7 @@ async function copyFileLocation(id: string) {
 
 const search = ref('')
 const selectedId = ref<string | null>(null)
+const selectedSource = ref<SessionSource | null>(null)
 const tail = ref<TailResult | null>(null)
 const tailLoading = ref(false)
 // verbose mode: also show tool_use / tool_result events (off = responses only)
@@ -282,6 +304,7 @@ async function runBodySearch() {
       regex: advancedRegex.value,
       caseSensitive: advancedCaseSensitive.value,
       instance: sessionInstanceFilter.value || undefined,
+      source: sessionSourceFilter.value === 'all' ? undefined : sessionSourceFilter.value,
     })
     bodyResults.value = results
     bodySearchQueryUsed.value = q
@@ -301,8 +324,8 @@ function exitBodySearch() {
 }
 
 /** Jump from a body-search hit to the full transcript, same as clicking it in the plain list. */
-function selectFromBodyResult(r: SessionSearchResult) {
-  const s = sessions.value.find((x) => x.session_id === r.session_id)
+async function selectFromBodyResult(r: SessionSearchResult) {
+  const s = sessions.value.find((x) => x.session_id === r.session_id && x.source === r.source)
   if (s) {
     exitBodySearch()
     select(s)
@@ -312,7 +335,16 @@ function selectFromBodyResult(r: SessionSearchResult) {
   // open the transcript directly by id so the hit isn't a dead end.
   exitBodySearch()
   selectedId.value = r.session_id
-  loadTail()
+  selectedSource.value = r.source
+  selected.value = null
+  void loadTail()
+  try {
+    const summary = await api.getSession(r.session_id, r.source)
+    if (selectedId.value === r.session_id && selectedSource.value === r.source)
+      selected.value = summary
+  } catch {
+    toast.error(t('sessions.searchFailed'))
+  }
 }
 
 // Last-known summary, not a bare find(): an actively-written session can drop out of
@@ -320,13 +352,17 @@ function selectFromBodyResult(r: SessionSearchResult) {
 // transcript and yank the shell width. Keep showing what we knew until it reappears.
 const selected = ref<SessionSummary | null>(null)
 watch(
-  [sessions, selectedId],
+  [sessions, selectedId, selectedSource],
   () => {
     if (!selectedId.value) {
       selected.value = null
       return
     }
-    const s = sessions.value.find((x) => x.session_id === selectedId.value)
+    const s = sessions.value.find(
+      (x) =>
+        x.session_id === selectedId.value &&
+        (!selectedSource.value || x.source === selectedSource.value),
+    )
     if (s) selected.value = s
   },
   { immediate: true },
@@ -378,14 +414,18 @@ const chatEl = ref<HTMLElement | null>(null)
 
 async function loadTail(opts: { silent?: boolean } = {}) {
   const id = selectedId.value
-  if (!id) return
+  const source = selectedSource.value
+  if (!id || !source) return
   // measured BEFORE the fetch: whether the reader was already at the conversation's end
   const el = chatEl.value
   const nearBottom = !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120
   if (!opts.silent) tailLoading.value = true
   try {
-    const r = await api.getTail(id, { limit: 40, textOnly: !showTools.value })
-    if (selectedId.value !== id) return // selection moved on while we fetched
+    const r = await api.getTail(id, source, {
+      limit: 40,
+      textOnly: !showTools.value,
+    })
+    if (selectedId.value !== id || selectedSource.value !== source) return
     tail.value = r
   } catch {
     if (!opts.silent) tail.value = null
@@ -400,6 +440,7 @@ async function loadTail(opts: { silent?: boolean } = {}) {
 
 function select(s: SessionSummary) {
   selectedId.value = s.session_id
+  selectedSource.value = s.source
   loadTail()
 }
 
@@ -410,8 +451,9 @@ watch(showTools, () => loadTail())
 // disk; while one is active, poll so the reply streams into view.
 const runningRunId = computed(
   () =>
-    queue.value.find((q) => q.session_id === selectedId.value && q.status === 'running')?.id ??
-    null,
+    (selectedSource.value === 'claude'
+      ? queue.value.find((q) => q.session_id === selectedId.value && q.status === 'running')?.id
+      : null) ?? null,
 )
 let tailPollTimer: number | undefined
 watch(runningRunId, (id, oldId) => {
@@ -424,19 +466,23 @@ onBeforeUnmount(() => window.clearInterval(tailPollTimer))
 // --- multi-select: pick several sessions, message them all at once ------------
 const selectMode = ref(false)
 const checkedIds = ref<Set<string>>(new Set())
-const isChecked = (s: SessionSummary) => checkedIds.value.has(s.session_id)
+const sessionKey = (s: Pick<SessionSummary, 'source' | 'session_id'>) =>
+  `${s.source}:${s.session_id}`
+const isChecked = (s: SessionSummary) => checkedIds.value.has(sessionKey(s))
 function toggleSelectMode() {
   selectMode.value = !selectMode.value
   if (!selectMode.value) checkedIds.value = new Set()
 }
 function toggleChecked(s: SessionSummary) {
+  if (s.source !== 'claude') return
   const next = new Set(checkedIds.value)
-  if (next.has(s.session_id)) next.delete(s.session_id)
-  else next.add(s.session_id)
+  const key = sessionKey(s)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
   checkedIds.value = next
 }
 function checkAllFiltered() {
-  checkedIds.value = new Set(filtered.value.map((s) => s.session_id))
+  checkedIds.value = new Set(filtered.value.filter((s) => s.source === 'claude').map(sessionKey))
 }
 function rowClick(s: SessionSummary) {
   if (selectMode.value) toggleChecked(s)
@@ -446,10 +492,10 @@ function rowClick(s: SessionSummary) {
 const composerTargets = computed<ComposerTarget[]>(() => {
   if (selectMode.value)
     return sessions.value
-      .filter((s) => checkedIds.value.has(s.session_id))
+      .filter((s) => s.source === 'claude' && checkedIds.value.has(sessionKey(s)))
       .map((s) => ({ session_id: s.session_id, title: s.title, cwd: s.cwd }))
   const s = selected.value
-  return s ? [{ session_id: s.session_id, title: s.title, cwd: s.cwd }] : []
+  return s?.source === 'claude' ? [{ session_id: s.session_id, title: s.title, cwd: s.cwd }] : []
 })
 
 function onComposerSent(mode: 'now' | 'queued') {
@@ -603,6 +649,26 @@ function copy(text: string) {
 
                   <DropdownMenuSub>
                     <DropdownMenuSubTrigger>
+                      <MessagesSquare />
+                      {{ $t('sessions.filterSource') }}
+                      <span class="ml-auto max-w-24 truncate pl-2 text-[11px] text-muted-foreground">
+                        {{ sourceFilterLabel }}
+                      </span>
+                    </DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent class="w-52">
+                      <DropdownMenuRadioGroup v-model="sessionSourceFilter">
+                        <DropdownMenuRadioItem value="all">{{ $t('sessions.sourceAll') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="claude">{{ $t('sessions.sourceClaude') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="codex">{{ $t('sessions.sourceCodex') }}</DropdownMenuRadioItem>
+                        <DropdownMenuRadioItem value="opencode">{{ $t('sessions.sourceOpenCode') }}</DropdownMenuRadioItem>
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+
+                  <DropdownMenuSub
+                    :disabled="sessionSourceFilter === 'codex' || sessionSourceFilter === 'opencode'"
+                  >
+                    <DropdownMenuSubTrigger>
                       <Boxes />
                       {{ $t('sessions.filterInstance') }}
                       <span class="ml-auto max-w-24 truncate pl-2 text-[11px] text-muted-foreground">
@@ -725,7 +791,7 @@ function copy(text: string) {
             </p>
             <button
               v-for="r in bodyResults"
-              :key="r.session_id"
+              :key="`${r.source}:${r.session_id}`"
               class="mb-1.5 w-full rounded-lg border border-transparent px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-accent/50"
               @click="selectFromBodyResult(r)"
             >
@@ -733,6 +799,9 @@ function copy(text: string) {
                 <span class="line-clamp-1 min-w-0 flex-1 font-mono text-xs text-muted-foreground">
                   {{ baseName(r.cwd) }} · {{ shortId(r.session_id) }}
                 </span>
+                <Badge variant="outline" class="shrink-0 text-[10px]">
+                  {{ sourceLabel(r.source) }}
+                </Badge>
                 <span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
                   {{ $t('sessions.matchCount', { n: r.match_count }) }}
                 </span>
@@ -769,7 +838,7 @@ function copy(text: string) {
                  first selecting it (selecting would load a transcript the user never asked for).
                  The menu content only mounts while open, so the per-row cost is a reka root, not a
                  rendered menu. -->
-            <ContextMenu v-for="s in filtered" :key="s.session_id">
+            <ContextMenu v-for="s in filtered" :key="`${s.source}:${s.session_id}`">
               <ContextMenuTrigger as-child>
                 <button
                   class="mb-1.5 w-full rounded-lg border px-3 py-2.5 text-left transition-colors"
@@ -777,7 +846,9 @@ function copy(text: string) {
                     // Selected is a RAISED GREY, not an accent tint. bg-primary/10 composited to a
                     // maroon (#352626) against the dark ground, which read as a colour wash rather
                     // than a selection. Ladder in the sidebar: rest → hover (accent/50) → selected.
-                    (selectMode ? isChecked(s) : s.session_id === selectedId)
+                    (selectMode
+                      ? isChecked(s)
+                      : s.session_id === selectedId && s.source === selectedSource)
                       ? 'border-border bg-accent'
                       : 'border-transparent hover:border-border hover:bg-accent/50',
                     // done rows stay in place and stay readable; they just stop competing for the eye
@@ -789,7 +860,12 @@ function copy(text: string) {
                     <span
                       v-if="selectMode"
                       class="mt-0.5 grid size-4 shrink-0 place-items-center rounded border transition-colors"
-                      :class="isChecked(s) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'"
+                      :class="[
+                        isChecked(s)
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border',
+                        s.source !== 'claude' ? 'opacity-25' : '',
+                      ]"
                     >
                       <Check v-if="isChecked(s)" class="size-3" />
                     </span>
@@ -803,6 +879,9 @@ function copy(text: string) {
                       :class="s.done ? 'line-through decoration-muted-foreground/40' : ''"
                     >{{ s.title }}</span>
                     <StatusBadge v-if="s.queue_status" :status="s.queue_status" />
+                    <Badge variant="outline" class="shrink-0 text-[10px]">
+                      {{ sourceLabel(s.source) }}
+                    </Badge>
                   </div>
                   <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
                     <span class="inline-flex items-center gap-1"><FolderGit2 class="size-3" />{{ baseName(s.cwd) }}</span>
@@ -828,18 +907,20 @@ function copy(text: string) {
                   <MessagesSquare />
                   {{ $t('sessions.openTranscript') }}
                 </ContextMenuItem>
-                <ContextMenuItem @select="openFile(s.session_id)">
-                  <FileSymlink />
-                  {{ $t('sessions.openFile') }}
-                </ContextMenuItem>
-                <ContextMenuItem :disabled="copyingFile" @select="copyFile(s.session_id)">
-                  <ClipboardCopy />
-                  {{ $t('sessions.copyFile') }}
-                </ContextMenuItem>
-                <ContextMenuItem @select="copyFileLocation(s.session_id)">
-                  <Copy />
-                  {{ $t('sessions.copyFileLocation') }}
-                </ContextMenuItem>
+                <template v-if="s.source !== 'opencode'">
+                  <ContextMenuItem @select="openFile(s)">
+                    <FileSymlink />
+                    {{ $t('sessions.openFile') }}
+                  </ContextMenuItem>
+                  <ContextMenuItem :disabled="copyingFile" @select="copyFile(s)">
+                    <ClipboardCopy />
+                    {{ $t('sessions.copyFile') }}
+                  </ContextMenuItem>
+                  <ContextMenuItem @select="copyFileLocation(s)">
+                    <Copy />
+                    {{ $t('sessions.copyFileLocation') }}
+                  </ContextMenuItem>
+                </template>
                 <ContextMenuSeparator />
                 <ContextMenuItem @select="copy(s.title)">
                   <Copy />
@@ -893,6 +974,9 @@ function copy(text: string) {
               <h2 class="truncate text-base font-semibold">{{ selected.title }}</h2>
               <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                 <span class="font-mono">{{ shortId(selected.session_id) }}</span>
+                <Badge variant="outline" class="text-[10px]">
+                  {{ sourceLabel(selected.source) }}
+                </Badge>
                 <span class="inline-flex items-center gap-1"><FolderGit2 class="size-3" />{{ selected.cwd }}</span>
                 <span class="inline-flex items-center gap-1">
                   <MessagesSquare class="size-3" />{{ tail?.events.length ?? 0 }} {{ $t('sessions.turnsShown') }}
@@ -912,22 +996,30 @@ function copy(text: string) {
                   <Wrench />
                 </Button>
               </IconTooltip>
-              <IconTooltip :label="$t('sessions.openFile')" :description="$t('sessions.openFileHint')">
+              <IconTooltip
+                v-if="selected.source !== 'opencode'"
+                :label="$t('sessions.openFile')"
+                :description="$t('sessions.openFileHint')"
+              >
                 <Button
                   variant="outline"
                   size="sm"
                   :aria-label="$t('sessions.openFile')"
-                  @click="openFile(selected.session_id)"
+                  @click="openFile(selected)"
                 >
                   <FileSymlink />
                 </Button>
               </IconTooltip>
-              <IconTooltip :label="$t('sessions.saveCopy')" :description="$t('sessions.saveCopyHint')">
+              <IconTooltip
+                v-if="selected.source !== 'opencode'"
+                :label="$t('sessions.saveCopy')"
+                :description="$t('sessions.saveCopyHint')"
+              >
                 <Button
                   as="a"
                   variant="outline"
                   size="sm"
-                  :href="sessionFileUrl(selected.session_id)"
+                  :href="api.sessionFileUrl(selected.session_id, selected.source)"
                   :download="safeTranscriptFilename(selected.title, selected.session_id)"
                   :aria-label="$t('sessions.saveCopy')"
                 >
@@ -935,6 +1027,7 @@ function copy(text: string) {
                 </Button>
               </IconTooltip>
               <IconTooltip
+                v-if="selected.source !== 'opencode'"
                 :label="$t('sessions.copyFile')"
                 :description="$t('sessions.copyFileHint')"
               >
@@ -943,12 +1036,13 @@ function copy(text: string) {
                   size="sm"
                   :disabled="copyingFile"
                   :aria-label="$t('sessions.copyFile')"
-                  @click="copyFile(selected.session_id)"
+                  @click="copyFile(selected)"
                 >
                   <ClipboardCopy />
                 </Button>
               </IconTooltip>
               <IconTooltip
+                v-if="selected.source !== 'opencode'"
                 :label="$t('sessions.copyFileLocation')"
                 :description="$t('sessions.copyFileLocationHint')"
               >
@@ -956,7 +1050,7 @@ function copy(text: string) {
                   variant="outline"
                   size="sm"
                   :aria-label="$t('sessions.copyFileLocation')"
-                  @click="copyFileLocation(selected.session_id)"
+                  @click="copyFileLocation(selected)"
                 >
                   <Copy />
                 </Button>

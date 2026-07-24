@@ -6,6 +6,7 @@ import type {
   QueueItem,
   SchedulerState,
   SessionPeriod,
+  SessionSourceScope,
   SessionSummary,
 } from '@/lib/api'
 import * as api from '@/lib/api'
@@ -29,6 +30,8 @@ const sessionArchivedScope = useStorage<ArchivedScope>('ccmanagerui.sessions.arc
 // answers it worse the further back it goes. Applied server-side before the cap, like the scopes
 // above, so a widened window genuinely reaches further rather than reshuffling the same 200 rows.
 const sessionPeriod = useStorage<SessionPeriod>('ccmanagerui.sessions.period', '24h')
+// Provider scope for the unified local conversation list.
+const sessionSourceFilter = useStorage<SessionSourceScope>('ccmanagerui.sessions.source', 'all')
 // true once the first queue fetch has settled — gates the queue's first-load skeletons
 const queueLoaded = ref(false)
 const lastError = ref<string | null>(null)
@@ -48,6 +51,7 @@ async function refreshSessions() {
       sessionInstanceFilter.value,
       sessionArchivedScope.value,
       sessionPeriod.value,
+      sessionSourceFilter.value,
     ),
   )
   if (r) sessions.value = r
@@ -102,6 +106,7 @@ export function useData() {
     sessionInstanceFilter,
     sessionArchivedScope,
     sessionPeriod,
+    sessionSourceFilter,
     queueLoaded,
     lastError,
     refreshSessions,

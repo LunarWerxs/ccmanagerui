@@ -12,11 +12,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { CLI_INSTANCE_DIALOG_KEYS, type CliDialogNamespace } from '@/lib/instance-dialog-i18n'
 
 const open = defineModel<boolean>('open', { default: false })
 
 const props = defineProps<{
   instanceName: string | null
+  namespace?: CliDialogNamespace
   submitting?: boolean
   errorMessage?: string | null
 }>()
@@ -24,6 +26,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   confirm: [name: string]
 }>()
+const keys = computed(() => CLI_INSTANCE_DIALOG_KEYS[props.namespace ?? 'cliInstances'])
 
 const typed = ref('')
 
@@ -46,30 +49,30 @@ function handleSubmit() {
     <DialogContent>
       <form @submit.prevent="handleSubmit">
         <DialogHeader>
-          <DialogTitle>{{ $t('cliInstances.deleteDialogTitle') }}</DialogTitle>
-          <DialogDescription>{{ $t('cliInstances.deleteDialogDescription') }}</DialogDescription>
+          <DialogTitle>{{ $t(keys.deleteDialogTitle) }}</DialogTitle>
+          <DialogDescription>{{ $t(keys.deleteDialogDescription) }}</DialogDescription>
         </DialogHeader>
 
         <div class="mt-3 flex flex-col gap-1.5">
           <label for="cli-instance-delete-confirm" class="text-xs font-medium text-muted-foreground">
-            {{ $t('cliInstances.deleteDialogLabel', { name: instanceName ?? '' }) }}
+            {{ $t(keys.deleteDialogLabel, { name: instanceName ?? '' }) }}
           </label>
           <Input
             id="cli-instance-delete-confirm"
             v-model="typed"
-            :placeholder="instanceName ?? $t('cliInstances.deleteDialogPlaceholder')"
+            :placeholder="instanceName ?? $t(keys.deleteDialogPlaceholder)"
             :disabled="submitting"
             autofocus
           />
           <p v-if="errorMessage" class="text-xs text-destructive">{{ errorMessage }}</p>
           <p v-else-if="typed && !matches" class="text-xs text-destructive">
-            {{ $t('cliInstances.deleteDialogMismatch') }}
+            {{ $t(keys.deleteDialogMismatch) }}
           </p>
         </div>
 
         <DialogFooter class="mt-4">
           <Button type="submit" variant="destructive" :disabled="submitting || !matches">
-            {{ submitting ? $t('cliInstances.deleteDialogDeleting') : $t('cliInstances.deleteDialogSubmit') }}
+            {{ submitting ? $t(keys.deleteDialogDeleting) : $t(keys.deleteDialogSubmit) }}
           </Button>
         </DialogFooter>
       </form>

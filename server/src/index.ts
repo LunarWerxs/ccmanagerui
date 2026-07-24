@@ -52,6 +52,13 @@ import {
   renameCliInstance,
   setCliInstanceUsage,
 } from './core/cli-instances'
+import {
+  createCodexInstance,
+  deleteCodexInstance,
+  launchCodexInstance,
+  listCodexInstances,
+  renameCodexInstance,
+} from './core/codex-instances'
 import { detectDesktopInstall } from './core/desktop-install'
 import { setInstanceMeta } from './core/instance-meta'
 import {
@@ -101,7 +108,7 @@ import {
 import { openPortableWindow } from './portable-window.mjs'
 import { schedulerState, setSchedulerEnabled } from './scheduler'
 import { searchSessionBodies } from './session-search'
-import { getSession, listSessions } from './sessions'
+import { getSession, listSessions, sessionMarkKey } from './sessions'
 import { skipSingleInstanceGuard } from './single-instance'
 import { findTranscript, tailTranscript } from './transcript'
 import { buildTranscriptOpenArgv, resolveEditor } from './transcript-open'
@@ -109,10 +116,12 @@ import {
   type Account,
   type ArchivedScope,
   isSessionPeriod,
+  isSessionSource,
   type MonitorView,
   periodCutoffMs,
   type QueueItem,
   type SessionPeriod,
+  type SessionSource,
   type UsageCheckResult,
 } from './types'
 import { applyUpdate, checkForUpdate } from './updater'
@@ -404,30 +413,37 @@ app.get('/api/sessions', async (c) => {
   // window rather than quietly widening the list to everything on disk.
   const rawPeriod = c.req.query('period')
   const period: SessionPeriod = isSessionPeriod(rawPeriod) ? rawPeriod : '24h'
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : 'all'
   return c.json(
     await listSessions(
       limit ? Number(limit) : 200,
       instance || undefined,
       scope,
       periodCutoffMs(period),
+      source,
     ),
   )
 })
 app.get('/api/sessions/:id', async (c) => {
-  const s = await getSession(c.req.param('id'))
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
+  const s = await getSession(c.req.param('id'), source)
   return s ? c.json(s) : c.json({ error: 'session not found' }, 404)
 })
 // The user's own mark (distinct from Claude Desktop's read-only isArchived, surfaced via
 // include_archived above). Mark only: never used to filter listSessions.
 app.post('/api/sessions/:id/done', async (c) => {
   const id = c.req.param('id')
+  const rawSource = c.req.query('source')
+  const source: SessionSource = isSessionSource(rawSource) ? rawSource : 'claude'
   const body = await jsonBody(c)
   const done = body.done === true
   db.query(
     'insert into session_marks (session_id, done, updated_at) values (?, ?, ?) ' +
       'on conflict(session_id) do update set done = ?, updated_at = ?',
-  ).run(id, done ? 1 : 0, Date.now(), done ? 1 : 0, Date.now())
-  return c.json({ session_id: id, done })
+  ).run(sessionMarkKey(source, id), done ? 1 : 0, Date.now(), done ? 1 : 0, Date.now())
+  return c.json({ session_id: id, source, done })
 })
 // Download a copy of the raw transcript (browser save-as; works over remote too). The filename is
 // the session TITLE, not the raw id — the same safeTranscriptFilename the SPA's <a download> uses,
@@ -436,9 +452,16 @@ app.post('/api/sessions/:id/done', async (c) => {
 // and the sessions list nearly always warmed it first); fall back to the id if the lookup misses.
 app.get('/api/sessions/:id/file', async (c) => {
   const id = c.req.param('id')
-  const tf = findTranscript(id)
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
+  const tf = findTranscript(id, source)
   if (!tf) return c.json({ error: 'session not found' }, 404)
-  const session = await getSession(id)
+  if (tf.source === 'opencode')
+    return c.json(
+      { error: 'OpenCode sessions are stored in a shared database, not a raw file' },
+      409,
+    )
+  const session = await getSession(id, tf.source)
   const filename = safeTranscriptFilename(session?.title, tf.session_id)
   return new Response(Bun.file(tf.path), {
     headers: {
@@ -451,16 +474,25 @@ app.get('/api/sessions/:id/file', async (c) => {
 // Resolve it here rather than reconstructing it in the browser: project-folder encoding is lossy,
 // and findTranscript also handles the rare case where the same session id exists in two folders.
 app.get('/api/sessions/:id/file-location', (c) => {
-  const tf = findTranscript(c.req.param('id'))
-  return tf ? c.json({ path: tf.path }) : c.json({ error: 'session not found' }, 404)
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
+  const tf = findTranscript(c.req.param('id'), source)
+  if (!tf) return c.json({ error: 'session not found' }, 404)
+  if (tf.source === 'opencode')
+    return c.json({ error: 'OpenCode sessions are stored in a shared database' }, 409)
+  return c.json({ path: tf.path })
 })
 // Open the transcript in an editor (loopback daemon: same posture as the portable-window spawn;
 // the file opens on the machine the daemon runs on). .jsonl has no OS file association, so handing
 // this to the bare default handler would pop Windows' "Pick an app" dialog instead of opening -
 // buildTranscriptOpenArgv names an editor explicitly so that never happens (transcript-open.ts).
 app.post('/api/sessions/:id/open-file', (c) => {
-  const tf = findTranscript(c.req.param('id'))
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
+  const tf = findTranscript(c.req.param('id'), source)
   if (!tf) return c.json({ error: 'session not found' }, 404)
+  if (tf.source === 'opencode')
+    return c.json({ error: 'OpenCode sessions are stored in a shared database' }, 409)
   const cmd = buildTranscriptOpenArgv(
     process.platform,
     tf.path,
@@ -491,14 +523,18 @@ app.post('/api/sessions/:id/open-file', (c) => {
  */
 app.post('/api/sessions/:id/copy-file', async (c) => {
   const id = c.req.param('id')
-  const tf = findTranscript(id)
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
+  const tf = findTranscript(id, source)
   if (!tf) return c.json({ error: 'session not found' }, 404)
+  if (tf.source === 'opencode')
+    return c.json({ error: 'OpenCode sessions are stored in a shared database' }, 409)
   if (process.platform !== 'win32' && process.platform !== 'darwin')
     // Linux has no cross-desktop file-clipboard convention (GNOME and KDE disagree on the private
     // MIME type), so there is nothing honest to spawn. Say so rather than silently no-op.
     return c.json({ ok: false, reason: 'unsupported' }, 501)
 
-  const session = await getSession(id)
+  const session = await getSession(id, tf.source)
   const staged = join(CLIPBOARD_DIR, safeTranscriptFilename(session?.title, tf.session_id))
   try {
     rmSync(CLIPBOARD_DIR, { recursive: true, force: true })
@@ -547,11 +583,17 @@ app.post('/api/sessions/:id/copy-file', async (c) => {
 app.get('/api/sessions/:id/tail', async (c) => {
   const limit = c.req.query('limit')
   const textOnly = c.req.query('textOnly')
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
   return c.json(
-    await tailTranscript(c.req.param('id'), {
-      limit: limit ? Number(limit) : 40,
-      textOnly: textOnly === '1' || textOnly === 'true',
-    }),
+    await tailTranscript(
+      c.req.param('id'),
+      {
+        limit: limit ? Number(limit) : 40,
+        textOnly: textOnly === '1' || textOnly === 'true',
+      },
+      source,
+    ),
   )
 })
 // Advanced BODY search (streams every transcript file, substring or regex); deliberately a
@@ -563,8 +605,10 @@ app.get('/api/sessions/search', async (c) => {
   const regex = c.req.query('regex') === '1'
   const caseSensitive = c.req.query('case') === '1'
   const instance = c.req.query('instance') || undefined
+  const rawSource = c.req.query('source')
+  const source = isSessionSource(rawSource) ? rawSource : undefined
   try {
-    return c.json(await searchSessionBodies({ query, regex, caseSensitive, instance }))
+    return c.json(await searchSessionBodies({ query, regex, caseSensitive, instance, source }))
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400)
   }
@@ -1128,6 +1172,37 @@ app.get('/api/cli-instances/:id/usage', async (c) => {
   if (!result) return c.json({ error: 'CLI instance not found' }, 404)
   setCliInstanceUsage(id, result.snapshot)
   return c.json(result)
+})
+
+// --- Codex CLI instances ----------------------------------------------------
+app.get('/api/codex-instances', (c) => c.json(listCodexInstances()))
+app.post('/api/codex-instances', async (c) => {
+  const body = await jsonBody(c)
+  if (typeof body.name !== 'string' || !body.name.trim())
+    return c.json({ error: 'name is required' }, 400)
+  return c.json(createCodexInstance(body.name))
+})
+app.post('/api/codex-instances/:id/launch', async (c) => {
+  const body = await jsonBody(c)
+  return c.json(
+    launchCodexInstance(c.req.param('id'), {
+      model: typeof body.model === 'string' ? body.model : undefined,
+      effort: typeof body.effort === 'string' ? body.effort : undefined,
+    }),
+  )
+})
+app.post('/api/codex-instances/:id/login', (c) =>
+  c.json(launchCodexInstance(c.req.param('id'), { login: true })),
+)
+app.post('/api/codex-instances/:id/rename', async (c) => {
+  const body = await jsonBody(c)
+  if (typeof body.name !== 'string') return c.json({ error: 'name is required' }, 400)
+  return c.json(renameCodexInstance(c.req.param('id'), body.name))
+})
+app.delete('/api/codex-instances/:id', async (c) => {
+  const body = await jsonBody(c)
+  const confirmName = typeof body.confirmName === 'string' ? body.confirmName : undefined
+  return c.json(deleteCodexInstance(c.req.param('id'), confirmName))
 })
 
 // --- auto-resume monitor (Feature E) ----------------------------------------

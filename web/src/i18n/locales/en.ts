@@ -3,6 +3,7 @@
 import app from './en/app'
 import builder from './en/builder'
 import cliInstances from './en/cliInstances'
+import codexInstances from './en/codexInstances'
 import composer from './en/composer'
 import instances from './en/instances'
 import queue from './en/queue'
@@ -15,6 +16,7 @@ export default {
   app,
   builder,
   cliInstances,
+  codexInstances,
   composer,
   instances,
   queue,

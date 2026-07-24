@@ -4,8 +4,9 @@
 // its own module so the fast/simple metadata list path (sessions.ts, GET /api/sessions) stays
 // completely untouched; this is a separate, slower, opt-in code path.
 import { instanceSessionMap } from './instance-sessions'
-import { eventToTailEvents, listTranscriptFiles, type TranscriptFile } from './transcript'
-import type { SessionSearchResult } from './types'
+import { listOpenCodeSearchEvents } from './opencode-sessions'
+import { eventToTailEventsForSource, listTranscriptFiles, type TranscriptFile } from './transcript'
+import type { SessionSearchResult, SessionSource } from './types'
 
 export type { SessionSearchResult }
 
@@ -15,6 +16,8 @@ export interface SearchOptions {
   caseSensitive?: boolean
   /** Scope to one instance dir name, "default", or "other"; same semantics as listSessions(). */
   instance?: string
+  /** Scope to one provider. Omitted means all supported stores. */
+  source?: SessionSource
   /** Max sessions returned, newest-first. */
   limit?: number
   /** Max snippets collected per session before moving on. */
@@ -87,10 +90,10 @@ async function* streamLines(path: string): AsyncGenerator<string> {
 }
 
 /** Extracts the displayable text for one parsed JSONL event (same filter used for the
- *  transcript view, via eventToTailEvents), so body search matches what's actually shown,
+ *  transcript view, via the provider-aware event converter), so body search matches what's shown,
  *  not raw JSON noise like tool-call ids or base64. */
-function displayableText(ev: any): string[] {
-  const tes = eventToTailEvents(ev)
+function displayableText(tf: TranscriptFile, ev: any): string[] {
+  const tes = eventToTailEventsForSource(tf.source, ev)
   return tes.map((e) => e.text).filter(Boolean)
 }
 
@@ -116,8 +119,9 @@ async function searchOneFile(
         continue
       }
       if (!cwd && typeof ev?.cwd === 'string') cwd = ev.cwd
+      if (!cwd && typeof ev?.payload?.cwd === 'string') cwd = ev.payload.cwd
 
-      const texts = displayableText(ev)
+      const texts = displayableText(tf, ev)
       for (const text of texts) {
         const idx = matcher(text)
         if (idx === -1) continue
@@ -134,12 +138,44 @@ async function searchOneFile(
   if (matchCount === 0) return null
   return {
     session_id: tf.session_id,
+    source: tf.source,
     cwd: cwd || tf.project,
     project: tf.project,
     match_count: matchCount,
     truncated: snippets.length < matchCount,
     snippets,
   }
+}
+
+function searchOpenCode(
+  matcher: Matcher,
+  perFileLimit: number,
+  limit: number,
+): SessionSearchResult[] {
+  const found = new Map<string, SessionSearchResult>()
+  for (const event of listOpenCodeSearchEvents()) {
+    let result = found.get(event.session_id)
+    const idx = matcher(event.text)
+    if (idx === -1) continue
+    if (!result) {
+      if (found.size >= limit) continue
+      result = {
+        session_id: event.session_id,
+        source: 'opencode',
+        cwd: event.cwd,
+        project: event.project,
+        match_count: 0,
+        truncated: false,
+        snippets: [],
+      }
+      found.set(event.session_id, result)
+    }
+    result.match_count++
+    if (result.snippets.length < perFileLimit)
+      result.snippets.push(snippetAround(event.text, idx, SNIPPET_LEN))
+    result.truncated = result.snippets.length < result.match_count
+  }
+  return [...found.values()]
 }
 
 /** A tiny fixed-size worker pool: runs `items` through `fn` with at most `concurrency` in
@@ -178,31 +214,47 @@ export async function searchSessionBodies(opts: SearchOptions): Promise<SessionS
   const budgetMs = opts.budgetMs ?? DEFAULT_BUDGET_MS
   const deadline = performance.now() + budgetMs
 
-  let files = listTranscriptFiles()
+  let files = listTranscriptFiles().filter((file) => file.source !== 'opencode')
+  if (opts.source) files = files.filter((file) => file.source === opts.source)
   if (opts.instance) {
     const imap = instanceSessionMap()
     files = files.filter((f) =>
       opts.instance === 'other'
-        ? !imap.has(f.session_id)
-        : imap.get(f.session_id) === opts.instance,
+        ? f.source === 'claude' && !imap.has(f.session_id)
+        : f.source === 'claude' && imap.get(f.session_id) === opts.instance,
     )
   }
   files = files.slice().sort((a, b) => b.mtime_ms - a.mtime_ms)
 
   const found: SessionSearchResult[] = []
+  const includeOpenCode = (!opts.source || opts.source === 'opencode') && !opts.instance
+  if (includeOpenCode) found.push(...searchOpenCode(matcher, perFileLimit, limit))
   // Process in newest-first batches so we can stop dispatching more work once `limit` is hit,
   // without giving up the pool's cross-file concurrency within each batch.
   const batchSize = CONCURRENCY * 3
+  let fileFound = 0
   for (let start = 0; start < files.length; start += batchSize) {
-    if (performance.now() > deadline || found.length >= limit) break
+    if (performance.now() > deadline || fileFound >= limit) break
     const batch = files.slice(start, start + batchSize)
     const results = await pooledMap(batch, CONCURRENCY, (tf) =>
       searchOneFile(tf, matcher, perFileLimit, deadline),
     )
     for (const r of results) {
-      if (r) found.push(r)
+      if (r) {
+        found.push(r)
+        fileFound++
+      }
     }
   }
 
-  return found.slice(0, limit)
+  const activity = new Map(
+    listTranscriptFiles().map((file) => [`${file.source}:${file.session_id}`, file.mtime_ms]),
+  )
+  return found
+    .sort(
+      (a, b) =>
+        (activity.get(`${b.source}:${b.session_id}`) ?? 0) -
+        (activity.get(`${a.source}:${a.session_id}`) ?? 0),
+    )
+    .slice(0, limit)
 }

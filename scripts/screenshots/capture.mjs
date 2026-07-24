@@ -95,8 +95,8 @@ const SHOTS = [
     name: 'instances',
     viewport: [1060, 560],
     steps: [{ eval: clickIn('nav', 'Instances'), wait: 3500 }],
-    // Both tables present, and the account/plan cells resolved.
-    expect: `document.querySelectorAll('table').length === 2 && /Max 20/.test(document.body.innerText)`,
+    // All three instance tables present, and both Claude account data and Codex isolation render.
+    expect: `document.querySelectorAll('table').length === 3 && /Max 20/.test(document.body.innerText) && /CODEX_HOME/.test(document.body.innerText)`,
   },
   {
     name: 'queue',

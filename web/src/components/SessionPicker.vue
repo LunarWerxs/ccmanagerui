@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Searchable session picker for the run builder — replaces the raw "paste a UUID" box.
-// Reads the same shared sessions store the sidebar uses (already sorted most-recent-first
-// server-side), filters it like SessionsView's search, and shows the friendly title with
+// Receives Claude sessions from the run builder (already sorted most-recent-first server-side),
+// filters them like SessionsView's search, and shows the friendly title with
 // the opaque id tucked behind an info affordance you can click to copy.
 //
 // Single or multi select via the `multiple` prop. v-model is a string[] either way (one
@@ -14,15 +14,16 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { useData } from '@/composables/useData'
 import type { SessionSummary } from '@/lib/api'
 import { baseName, shortId, timeAgo } from '@/lib/format'
 
-const props = withDefaults(defineProps<{ multiple?: boolean }>(), { multiple: false })
+const props = withDefaults(defineProps<{ multiple?: boolean; sessions?: SessionSummary[] }>(), {
+  multiple: false,
+  sessions: () => [],
+})
 const selected = defineModel<string[]>({ default: () => [] })
 
 const { t } = useI18n()
-const { sessions } = useData()
 
 const open = ref(false)
 const search = ref('')
@@ -33,8 +34,8 @@ let copiedTimer: number | undefined
 // pre-sorted (server: most-recently-active first), so no client re-sort.
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase()
-  if (!q) return sessions.value
-  return sessions.value.filter(
+  if (!q) return props.sessions
+  return props.sessions.filter(
     (s) =>
       s.title.toLowerCase().includes(q) ||
       s.cwd.toLowerCase().includes(q) ||
@@ -42,7 +43,7 @@ const filtered = computed(() => {
   )
 })
 
-const byId = computed(() => new Map(sessions.value.map((s) => [s.session_id, s])))
+const byId = computed(() => new Map(props.sessions.map((s) => [s.session_id, s])))
 const selectedSessions = computed(() =>
   selected.value.map((id) => byId.value.get(id)).filter((s): s is SessionSummary => !!s),
 )

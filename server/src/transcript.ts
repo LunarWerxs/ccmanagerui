@@ -1,7 +1,13 @@
 import { statSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { CLAUDE_PROJECTS_ROOT } from './config'
-import type { TailEvent, TailResult } from './types'
+import {
+  CLAUDE_PROJECTS_ROOT,
+  CODEX_ARCHIVED_SESSIONS_ROOT,
+  CODEX_SESSIONS_ROOT,
+  OPENCODE_DB_PATH,
+} from './config'
+import { listOpenCodeSessions, readOpenCodeSession } from './opencode-sessions'
+import type { SessionSource, TailEvent, TailResult } from './types'
 
 // --- cwd folder-name encoding (forward only; reverse is lossy) --------------
 
@@ -22,10 +28,16 @@ export function decodeProjectKey(key: string): string {
 
 export interface TranscriptFile {
   session_id: string
+  source: SessionSource
   path: string
   project: string
   mtime_ms: number
   size_bytes: number
+  archived: boolean
+  /** OpenCode already stores these as indexed columns, so metadata scans need not re-derive them. */
+  title?: string
+  cwd?: string
+  created_at?: number | null
 }
 
 let cache: { at: number; files: TranscriptFile[] } | null = null
@@ -36,8 +48,8 @@ export function listTranscriptFiles(force = false): TranscriptFile[] {
   if (!force && cache && now - cache.at < TTL_MS) return cache.files
 
   const files: TranscriptFile[] = []
-  const glob = new Bun.Glob('*/*.jsonl')
-  for (const rel of glob.scanSync({ cwd: CLAUDE_PROJECTS_ROOT, onlyFiles: true })) {
+  const claudeGlob = new Bun.Glob('*/*.jsonl')
+  for (const rel of claudeGlob.scanSync({ cwd: CLAUDE_PROJECTS_ROOT, onlyFiles: true })) {
     const path = join(CLAUDE_PROJECTS_ROOT, rel)
     let st: ReturnType<typeof statSync>
     try {
@@ -48,18 +60,73 @@ export function listTranscriptFiles(force = false): TranscriptFile[] {
     const project = rel.split(/[\\/]/)[0]
     files.push({
       session_id: basename(rel).replace(/\.jsonl$/, ''),
+      source: 'claude',
       path,
       project,
       mtime_ms: st.mtimeMs,
       size_bytes: st.size,
+      archived: false,
     })
   }
-  cache = { at: now, files }
-  return files
+
+  const addCodexRoot = (root: string, archived: boolean) => {
+    const glob = new Bun.Glob('**/rollout-*.jsonl')
+    for (const rel of glob.scanSync({ cwd: root, onlyFiles: true })) {
+      const path = join(root, rel)
+      let st: ReturnType<typeof statSync>
+      try {
+        st = statSync(path)
+      } catch {
+        continue
+      }
+      const name = basename(rel).replace(/\.jsonl$/, '')
+      const id = name.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i)?.[1]
+      files.push({
+        session_id: id ?? name,
+        source: 'codex',
+        path,
+        project: 'codex',
+        mtime_ms: st.mtimeMs,
+        size_bytes: st.size,
+        archived,
+      })
+    }
+  }
+  addCodexRoot(CODEX_SESSIONS_ROOT, false)
+  addCodexRoot(CODEX_ARCHIVED_SESSIONS_ROOT, true)
+
+  for (const session of listOpenCodeSessions()) {
+    files.push({
+      session_id: session.session_id,
+      source: 'opencode',
+      path: OPENCODE_DB_PATH,
+      project: session.project,
+      mtime_ms: session.last_activity_at,
+      size_bytes: session.size_bytes,
+      archived: session.archived,
+      title: session.title,
+      cwd: session.cwd,
+      created_at: session.created_at,
+    })
+  }
+
+  // A moved JSONL can briefly appear in both active and archived roots while filesystem caches
+  // settle. Source + id is the identity; newest wins, matching findTranscript's old behavior.
+  const unique = new Map<string, TranscriptFile>()
+  for (const file of files) {
+    const key = `${file.source}:${file.session_id}`
+    const previous = unique.get(key)
+    if (!previous || file.mtime_ms >= previous.mtime_ms) unique.set(key, file)
+  }
+  const result = [...unique.values()]
+  cache = { at: now, files: result }
+  return result
 }
 
-export function findTranscript(sessionId: string): TranscriptFile | null {
-  const matches = listTranscriptFiles().filter((f) => f.session_id === sessionId)
+export function findTranscript(sessionId: string, source?: SessionSource): TranscriptFile | null {
+  const matches = listTranscriptFiles().filter(
+    (f) => f.session_id === sessionId && (!source || f.source === source),
+  )
   if (matches.length === 0) return null
   // newest wins if a session id appears under multiple project folders
   return matches.reduce((a, b) => (b.mtime_ms > a.mtime_ms ? b : a))
@@ -101,6 +168,79 @@ function stringifyToolResult(content: unknown): string {
   } catch {
     return String(content)
   }
+}
+
+const CODEX_INJECTED_USER_BLOCK =
+  /^\s*<(recommended_plugins|environment_context|app-context|permissions|collaboration_mode|apps_instructions|plugins_instructions|skills_instructions|multi_agent_mode|turn_aborted)\b/i
+
+/** Codex Desktop carries request/runtime context as user-role blocks. They are transport metadata,
+ * not human turns, and must not become titles or transcript bubbles. */
+export function isCodexInjectedUserText(text: string): boolean {
+  return (
+    CODEX_INJECTED_USER_BLOCK.test(text) ||
+    // Codex may deliver a repository's AGENTS.md preamble as a user-role transport message even
+    // though it came from the runtime, not the human. Without this guard it becomes the title.
+    /^\s*#\s*AGENTS\.md instructions for\b/i.test(text)
+  )
+}
+
+/** Convert one Codex rollout item. event_msg mirrors message text for live UI updates, so only
+ * response_item is consumed; reading both would duplicate every visible turn. */
+export function codexEventToTailEvents(ev: any): TailEvent[] {
+  if (ev?.type !== 'response_item') return []
+  const payload = ev?.payload
+  const timestamp: string | null = typeof ev?.timestamp === 'string' ? ev.timestamp : null
+
+  if (payload?.type === 'message') {
+    const role = payload.role
+    if (role !== 'user' && role !== 'assistant') return []
+    const out: TailEvent[] = []
+    const blocks = Array.isArray(payload.content) ? payload.content : []
+    for (const block of blocks) {
+      if (!block || typeof block !== 'object') continue
+      if (block.type !== 'input_text' && block.type !== 'output_text') continue
+      if (typeof block.text !== 'string') continue
+      if (role === 'user' && isCodexInjectedUserText(block.text)) continue
+      const text = compact(block.text)
+      if (!text) continue
+      out.push({
+        role,
+        kind: 'text',
+        text: truncate(text, 6000),
+        tool_name: null,
+        timestamp,
+      })
+    }
+    return out
+  }
+
+  if (payload?.type === 'function_call' || payload?.type === 'custom_tool_call') {
+    const input = compact(stringifyToolResult(payload.arguments ?? payload.input))
+    return [
+      {
+        role: 'assistant',
+        kind: 'tool_use',
+        text: truncate(input, 1200),
+        tool_name: payload.name ?? 'tool',
+        timestamp,
+      },
+    ]
+  }
+  if (payload?.type === 'function_call_output' || payload?.type === 'custom_tool_call_output') {
+    const output = compact(stringifyToolResult(payload.output))
+    return output
+      ? [
+          {
+            role: 'user',
+            kind: 'tool_result',
+            text: truncate(output, 2000),
+            tool_name: null,
+            timestamp,
+          },
+        ]
+      : []
+  }
+  return []
 }
 
 /**
@@ -235,6 +375,10 @@ export function eventToTailEvents(ev: any): TailEvent[] {
   return out
 }
 
+export function eventToTailEventsForSource(source: SessionSource, ev: any): TailEvent[] {
+  return source === 'codex' ? codexEventToTailEvents(ev) : eventToTailEvents(ev)
+}
+
 export interface TailOptions {
   limit?: number
   /** When true, drop tool_use/tool_result and only count text-bearing turns toward the limit. */
@@ -247,17 +391,42 @@ export interface TailOptions {
 export async function tailTranscript(
   sessionId: string,
   opts: TailOptions = {},
+  source?: SessionSource,
 ): Promise<TailResult> {
   const limit = opts.limit ?? 40
   const textOnly = opts.textOnly ?? false
-  const tf = findTranscript(sessionId)
+  const tf = findTranscript(sessionId, source)
   if (!tf) {
     return {
       session_id: sessionId,
+      source: source ?? 'claude',
       title: opts.title ?? sessionId,
       cwd: opts.cwd ?? '',
       events: [],
       error: 'transcript not found',
+    }
+  }
+  if (tf.source === 'opencode') {
+    const content = readOpenCodeSession(sessionId)
+    if (!content) {
+      return {
+        session_id: sessionId,
+        source: tf.source,
+        title: opts.title ?? tf.title ?? sessionId,
+        cwd: opts.cwd ?? tf.cwd ?? '',
+        events: [],
+        error: 'transcript not found',
+      }
+    }
+    const events = (
+      textOnly ? content.events.filter((event) => event.kind === 'text') : content.events
+    ).slice(-limit)
+    return {
+      session_id: sessionId,
+      source: tf.source,
+      title: opts.title ?? tf.title ?? sessionId,
+      cwd: opts.cwd ?? tf.cwd ?? '',
+      events,
     }
   }
   const raw = await readTailBytes(tf.path, 6 * 1024 * 1024)
@@ -276,7 +445,8 @@ export async function tailTranscript(
       continue
     }
     if (!cwd && typeof ev?.cwd === 'string') cwd = ev.cwd
-    let tes = eventToTailEvents(ev)
+    if (!cwd && typeof ev?.payload?.cwd === 'string') cwd = ev.payload.cwd
+    let tes = eventToTailEventsForSource(tf.source, ev)
     if (textOnly) tes = tes.filter((e) => e.kind === 'text')
     if (tes.length === 0) continue
     collected.push(tes)
@@ -285,5 +455,11 @@ export async function tailTranscript(
 
   const events = collected.reverse().flat()
   if (!title) title = sessionId
-  return { session_id: sessionId, title, cwd: cwd || decodeProjectKey(tf.project), events }
+  return {
+    session_id: sessionId,
+    source: tf.source,
+    title,
+    cwd: cwd || decodeProjectKey(tf.project),
+    events,
+  }
 }

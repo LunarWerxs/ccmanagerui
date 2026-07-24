@@ -25,6 +25,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import CliInstancesSection from '@/components/CliInstancesSection.vue'
+import CodexInstancesSection from '@/components/CodexInstancesSection.vue'
 import CreateInstanceDialog from '@/components/CreateInstanceDialog.vue'
 import DeleteInstanceDialog from '@/components/DeleteInstanceDialog.vue'
 import EditInstanceDialog from '@/components/EditInstanceDialog.vue'
@@ -906,6 +907,7 @@ onUnmounted(() => {
       </Table>
 
       <CliInstancesSection v-if="showCliInstances" />
+      <CodexInstancesSection />
     </div>
 
     <CreateInstanceDialog

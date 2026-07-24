@@ -95,17 +95,29 @@ export const TOOLS: McpEngineTool[] = [
   // --- sessions (read-only) ---------------------------------------------------
   {
     name: 'list_sessions',
-    description: 'List Claude Code sessions discovered on disk, most recently active first.',
+    description:
+      'List local Claude, Codex, and OpenCode sessions, most recently active first. Each row carries its source.',
     inputSchema: S({
       limit: { type: 'number', description: 'Max sessions to return (default 200).' },
+      source: {
+        type: 'string',
+        enum: ['claude', 'codex', 'opencode'],
+        description: 'Optional provider filter.',
+      },
     }),
-    run: (a) => api(`/api/sessions${qs({ limit: a.limit })}`),
+    run: (a) => api(`/api/sessions${qs({ limit: a.limit, source: a.source })}`),
   },
   {
     name: 'get_session',
     description: 'Get one session by id (full summary).',
-    inputSchema: S({ id: { type: 'string' } }, ['id']),
-    run: (a) => api(`/api/sessions/${encodeURIComponent(str(a.id))}`),
+    inputSchema: S(
+      {
+        id: { type: 'string' },
+        source: { type: 'string', enum: ['claude', 'codex', 'opencode'] },
+      },
+      ['id'],
+    ),
+    run: (a) => api(`/api/sessions/${encodeURIComponent(str(a.id))}${qs({ source: a.source })}`),
   },
   {
     name: 'tail_session',
@@ -116,12 +128,13 @@ export const TOOLS: McpEngineTool[] = [
         id: { type: 'string' },
         limit: { type: 'number', description: 'Max turns to return (default 40).' },
         textOnly: { type: 'boolean', description: 'Drop tool_use/tool_result turns, text only.' },
+        source: { type: 'string', enum: ['claude', 'codex', 'opencode'] },
       },
       ['id'],
     ),
     run: (a) =>
       api(
-        `/api/sessions/${encodeURIComponent(str(a.id))}/tail${qs({ limit: a.limit, textOnly: a.textOnly ? '1' : undefined })}`,
+        `/api/sessions/${encodeURIComponent(str(a.id))}/tail${qs({ limit: a.limit, textOnly: a.textOnly ? '1' : undefined, source: a.source })}`,
       ),
   },
 
@@ -450,6 +463,44 @@ export const TOOLS: McpEngineTool[] = [
         headers: JSON_HEADERS,
         body: JSON.stringify({ desktopDir: a.desktopDir ?? null }),
       }),
+  },
+
+  // --- Codex CLI instances ------------------------------------------------------
+  {
+    name: 'list_codex_instances',
+    description: 'List isolated Codex CLI instances (one CODEX_HOME per OpenAI login).',
+    inputSchema: S(),
+    run: () => api('/api/codex-instances'),
+  },
+  {
+    name: 'create_codex_instance',
+    description: "MUTATES: create an isolated CODEX_HOME. Authentication remains the user's step.",
+    inputSchema: S({ name: { type: 'string' } }, ['name']),
+    run: (a) =>
+      api('/api/codex-instances', {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ name: str(a.name) }),
+      }),
+  },
+  {
+    name: 'launch_codex_instance',
+    description: 'MUTATES: open a terminal running this Codex instance.',
+    inputSchema: S({ id: { type: 'string' } }, ['id']),
+    run: (a) =>
+      api(`/api/codex-instances/${encodeURIComponent(str(a.id))}/launch`, {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: '{}',
+      }),
+  },
+  {
+    name: 'codex_instance_login_helper',
+    description:
+      'MUTATES: open `codex login` in a terminal for the user. The daemon never authenticates for them.',
+    inputSchema: S({ id: { type: 'string' } }, ['id']),
+    run: (a) =>
+      api(`/api/codex-instances/${encodeURIComponent(str(a.id))}/login`, { method: 'POST' }),
   },
 
   // --- auto-resume monitor (Feature E) ------------------------------------------

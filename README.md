@@ -2,7 +2,7 @@
 
 <img alt="CC Manager UI. Run, queue and orchestrate Claude: many instances, one dashboard" src=".github/og-image.png" width="820" />
 
-### Every Claude on your machine, in one dashboard
+### Every local AI session, plus your isolated Claude and Codex instances
 
 [**Website**](https://ccmanagerui.github.io) &nbsp;·&nbsp; [Download](https://github.com/LunarWerxs/CCManagerUI/releases) &nbsp;·&nbsp; [Reference](docs/REFERENCE.md) &nbsp;·&nbsp; [Changelog](CHANGELOG.md)
 
@@ -15,10 +15,10 @@
 
 ---
 
-If you run Claude in more than one place, a couple of isolated Desktop instances on different
-accounts, a pile of Claude Code sessions across repos, a terminal or three, nothing shows you all of
-it at once. You alt-tab to remember which account is which, whether a session is still going, and
-what you asked it to do.
+If you run AI tools in more than one place—a couple of isolated Claude Desktop instances on
+different accounts, Claude Code and Codex terminals across repos, or OpenCode CLI/Desktop—nothing
+shows all of that local history at once. You alt-tab to remember which account is which, whether a
+session is still going, and what you asked it to do.
 
 CC Manager UI is one local daemon that reads what is already on your machine and puts it in a single
 browser tab. It is not a Claude client and it does not replace one. It is the dashboard the CLI and
@@ -30,16 +30,18 @@ the desktop app do not come with.
 
 <sub>Screenshots use demo data.</sub>
 
-Every Claude Code transcript on your machine, newest first, searchable, filtered by project or by
-instance or by how recent it is. Click one and you get the whole conversation, live-tailing while it
-runs.
+Claude Code, Codex, and OpenCode conversations on your machine appear together, newest first.
+Filter by provider or recency; Claude sessions can also be filtered by project or Desktop instance.
+Click one to read the conversation and live-tail it while it runs. Codex is read from its rollout
+JSONL files, while OpenCode CLI and Desktop share the same local SQLite session store.
 
-The box at the bottom is the part people tend to like: you can type straight back into a session
-from here, without finding the terminal it belongs to. Pick several sessions and you can send the
-same message to all of them.
+For Claude sessions, the box at the bottom lets you type straight back into a session without
+finding its terminal. Pick several Claude sessions and you can send the same message to all of
+them. Codex and OpenCode support is read-only.
 
-When you want the raw file, there is a button for opening the `.jsonl` in your editor, downloading
-it under its real title, or copying it out.
+When you want a raw Claude or Codex file, there is a button for opening the `.jsonl` in your editor,
+downloading it under its real title, or copying it out. OpenCode conversations are rendered from its
+database rather than exposed as a raw file.
 
 ## Queue work and let it run
 
@@ -72,6 +74,9 @@ You can open, focus, quit, create and delete them from here, give each one a nam
 colour so they stop looking identical, and see your isolated CLI logins alongside the desktop
 instance that shares their account.
 
+The same view can create isolated Codex CLI homes too. Each Codex instance gets its own
+`CODEX_HOME`, with Launch and Log in actions, so work and personal OpenAI logins remain separate.
+
 ## Install
 
 **Download** the bundle for your OS from [Releases](https://github.com/LunarWerxs/CCManagerUI/releases),
@@ -94,12 +99,15 @@ Either way the UI is at <http://localhost:7787>.
 > asks you to type the name.
 
 Nothing leaves your machine. There is no cloud service behind this, no account to sign up for, and
-no telemetry. It reads the files Claude already writes and talks to `localhost`.
+no telemetry. It reads the local stores your tools already write and talks to `localhost`.
 
 ## Requirements
 
 - **[Bun](https://bun.sh)** if running from source.
-- The **`claude` CLI** for dispatch, and/or **Claude Desktop** for instance management.
+- The **`claude` CLI** for dispatch, and/or **Claude Desktop** for Claude instance management.
+- Optional: **Codex** for Codex instance launch/login and local rollout history; **OpenCode** for
+  local OpenCode history. Their sessions appear automatically when their standard local stores
+  exist.
 - **Windows** for the tray launcher. macOS and Linux builds exist and the instance-account code is
   written for them, but they are not verified there yet.
 - **Windows instance management needs the classic Claude Desktop build** (the ~217 MB Squirrel
@@ -108,8 +116,8 @@ no telemetry. It reads the files Claude already writes and talks to `localhost`.
 
 ## For agents
 
-The whole API is exposed over MCP, so Claude Code, Claude Desktop or Cursor can drive sessions, the
-queue, the scheduler and instances directly. Setup and the full tool list are in
+The whole API is exposed over MCP, so any MCP-speaking client can inspect sessions and drive the
+Claude queue, scheduler, and instance managers directly. Setup and the full tool list are in
 [docs/REFERENCE.md](docs/REFERENCE.md).
 
 Agents can also read their own remaining quota before fanning out work, which is the difference

@@ -7,6 +7,7 @@ import type {
   CMActionResult,
   CMDesktopInstall,
   CMInstance,
+  CodexInstance,
   EffortLevel,
   InstanceColorKey,
   InstanceIconKey,
@@ -20,6 +21,8 @@ import type {
   SchedulerState,
   SessionPeriod,
   SessionSearchResult,
+  SessionSource,
+  SessionSourceScope,
   SessionSummary,
   SyncStatus,
   TailResult,
@@ -41,6 +44,7 @@ export type {
   CMActionResult,
   CMDesktopInstall,
   CMInstance,
+  CodexInstance,
   EffortLevel,
   InstanceColorKey,
   InstanceIconKey,
@@ -57,6 +61,8 @@ export type {
   SchedulerState,
   SessionPeriod,
   SessionSearchResult,
+  SessionSource,
+  SessionSourceScope,
   SessionSummary,
   SyncStatus,
   TailEvent,
@@ -111,53 +117,74 @@ export const getSessions = (
   instance = '',
   archived: ArchivedScope = 'hide',
   period: SessionPeriod = '24h',
+  source: SessionSourceScope = 'all',
 ) =>
   j<SessionSummary[]>(
     `/api/sessions?limit=${limit}${instance ? `&instance=${encodeURIComponent(instance)}` : ''}` +
-      `${archived === 'hide' ? '' : `&archived=${archived}`}&period=${period}`,
+      `${archived === 'hide' ? '' : `&archived=${archived}`}&period=${period}` +
+      `${source === 'all' ? '' : `&source=${source}`}`,
   )
+export const getSession = (id: string, source: SessionSource) =>
+  j<SessionSummary>(`/api/sessions/${encodeURIComponent(id)}${sourceQuery(source)}`)
 /** Set the user's own "done" mark on a session (distinct from Claude Desktop's read-only
  *  `archived` flag). Mark only: never affects which sessions getSessions() returns. */
-export const setSessionDone = (id: string, done: boolean) =>
-  j<{ session_id: string; done: boolean }>(`/api/sessions/${encodeURIComponent(id)}/done`, {
-    method: 'POST',
-    body: JSON.stringify({ done }),
-  })
+const sourceQuery = (source: SessionSource) => `?source=${source}`
+
+export const setSessionDone = (id: string, source: SessionSource, done: boolean) =>
+  j<{ session_id: string; source: SessionSource; done: boolean }>(
+    `/api/sessions/${encodeURIComponent(id)}/done${sourceQuery(source)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ done }),
+    },
+  )
 /** Browser download URL for the raw transcript (save-as copy). API_BASE prefix: this
  *  URL lands in a plain <a href>, which unlike j() would otherwise resolve against the
  *  Vite dev origin instead of the daemon. */
-export const sessionFileUrl = (id: string) =>
-  `${API_BASE}/api/sessions/${encodeURIComponent(id)}/file`
+export const sessionFileUrl = (id: string, source: SessionSource) =>
+  `${API_BASE}/api/sessions/${encodeURIComponent(id)}/file${sourceQuery(source)}`
 /** Get the original transcript's absolute path on the daemon's machine. */
-export const getSessionFileLocation = (id: string) =>
-  j<{ path: string }>(`/api/sessions/${encodeURIComponent(id)}/file-location`)
+export const getSessionFileLocation = (id: string, source: SessionSource) =>
+  j<{ path: string }>(`/api/sessions/${encodeURIComponent(id)}/file-location${sourceQuery(source)}`)
 /** Open the transcript on the daemon's machine with the OS default handler. */
-export const openSessionFile = (id: string) =>
-  j<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/open-file`, { method: 'POST' })
+export const openSessionFile = (id: string, source: SessionSource) =>
+  j<{ ok: boolean }>(`/api/sessions/${encodeURIComponent(id)}/open-file${sourceQuery(source)}`, {
+    method: 'POST',
+  })
 /** Put the transcript FILE (not its text) on the clipboard of the daemon's machine, named after the
  *  session. The browser cannot do this — no ClipboardItem type maps to a native file-drop — so it's
  *  a daemon round-trip. `reason: 'unsupported'` comes back on Linux, which has no such convention. */
-export const copySessionFile = (id: string) =>
+export const copySessionFile = (id: string, source: SessionSource) =>
   j<{ ok: boolean; filename?: string; reason?: string }>(
-    `/api/sessions/${encodeURIComponent(id)}/copy-file`,
+    `/api/sessions/${encodeURIComponent(id)}/copy-file${sourceQuery(source)}`,
     { method: 'POST' },
   )
-export const getTail = (id: string, opts: { limit?: number; textOnly?: boolean } = {}) =>
+export const getTail = (
+  id: string,
+  source: SessionSource,
+  opts: { limit?: number; textOnly?: boolean } = {},
+) =>
   j<TailResult>(
-    `/api/sessions/${id}/tail?limit=${opts.limit ?? 40}&textOnly=${opts.textOnly ? '1' : '0'}`,
+    `/api/sessions/${id}/tail?limit=${opts.limit ?? 40}&textOnly=${opts.textOnly ? '1' : '0'}&source=${source}`,
   )
 /** Advanced BODY search: streams every transcript's raw content server-side (substring or
  *  regex, optionally case-sensitive). Deliberately separate from getSessions() above (slower,
  *  opt-in, and never used by the default fast client-side filter). */
 export const searchSessionBodies = (
   query: string,
-  opts: { regex?: boolean; caseSensitive?: boolean; instance?: string } = {},
+  opts: {
+    regex?: boolean
+    caseSensitive?: boolean
+    instance?: string
+    source?: SessionSource
+  } = {},
 ) =>
   j<SessionSearchResult[]>(
     `/api/sessions/search?q=${encodeURIComponent(query)}` +
       `${opts.regex ? '&regex=1' : ''}` +
       `${opts.caseSensitive ? '&case=1' : ''}` +
-      `${opts.instance ? `&instance=${encodeURIComponent(opts.instance)}` : ''}`,
+      `${opts.instance ? `&instance=${encodeURIComponent(opts.instance)}` : ''}` +
+      `${opts.source ? `&source=${opts.source}` : ''}`,
   )
 
 // --- accounts ---------------------------------------------------------------
@@ -399,6 +426,33 @@ export const checkCliInstanceUsage = (id: string, refresh = false) =>
   j<UsageCheckResult>(
     `/api/cli-instances/${encodeURIComponent(id)}/usage${refresh ? '?refresh=1' : ''}`,
   )
+
+// --- Codex CLI instances -----------------------------------------------------
+export const listCodexInstances = () => j<CodexInstance[]>('/api/codex-instances')
+export const createCodexInstance = (name: string) =>
+  j<CMActionResult>('/api/codex-instances', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+export const launchCodexInstance = (id: string, opts: { model?: string; effort?: string } = {}) =>
+  j<CMActionResult>(`/api/codex-instances/${encodeURIComponent(id)}/launch`, {
+    method: 'POST',
+    body: JSON.stringify(opts),
+  })
+export const codexInstanceLogin = (id: string) =>
+  j<CMActionResult>(`/api/codex-instances/${encodeURIComponent(id)}/login`, {
+    method: 'POST',
+  })
+export const renameCodexInstance = (id: string, name: string) =>
+  j<CMActionResult>(`/api/codex-instances/${encodeURIComponent(id)}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  })
+export const deleteCodexInstance = (id: string, confirmName: string) =>
+  j<CMActionResult>(`/api/codex-instances/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ confirmName }),
+  })
 
 // --- auto-resume monitor (Feature E) -------------------------------------------
 export const getMonitor = () => j<MonitorView>('/api/monitor')

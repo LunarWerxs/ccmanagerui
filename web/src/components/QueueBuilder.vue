@@ -39,7 +39,7 @@ const { open, prefill, editItem } = useBuilder()
 const emit = defineEmits<{ created: [] }>()
 
 const { t } = useI18n()
-const { accounts, sessions, refreshQueue } = useData()
+const { accounts, refreshQueue } = useData()
 // Run-as candidates are the instances the user has ALREADY signed in (Instances tab) — that's
 // where accounts get added; the sqlite `accounts` rows are a legacy/headless fallback.
 const { instances, refreshInstances } = useInstances()
@@ -66,7 +66,11 @@ const editing = computed(() => !!editItem.value)
 // Multi-select resume is a create-only convenience: editing acts on one existing item.
 const multiSession = computed(() => !editing.value && !form.new_chat)
 
-const byId = computed(() => new Map(sessions.value.map((s) => [s.session_id, s])))
+// Queue dispatch is intentionally Claude-only even though the Sessions tab can now browse other
+// providers. Keep a dedicated source-scoped list so changing the Sessions provider filter cannot
+// empty this picker or accidentally feed a Codex/OpenCode id to the Claude dispatcher.
+const queueSessions = ref<api.SessionSummary[]>([])
+const byId = computed(() => new Map(queueSessions.value.map((s) => [s.session_id, s])))
 
 /** ISO (UTC) → the local wall-clock string a datetime-local input expects. */
 function toLocalInput(iso: string | null): string {
@@ -113,6 +117,15 @@ watch([open, editItem], ([isOpen]) => {
   // Instances tab — refresh here so the picker is complete even if that tab was never opened.
   void refreshInstances()
   void refreshCliInstances({ silent: true })
+  void api
+    .getSessions(500, '', 'hide', 'all', 'claude')
+    .then((rows) => {
+      queueSessions.value = rows
+    })
+    .catch(() => {
+      // The form still opens and reports any actual submit failure; a transient list refresh
+      // should not discard a previously loaded picker.
+    })
   const it = editItem.value
   if (it) {
     form.new_chat = it.new_chat
@@ -335,7 +348,11 @@ async function submit() {
         <!-- resume: searchable session picker (multi in create, single in edit) -->
         <div v-if="!form.new_chat" class="space-y-1.5">
           <label class="text-xs font-medium text-muted-foreground">{{ $t('builder.sessionToResumeLabel') }}</label>
-          <SessionPicker v-model="form.session_ids" :multiple="multiSession" />
+          <SessionPicker
+            v-model="form.session_ids"
+            :multiple="multiSession"
+            :sessions="queueSessions"
+          />
         </div>
 
         <!-- new chat: title + cwd are the core inputs -->

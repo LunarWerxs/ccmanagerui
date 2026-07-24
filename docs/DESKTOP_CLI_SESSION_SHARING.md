@@ -69,7 +69,7 @@ Practical effect: a session can be actively growing on disk while every signal t
 shows about it (last-activity timestamps, unread indicators) stays frozen at whenever the desktop
 window itself last touched it.
 
-## Unproven: does reopening a desktop chat re-render externally appended turns?
+## Narrowed by source, still unproven in the live UI
 
 Whether closing and reopening an **existing** desktop chat causes it to re-render turns that were
 appended to the transcript from outside Desktop is not established either way. That the transcript
@@ -78,6 +78,13 @@ the data is on disk, not that Desktop's UI re-reads the file when a chat is reop
 that `claude://resume` builds an entirely separate imported copy (see above) is itself weak
 evidence that Desktop may not re-read an existing chat's backing file at all. Do not assume or
 assert "reopening refreshes it" without first re-verifying this directly.
+
+Read-only inspection of Desktop 1.24012.1 narrows the unknown: the main-process
+`LocalSessionManager.getTranscriptWithoutQueryCrashes()` loads the shared transcript from disk for
+a stopped mapped session, rather than relying only on its persisted `messageBuffer`. The backend
+therefore has the current turns available. What remains unproven is whether the renderer requests a
+fresh transcript when an existing chat is closed and reopened; that final claim still needs one
+direct visual observation.
 
 ## Why there is no "this session is stale in Desktop" indicator
 
@@ -89,11 +96,8 @@ index shows" check built on those fields would fire almost constantly, and would
 the user actually looked at the chat (since focusing doesn't update the field the check watches).
 That shape, a warning that fires all the time and never resolves, is worse than no indicator.
 
-## Related, mostly-dead code
+## Related session interfaces
 
-- `DESKTOP_SESSIONS_ROOT` in this repo's `config.ts` (a hardcoded default-install path) is dead
-  code. The correct, general scan lives in `server/src/instance-sessions.ts`, via
-  `defaultClaudeUserDataDir()` + `instancesRoot()` from `server/src/core/paths`.
 - Desktop exposes its own session layer to MCP-speaking sessions running inside it, via
   `mcp__ccd_session_mgmt__*` tools (list / get / list_events / send_message / search). This is
   scoped per-instance: a session running inside one isolated instance cannot see another

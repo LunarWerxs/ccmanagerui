@@ -62,9 +62,18 @@ export type QueueStatus =
   | 'canceled'
 export type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
 
-/** A Claude Code session discovered on disk (read-only view of the CLI transcript store). */
+/** A supported conversation store. Claude/Codex are JSONL; OpenCode is its shared SQLite DB. */
+export type SessionSource = 'claude' | 'codex' | 'opencode'
+export type SessionSourceScope = 'all' | SessionSource
+
+export function isSessionSource(v: unknown): v is SessionSource {
+  return v === 'claude' || v === 'codex' || v === 'opencode'
+}
+
+/** A session discovered in one of the supported local conversation stores. */
 export interface SessionSummary {
   session_id: string
+  source: SessionSource
   title: string
   cwd: string
   project: string
@@ -79,18 +88,17 @@ export interface SessionSummary {
   /** Live status pulled from our own queue, if this session is scheduled/running under us. */
   queue_status: QueueStatus | null
   /** Claude Desktop instance the session ran in: an `~/.claude-instances` dir name,
-   *  "default" for the non-isolated install, or null for plain CLI / unknown. */
+   *  "default" for the non-isolated install, or null for plain CLI / another provider. */
   instance: string | null
-  /** Claude Desktop's own archive flag, read from its local_*.json metadata. False for plain
-   *  CLI / unmapped sessions (there is no metadata file to carry the flag). */
+  /** Provider archive state: Claude Desktop metadata, Codex's archived rollouts folder, or
+   *  OpenCode's archived timestamp. False when the provider carries no archive signal. */
   archived: boolean
   /** The user's own mark, stored in our `session_marks` table. Mark only: never filters a list. */
   done: boolean
 }
 
-/** How a session list treats Claude Desktop's archive flag. 'hide' is the default because archived
- *  is the large majority of a real store, so including them buries the live work; 'only' exists
- *  because that same ratio makes archived sessions impossible to find in a mixed list. */
+/** How a session list treats provider archive state. 'hide' is the default because archived is the
+ *  large majority of a real store, so including it buries live work; 'only' makes old work findable. */
 export type ArchivedScope = 'hide' | 'include' | 'only'
 
 /** How far back a session list reaches, by last activity. '24h' is the default: the list is a
@@ -124,6 +132,7 @@ export interface TailEvent {
 
 export interface TailResult {
   session_id: string
+  source: SessionSource
   title: string
   cwd: string
   events: TailEvent[]
@@ -133,6 +142,7 @@ export interface TailResult {
 /** One session's hits from an advanced BODY search (server/src/session-search.ts). */
 export interface SessionSearchResult {
   session_id: string
+  source: SessionSource
   cwd: string
   project: string
   match_count: number
@@ -416,6 +426,15 @@ export interface CliInstance {
   associatedDesktopLabel: string | null
   loggedIn: boolean
   lastUsageCheck: UsageSnapshot | null
+  createdAt: number
+}
+
+/** An isolated Codex CLI login rooted at its own CODEX_HOME. */
+export interface CodexInstance {
+  id: string
+  name: string
+  codexHome: string
+  loggedIn: boolean
   createdAt: number
 }
 

@@ -144,7 +144,12 @@ export async function discoverPendingStops(
   const windowMs = opts.windowMs ?? DISCOVERY_WINDOW_MS
   // The file list is already TTL-cached and swept on every /api/sessions call, and the mtime filter
   // runs before any read: on this machine that is ~30 candidates out of ~1200 transcripts.
-  const recent = listTranscriptFiles().filter((f) => now - f.mtime_ms <= windowMs)
+  // Auto-resume is a Claude-only feature. Codex/OpenCode transcripts share the unified session
+  // index for viewing, but neither can be resumed by the Claude dispatcher and OpenCode's virtual
+  // transcript path points at its SQLite store rather than a JSONL event stream.
+  const recent = listTranscriptFiles().filter(
+    (f) => f.source === 'claude' && now - f.mtime_ms <= windowMs,
+  )
   const stops: RateLimitedStop[] = []
 
   for (const tf of recent) {
@@ -163,7 +168,7 @@ export async function discoverPendingStops(
 
     // Only the survivors pay for the full metadata scan (title/cwd via the shared, mtime-cached
     // reader) — that keeps the canonical title logic in exactly one place.
-    const session = await getSession(tf.session_id)
+    const session = await getSession(tf.session_id, 'claude')
     if (!session) continue
     // Archiving a session is the user saying they are done with it. Auto-resuming one anyway would
     // reopen work they deliberately filed away — and, because a resume writes to the transcript, it

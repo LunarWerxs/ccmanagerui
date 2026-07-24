@@ -5,6 +5,7 @@ import rootPkg from '../../package.json'
 
 const HOME = homedir()
 const APPDATA = process.env.APPDATA ?? join(HOME, 'AppData', 'Roaming')
+const LOCALAPPDATA = process.env.LOCALAPPDATA ?? join(HOME, 'AppData', 'Local')
 
 /** App version — the root package.json's, bundled at build time (the JSON import is embedded into
  *  a compiled binary, so `--version` answers without any file on disk). */
@@ -21,8 +22,19 @@ export const IS_COMPILED = !existsSync(join(import.meta.dir, 'config.ts'))
 /** Canonical Claude Code CLI transcript store: <home>/.claude/projects/<encoded-cwd>/<session-id>.jsonl */
 export const CLAUDE_PROJECTS_ROOT = join(HOME, '.claude', 'projects')
 
-/** Optional desktop-app session metadata store (nicer titles / model / effort), enriches when present. */
-export const DESKTOP_SESSIONS_ROOT = join(APPDATA, 'Claude', 'claude-code-sessions')
+/** Codex stores active rollouts in date folders and archived rollouts in a flat sibling folder. */
+export const CODEX_HOME = process.env.CCMANAGERUI_CODEX_HOME?.trim() || join(HOME, '.codex')
+export const CODEX_SESSIONS_ROOT = join(CODEX_HOME, 'sessions')
+export const CODEX_ARCHIVED_SESSIONS_ROOT = join(CODEX_HOME, 'archived_sessions')
+
+/** OpenCode CLI and Desktop share this SQLite session store. */
+export const OPENCODE_DB_PATH =
+  process.env.CCMANAGERUI_OPENCODE_DB?.trim() ||
+  join(
+    process.env.XDG_DATA_HOME?.trim() || join(HOME, '.local', 'share'),
+    'opencode',
+    'opencode.db',
+  )
 
 /** Per-user config dir; the running-instance pointer (runtime.json) lives here. */
 export const CONFIG_DIR = process.env.CCMANAGERUI_HOME?.trim() || join(HOME, '.ccmanagerui')
@@ -99,4 +111,26 @@ export function resolveClaudeExe(): string {
     if (existsSync(c)) return c
   }
   return 'claude'
+}
+
+/**
+ * Resolve the Codex CLI. The Microsoft Store/Desktop install keeps version-addressed helper
+ * binaries below LocalAppData, while npm/homebrew installs normally put `codex` on PATH.
+ */
+export function resolveCodexExe(): string {
+  const configured = process.env.CCMANAGERUI_CODEX_PATH?.trim()
+  if (configured) return configured
+
+  const desktopBin = join(LOCALAPPDATA, 'OpenAI', 'Codex', 'bin')
+  if (existsSync(desktopBin)) {
+    const glob = new Bun.Glob('*/codex.exe')
+    const matches = [...glob.scanSync({ cwd: desktopBin, onlyFiles: true })]
+    if (matches.length > 0) return join(desktopBin, matches.sort().at(-1)!)
+  }
+
+  const npmCandidates = [join(APPDATA, 'npm', 'codex.cmd'), join(APPDATA, 'npm', 'codex')]
+  for (const candidate of npmCandidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return 'codex'
 }

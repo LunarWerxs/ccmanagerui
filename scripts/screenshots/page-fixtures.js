@@ -29,6 +29,7 @@
     ['Tidy up CLI help output', 'pico-cli', 'main', 39, 2900, 'work'],
   ].map(([title, p, branch, count, mins, instance], i) => ({
     session_id: `s${i}0000000-0000-4000-8000-00000000000${i}`,
+    source: 'claude',
     title,
     cwd: proj(p),
     project: projKey(p),
@@ -241,6 +242,15 @@
       lastUsageCheck: null,
     },
   ]
+  const codexInstances = [
+    {
+      id: 'codex-1',
+      name: 'work (Codex)',
+      codexHome: 'C:\\Users\\dev\\.ccmanagerui\\codex-instances\\codex-1',
+      loggedIn: true,
+      createdAt: ago(4_320),
+    },
+  ]
 
   const dirFromUsageUrl = (url) => {
     const m = url.match(/\/api\/instances\/([^/]+)\/usage/)
@@ -282,6 +292,7 @@
       () => ({ key: 'cli:cli-1', snapshot: snap(41, null), reason: 'ok' }),
     ],
     [/\/api\/cli-instances/, () => cliInstances],
+    [/\/api\/codex-instances/, () => codexInstances],
     [/\/api\/usage\/cache/, () => usageCache],
     [/\/api\/usage/, () => ({ key: 'acct:1', snapshot: snap(72, 55), reason: 'ok' })],
     [/\/api\/queue/, () => queue],

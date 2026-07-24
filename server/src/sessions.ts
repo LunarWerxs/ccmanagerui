@@ -1,14 +1,21 @@
 import { db } from './db'
 import { sessionMetaMap } from './instance-sessions'
+import { readOpenCodeSession } from './opencode-sessions'
 import {
   decodeProjectKey,
-  eventToTailEvents,
+  eventToTailEventsForSource,
   isCommandWrapperText,
   listTranscriptFiles,
   type TranscriptFile,
   unwrapTaggedText,
 } from './transcript'
-import type { ArchivedScope, QueueStatus, SessionSummary } from './types'
+import type {
+  ArchivedScope,
+  QueueStatus,
+  SessionSource,
+  SessionSourceScope,
+  SessionSummary,
+} from './types'
 
 function toEpoch(ts: unknown): number | null {
   if (typeof ts !== 'string') return null
@@ -39,9 +46,31 @@ interface ScannedMeta {
 const metaCache = new Map<string, ScannedMeta>()
 
 async function scanMeta(tf: TranscriptFile): Promise<ScannedMeta> {
-  const key = `${tf.path}:${tf.mtime_ms}`
+  // OpenCode sessions all point at one database path, and two rows can share a millisecond update
+  // timestamp. Provider + id are therefore part of the cache identity, not just path + mtime.
+  const key = `${tf.source}:${tf.session_id}:${tf.path}:${tf.mtime_ms}`
   const cached = metaCache.get(key)
   if (cached) return cached
+
+  if (tf.source === 'opencode') {
+    const content = readOpenCodeSession(tf.session_id)
+    const textEvents = (content?.events ?? []).filter((event) => event.kind === 'text')
+    const first = textEvents[0]
+    const last = textEvents.at(-1)
+    const meta: ScannedMeta = {
+      title: oneLine(tf.title || first?.text || tf.session_id, 120),
+      cwd: tf.cwd || '',
+      git_branch: null,
+      message_count: content?.messageCount ?? 0,
+      created_at: tf.created_at ?? null,
+      last_activity_at: tf.mtime_ms,
+      last_role: last?.role ?? null,
+      last_text_preview: last ? oneLine(last.text) : null,
+      substantive_turns: textEvents.length,
+    }
+    metaCache.set(key, meta)
+    return meta
+  }
 
   // read up to the last 12 MB — covers effectively every real transcript
   const file = Bun.file(tf.path)
@@ -85,10 +114,19 @@ async function scanMeta(tf: TranscriptFile): Promise<ScannedMeta> {
         continue
     }
     if (typeof ev.cwd === 'string' && !cwd) cwd = ev.cwd
+    if (typeof ev.payload?.cwd === 'string' && !cwd) cwd = ev.payload.cwd
     if (typeof ev.gitBranch === 'string' && ev.gitBranch) gitBranch = ev.gitBranch
 
     const role = ev.message?.role ?? ev.type
-    if (role === 'user' || role === 'assistant') {
+    const tes = eventToTailEventsForSource(tf.source, ev)
+    const isClaudeMessage = role === 'user' || role === 'assistant'
+    const isCodexMessage =
+      tf.source === 'codex' &&
+      ev.type === 'response_item' &&
+      ev.payload?.type === 'message' &&
+      (ev.payload?.role === 'user' || ev.payload?.role === 'assistant')
+    if (isClaudeMessage || isCodexMessage) {
+      if (isCodexMessage && tes.length === 0) continue
       messageCount++
       const t = toEpoch(ev.timestamp)
       if (t !== null) {
@@ -99,10 +137,10 @@ async function scanMeta(tf: TranscriptFile): Promise<ScannedMeta> {
       // the CLI's own resume bookkeeping (isMeta / <synthetic> self-talk). Reading
       // `ev.message.content` straight off the event bypassed all of that, which is exactly how the
       // `isMeta` local-command caveat became the title of 103 of the newest 200 sessions.
-      const tes = eventToTailEvents(ev)
       const real = tes.filter((e) => e.text && !isCommandWrapperText(e.text))
       if (real.length > 0) substantive++
-      if (!firstUser && role === 'user') {
+      const visibleRole = isCodexMessage ? ev.payload.role : role
+      if (!firstUser && visibleRole === 'user') {
         firstUser = real.find((e) => e.kind === 'text')?.text ?? ''
       }
       const textEv = [...tes].reverse().find((e) => e.kind === 'text')
@@ -198,19 +236,21 @@ export async function listSessions(
   instance?: string,
   archived: ArchivedScope = 'hide',
   sinceMs: number | null = null,
+  source: SessionSourceScope = 'all',
 ): Promise<SessionSummary[]> {
   const mmap = sessionMetaMap()
   let files = listTranscriptFiles()
+  if (source !== 'all') files = files.filter((file) => file.source === source)
   if (instance) {
     files = files.filter((f) =>
       instance === 'other'
-        ? !mmap.has(f.session_id)
-        : mmap.get(f.session_id)?.instance === instance,
+        ? f.source === 'claude' && !mmap.has(f.session_id)
+        : f.source === 'claude' && mmap.get(f.session_id)?.instance === instance,
     )
   }
   if (archived !== 'include') {
     const want = archived === 'only'
-    files = files.filter((f) => !!mmap.get(f.session_id)?.archived === want)
+    files = files.filter((f) => (f.archived || !!mmap.get(f.session_id)?.archived) === want)
   }
   if (sinceMs !== null) files = files.filter((f) => f.mtime_ms >= sinceMs)
   files = files.sort((a, b) => b.mtime_ms - a.mtime_ms)
@@ -227,6 +267,7 @@ export async function listSessions(
     if (sinceMs !== null && m.last_activity_at < sinceMs) return null
     return {
       session_id: tf.session_id,
+      source: tf.source,
       title: m.title,
       cwd: m.cwd,
       project: tf.project,
@@ -238,10 +279,10 @@ export async function listSessions(
       last_text_preview: m.last_text_preview,
       size_bytes: tf.size_bytes,
       transcript_path: tf.path,
-      queue_status: qmap.get(tf.session_id) ?? null,
-      instance: mmap.get(tf.session_id)?.instance ?? null,
-      archived: mmap.get(tf.session_id)?.archived ?? false,
-      done: dmap.get(tf.session_id) ?? false,
+      queue_status: tf.source === 'claude' ? (qmap.get(tf.session_id) ?? null) : null,
+      instance: tf.source === 'claude' ? (mmap.get(tf.session_id)?.instance ?? null) : null,
+      archived: tf.archived || (mmap.get(tf.session_id)?.archived ?? false),
+      done: dmap.get(sessionMarkKey(tf.source, tf.session_id)) ?? false,
     }
   }
 
@@ -258,8 +299,17 @@ export async function listSessions(
   return out
 }
 
-export async function getSession(sessionId: string): Promise<SessionSummary | null> {
-  const tf = listTranscriptFiles().find((f) => f.session_id === sessionId)
+export function sessionMarkKey(source: SessionSource, sessionId: string): string {
+  return source === 'claude' ? sessionId : `${source}:${sessionId}`
+}
+
+export async function getSession(
+  sessionId: string,
+  source?: SessionSource,
+): Promise<SessionSummary | null> {
+  const tf = listTranscriptFiles().find(
+    (f) => f.session_id === sessionId && (!source || f.source === source),
+  )
   if (!tf) return null
   const m = await scanMeta(tf)
   const qmap = queueStatusMap()
@@ -267,6 +317,7 @@ export async function getSession(sessionId: string): Promise<SessionSummary | nu
   const meta = sessionMetaMap().get(tf.session_id)
   return {
     session_id: tf.session_id,
+    source: tf.source,
     title: m.title,
     cwd: m.cwd,
     project: tf.project,
@@ -278,9 +329,9 @@ export async function getSession(sessionId: string): Promise<SessionSummary | nu
     last_text_preview: m.last_text_preview,
     size_bytes: tf.size_bytes,
     transcript_path: tf.path,
-    queue_status: qmap.get(tf.session_id) ?? null,
-    instance: meta?.instance ?? null,
-    archived: meta?.archived ?? false,
-    done: dmap.get(sessionId) ?? false,
+    queue_status: tf.source === 'claude' ? (qmap.get(tf.session_id) ?? null) : null,
+    instance: tf.source === 'claude' ? (meta?.instance ?? null) : null,
+    archived: tf.archived || (meta?.archived ?? false),
+    done: dmap.get(sessionMarkKey(tf.source, sessionId)) ?? false,
   }
 }
