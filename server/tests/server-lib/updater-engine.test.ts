@@ -63,10 +63,13 @@ async function advanceRemote(remote: string, version: string): Promise<void> {
   await $`git -C ${remote} -c user.name=S -c user.email=s@s.io commit -q -m ${version}`.quiet();
 }
 
-/** A `bun -e` step that appends `label` to a log file — a real subprocess, no mocking. */
+/** A runtime `-e` step that appends `label` to a log file — a real subprocess, no mocking.
+ *  Use the exact executable running the suite instead of the bare `bun` command: on Windows,
+ *  npm-installed Bun can put only `bun.cmd`/`bun.ps1` on PATH, and the updater's shell fallback
+ *  would then reinterpret the JavaScript argument and strip its quotes. */
 function loggingCmd(logPath: string, label: string): string[] {
   const script = `require("fs").appendFileSync(${JSON.stringify(logPath)}, ${JSON.stringify(label)} + "\\n")`;
-  return ["bun", "-e", script];
+  return [process.execPath, "-e", script];
 }
 
 /** A `bun -e` step that logs, then exits non-zero iff `failFlag` exists on disk. */
@@ -75,7 +78,7 @@ function failableCmd(logPath: string, label: string, failFlag: string): string[]
     `require("fs").appendFileSync(${JSON.stringify(logPath)}, ${JSON.stringify(label)} + "\\n")`,
     `if (require("fs").existsSync(${JSON.stringify(failFlag)})) { console.error("boom"); process.exit(1); }`,
   ].join("; ");
-  return ["bun", "-e", script];
+  return [process.execPath, "-e", script];
 }
 
 /** A `bun -e` step that logs, then exits non-zero on calls whose 1-based call number is in
@@ -89,7 +92,7 @@ function failsOnCallsCmd(logPath: string, label: string, countFile: string, fail
     `fs.appendFileSync(${JSON.stringify(logPath)}, ${JSON.stringify(label)} + "\\n")`,
     `if (${JSON.stringify(failOnCalls)}.includes(n)) { console.error("boom"); process.exit(1); }`,
   ].join("; ");
-  return ["bun", "-e", script];
+  return [process.execPath, "-e", script];
 }
 
 function updaterFor(appRoot: string, installCmd: string[], buildCmd: string[]) {
